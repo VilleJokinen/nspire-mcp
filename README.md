@@ -27,7 +27,7 @@ answer back. Nothing is sent anywhere else.
 
 ## Setup
 
-1. Get the code: `git clone <this repo's URL>` (or download the ZIP and extract it).
+1. Get the code: `git clone https://github.com/VilleJokinen/nspire-mcp` (or download the ZIP and extract it).
 2. In PowerShell, in the project folder, run:
 
    ```powershell
