@@ -61,3 +61,8 @@ skills, for Claude Code for example `~/.claude/skills/nspire-cas/`.
 
 Open `nspire_bridge.tns` (the desktop shortcut does this) and leave it on the
 bridge page. TI-Nspire can be in the background.
+
+## Trademark note
+
+This skill and the `nspire` MCP server are not affiliated with or endorsed by
+Texas Instruments. TI-Nspire is a trademark of Texas Instruments.

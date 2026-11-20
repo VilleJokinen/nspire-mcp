@@ -293,3 +293,7 @@ named mutex).
 All rights reserved. You may download, run and modify this software for your
 own personal, non-commercial use; redistribution and commercial use need
 written permission. See [LICENSE](LICENSE).
+
+Not affiliated with or endorsed by Texas Instruments. TI-Nspire is a
+trademark of Texas Instruments. TI-Nspire software is not included and is
+licensed separately by Texas Instruments.
