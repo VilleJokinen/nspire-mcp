@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
+from nspire_latex import format_answer, plan, run_plan  # noqa: E402
 
 bridge = Bridge()
 
@@ -39,6 +40,14 @@ LATEX_CASES = [
     (r"y''+y=0,\ y(0)=1,\ y'(0)=0", "auto", "y=cos(x)"),
     (r"|x-1| < 3", "auto", "-2<x<4"),
     (r"x^3-6x^2+11x-6", "factor", "(x-3)*(x-2)*(x-1)"),
+    # sent unevaluated, so the CAS (not Python floats) does the arithmetic
+    (r"0.1+0.2", "auto", "0.3"),
+    (r"\frac{1,5}{2}", "auto", "0.75"),
+    (r"\sqrt{8}", "auto", "2*√(2)"),
+    (r"e^{i\pi}", "auto", "-1"),
+    # x is the dependent variable here, so t is the independent one
+    (r"x'=3,\ x(0)=1", "auto", "x=3*t+1"),
+    (r"x'(t)=x(t),\ x(0)=2", "auto", "x=2*ℯ^t"),
 ]
 
 
@@ -46,20 +55,27 @@ def norm(s: str) -> str:
     return s.replace("−", "-").replace(" ", "")
 
 
-def run() -> int:
-    failures = total = 0
+class Report:
+    def __init__(self) -> None:
+        self.failures = self.total = 0
 
-    def report(ok: bool, name: str, detail: str) -> None:
-        nonlocal failures, total
-        total += 1
-        failures += not ok
+    def __call__(self, ok: bool, name: str, detail: str) -> None:
+        self.total += 1
+        self.failures += not ok
         print(f"{'PASS' if ok else 'FAIL'}  {name:<42} {detail}")
 
+
+def cas_checks(report: Report, plans: list) -> list | None:
+    """Everything that needs the bridge; runs inside bridge.session().
+
+    Returns (latex, want, CasRun or exception) for the LaTeX cases, converted
+    after the session, or None if the bridge stopped answering.
+    """
     try:
         st = bridge.ping()
     except BridgeTimeout as e:
         print(f"FAIL  ping  {e}")
-        return 1
+        return None
     cas = st["cas"]
     report(True, "ping", f"api {st['api_level']}, {'CAS' if cas else 'non-CAS'}")
 
@@ -68,7 +84,7 @@ def run() -> int:
             got, err = bridge.eval_one(expr, 5), None
         except BridgeTimeout as e:
             report(False, expr, str(e))
-            return 1
+            return None
         except ValueError as e:
             got, err = None, str(e)
 
@@ -78,25 +94,47 @@ def run() -> int:
             ok = got is not None and norm(got) == norm(want)
             report(ok, expr, repr(got) if err is None else err)
 
+    runs: list = []
     if not cas:
         print("(non-CAS edition: LaTeX cases skipped)")
-    else:
-        from nspire_latex import solve_latex
-        for latex, action, want in LATEX_CASES:
-            try:
-                r = solve_latex(bridge, latex, action, timeout_s=10)
-                ok = norm(r["result"]) == norm(want) and r["result_latex"] is not None
-                report(ok, latex, f"{r['nspire']}  =>  {r['result']}   [{r['result_latex']}]")
-            except BridgeTimeout as e:
-                report(False, latex, str(e))
-                return 1
-            except Exception as e:
-                report(False, latex, f"{type(e).__name__}: {e}")
+        return runs
+    for latex, want, p in plans:
+        if isinstance(p, Exception):
+            runs.append((latex, want, p))
+            continue
+        try:
+            runs.append((latex, want, run_plan(bridge, p, 10)))
+        except BridgeTimeout as e:
+            report(False, latex, str(e))
+            return None
+        except Exception as e:
+            runs.append((latex, want, e))
+    return runs
 
-    print(f"\n{total - failures}/{total} passed")
-    return 1 if failures else 0
+
+def main() -> int:
+    report = Report()
+    plans = []  # translated before the session: no clipboard use
+    for latex, action, want in LATEX_CASES:
+        try:
+            plans.append((latex, want, plan(latex, action)))
+        except Exception as e:
+            plans.append((latex, want, e))
+    runs = bridge.session(lambda: cas_checks(report, plans))
+    if runs is None:
+        return 1
+    for latex, want, run in runs:  # LaTeX conversion after the session
+        if isinstance(run, Exception):
+            report(False, latex, f"{type(run).__name__}: {run}")
+            continue
+        r = format_answer(run)
+        ok = norm(r["result"]) == norm(want) and r["result_latex"] is not None
+        report(ok, latex, f"{r['nspire']}  =>  {r['result']}   [{r['result_latex']}]")
+
+    print(f"\n{report.total - report.failures}/{report.total} passed")
+    return 1 if report.failures else 0
 
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")  # ∫ and − in piped output
-    sys.exit(bridge.session(run))
+    sys.exit(main())

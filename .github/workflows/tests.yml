@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    # The translator and result converter, without TI-Nspire. Windows also
+    # checks that nspire_bridge (pywin32) re-exports nspire_chars.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-latest
+            python: "3.13"
+            extra: --with "pywin32>=306"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: pytest
+        shell: bash
+        run: >
+          uv run --no-project --python ${{ matrix.python }}
+          --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" ${{ matrix.extra }}
+          pytest -q tests

@@ -29,21 +29,9 @@ class BridgeTimeout(Exception):
     pass
 
 
-# The CAS writes some symbols as private-use code points, which render as
-# nothing almost everywhere. Results are converted to readable look-alikes,
-# and those look-alikes are converted back on input.
-NS_E, NS_I, NS_EXP, NS_C, NS_N = "", "", "", "", ""
-_TO_READABLE = str.maketrans({NS_E: "ℯ", NS_I: "𝑖", NS_EXP: "ᴇ", NS_C: "c", NS_N: "n"})
-_FROM_READABLE = str.maketrans({"ℯ": NS_E, "𝑖": NS_I, "ᴇ": NS_EXP})
-
-
-def readable(text: str) -> str:
-    """CAS output -> text a person (or model) can read. ℯ, 𝑖 and ᴇ round-trip as input."""
-    return text.translate(_TO_READABLE)
-
-
-def to_cas_chars(text: str) -> str:
-    return text.translate(_FROM_READABLE)
+# The CAS's private-use characters live in nspire_chars (no pywin32 there, so
+# the LaTeX translator imports on any platform). Re-exported for callers.
+from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable, to_cas_chars  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------- clipboard

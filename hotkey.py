@@ -38,7 +38,7 @@ import winerror  # noqa: E402
 import win32api  # noqa: E402
 
 from nspire_bridge import Bridge, clip_get, clip_set, is_bridge_traffic  # noqa: E402
-from nspire_latex import LatexError, solve_latex  # noqa: E402
+from nspire_latex import LatexError, format_answer, plan, run_plan  # noqa: E402
 
 user32 = ctypes.windll.user32
 WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
@@ -193,13 +193,15 @@ def main():
           file=sys.stderr)
 
     def solve(numeric: bool):
+        latex = ""
         try:
-            latex = clip_get()
-            if not latex or not latex.strip() or is_bridge_traffic(latex):
+            latex = (clip_get() or "").strip()
+            if not latex or is_bridge_traffic(latex):
                 events.put(("error", "Clipboard has no text", "Copy some LaTeX first.", ""))
                 return
-            latex = latex.strip()
-            r = bridge.session(lambda: solve_latex(bridge, latex, "auto", timeout_s=args.timeout))
+            p = plan(latex, "auto")  # bad LaTeX fails here, before the clipboard is used
+            run = bridge.session(lambda: run_plan(bridge, p, args.timeout))
+            r = format_answer(run)   # after the session: the user's clipboard is back meanwhile
             if numeric and r.get("approx"):
                 # numeric hotkey: the decimal answer becomes the main one
                 r = {**r, "exact": r["result"], "result": r["approx"], "result_latex": r.get("approx_latex"),
@@ -213,39 +215,68 @@ def main():
                 copied = "Result text copied to clipboard"
             events.put(("result", latex, r, copied))
         except LatexError as e:
-            events.put(("error", "Couldn't read the LaTeX", str(e), latex if 'latex' in locals() else ""))
+            events.put(("error", "Couldn't read the LaTeX", str(e), latex))
         except Exception as e:
-            events.put(("error", "TI-Nspire error", str(e), latex if 'latex' in locals() else ""))
+            events.put(("error", "TI-Nspire error", str(e), latex))
         finally:
             busy.clear()
 
-    def pump():
+    def show_error(title: str, msg: str, latex: str = ""):
         try:
-            while True:
-                ev = events.get_nowait()
-                if ev[0] == "hotkey":
-                    if ev[1] == QUIT:
-                        popup.close()
-                        hk.stop()
-                        root.quit()
-                        return
-                    if busy.is_set():
-                        continue
-                    busy.set()
-                    popup.show("Solving…", short(clip_get() or "", 120), seconds=0)
-                    threading.Thread(target=solve, args=(ev[1] == APPROX,), daemon=True).start()
-                elif ev[0] == "result":
-                    _, latex, r, copied = ev
-                    detail = (f"≈ {r['approx']}" if r.get("approx")
-                              else f"exact: {r['exact']}" if r.get("exact") else "")
-                    popup.show(f"{r['action']}:  {short(r['nspire'], 140)}", r["result"] or "(empty)",
-                               detail=detail, footer=copied, seconds=15)
-                elif ev[0] == "error":
-                    _, title, msg, latex = ev
-                    popup.show(title, short(msg, 300), footer=short(latex, 120), error=True, seconds=10)
-        except queue.Empty:
-            pass
-        root.after(50, pump)
+            popup.show(title, short(msg, 300), footer=short(latex, 120), error=True, seconds=10)
+        except Exception as e:  # the popup itself failed; don't take the event loop down
+            print(f"{title}: {msg} (popup failed: {e})", file=sys.stderr)
+
+    def start_solve(numeric: bool):
+        busy.set()
+        try:
+            try:
+                preview = short(clip_get() or "", 120)
+            except Exception:  # clipboard locked by another program; solve() retries
+                preview = ""
+            popup.show("Solving…", preview, seconds=0)
+            threading.Thread(target=solve, args=(numeric,), daemon=True).start()
+        except BaseException:
+            busy.clear()  # the worker never started, so it can't clear busy itself
+            raise
+
+    def handle(ev) -> bool:
+        """Handle one event; False once the app should quit."""
+        if ev[0] == "hotkey":
+            if ev[1] == QUIT:
+                popup.close()
+                hk.stop()
+                root.quit()
+                return False
+            if not busy.is_set():
+                start_solve(ev[1] == APPROX)
+        elif ev[0] == "result":
+            _, latex, r, copied = ev
+            detail = (f"≈ {r['approx']}" if r.get("approx")
+                      else f"exact: {r['exact']}" if r.get("exact") else "")
+            popup.show(f"{r['action']}:  {short(r['nspire'], 140)}", r["result"] or "(empty)",
+                       detail=detail, footer=copied, seconds=15)
+        elif ev[0] == "error":
+            _, title, msg, latex = ev
+            show_error(title, msg, latex)
+        return True
+
+    def pump():
+        running = True
+        try:
+            while running:
+                try:
+                    ev = events.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    running = handle(ev)
+                except Exception as e:
+                    show_error("Hotkey error", f"{type(e).__name__}: {e}")
+        finally:
+            # always reschedule, or one failed event would silently stop the hotkey
+            if running:
+                root.after(50, pump)
 
     root.after(50, pump)
     try:

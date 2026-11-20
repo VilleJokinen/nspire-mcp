@@ -4,19 +4,29 @@ parse:   LaTeX --(preprocess, sympy antlr parser, cleanup)--> sympy trees
 plan:    sympy trees + action --> one TI-Nspire command string
 print:   NspirePrinter writes sympy trees in TI-Nspire syntax
 back:    result_to_latex() parses CAS output with sympy and prints LaTeX
+run:     run_plan() evaluates a plan inside bridge.session(); format_answer()
+         converts the results to LaTeX afterwards
+
+Trees are kept unevaluated in both directions: SymPy only reads and writes
+the math, the CAS does all of it. 0.1+0.2 is sent as written, not as
+0.30000000000000004, and a factored CAS result stays factored in LaTeX.
 """
 from __future__ import annotations
 
+import importlib
 import re
 from dataclasses import dataclass, field
 
 import sympy as sp
+from mpmath.libmp import prec_to_dps, to_str as mpf_to_str
 from sympy.core.function import AppliedUndef
+from sympy.core.relational import Relational
 from sympy.parsing.latex import parse_latex
-from sympy.parsing.sympy_parser import parse_expr, standard_transformations
+from sympy.parsing.sympy_parser import auto_number, auto_symbol, factorial_notation, parse_expr
+from sympy.printing.latex import LatexPrinter
 from sympy.printing.str import StrPrinter
 
-from nspire_bridge import NS_C, NS_E, NS_EXP, NS_I, NS_N
+from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable
 
 
 class LatexError(ValueError):
@@ -99,6 +109,45 @@ def _split_top(s: str, seps: tuple[str, ...]) -> list[str]:
     return [p for p in (x.strip() for x in out) if p]
 
 
+_NUM_BEFORE = re.compile(r"(?<![\d.,])\d+$")
+_NUM_AFTER = re.compile(r"\d+(?![\d,]|\.\d)")
+
+
+def _decimal_commas(s: str) -> str:
+    """Finnish/European decimal comma: 1,5 -> 1.5.
+
+    Only where a comma can't separate arguments: at top level and directly
+    inside a {...} group (\\frac{1,5}{2}, x^{0,5}). Inside (...), [...] and
+    \\{...\\} it separates function arguments, coordinates, interval ends or
+    list items, so f(1,5), \\gcd(12,18), (1,5] and \\{1,2\\} stay as they are.
+    Runs such as 1,2,3 are lists, not decimals.
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            pair = s[i:i + 2]
+            if pair == r"\{":
+                stack.append(pair)
+            elif pair == r"\}" and stack:
+                stack.pop()
+            out.append(pair)  # also keeps \\ (row break) and \, in one piece
+            i += 2
+            continue
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}" and stack:
+            stack.pop()
+        elif c == "," and (not stack or stack[-1] == "{") \
+                and _NUM_BEFORE.search(s, 0, i) and _NUM_AFTER.match(s, i + 1):
+            c = "."
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 class _Pre:
     def __init__(self) -> None:
         self.placeholders: dict[str, tuple[str, object]] = {}  # name -> (kind, payload)
@@ -144,9 +193,8 @@ class _Pre:
         s = re.sub(r"\\lg\b", r"\\log_{10}", s)
         s = re.sub(r"\\log\b(?!\s*_)", r"\\log_{10}", s)
         s = self._derivatives(s)
+        s = _decimal_commas(s)  # before matrices, so cells such as 1,5 are converted too
         s = self._matrices(s)
-        # Finnish/European decimal comma between digits at top level: 1,5 -> 1.5
-        s = re.sub(r"(?<=\d),(?=\d)", ".", s) if not re.search(r"[({\[]", s) else s
         rows = self._cases(s)
         pieces: list[str] = []
         for r in rows:
@@ -231,12 +279,69 @@ _FUNC_NAMES = {"f", "g", "h", "F", "G", "H"}
 _RESERVED = {"e", "i", "pi"}
 
 
+_antlr_imported = False
+
+
 def _parse_one(src: str) -> sp.Basic:
+    global _antlr_imported
+    if not _antlr_imported:
+        # Import the parser with evaluation on: importing it builds
+        # sympy.physics.units, which fails inside evaluate(False).
+        try:
+            importlib.import_module("sympy.parsing.latex._parse_latex_antlr")
+        except Exception:
+            pass  # parse_latex below reports what's missing
+        _antlr_imported = True
     try:
-        return parse_latex(src, backend="antlr")
+        # evaluate(False) keeps what the parser builds as written: x=x stays an
+        # equation, -(x-1) isn't distributed, binomial(5,2) isn't computed
+        with sp.evaluate(False):
+            return parse_latex(src, backend="antlr")
     except Exception as e:
         first = str(e).splitlines()[0] if str(e) else type(e).__name__
         raise LatexError(f"Couldn't parse LaTeX {src!r}: {first}") from None
+
+
+def _flat(e: sp.Basic) -> list:
+    """Arguments of an Add/Mul with nested ones of the same kind spliced in."""
+    out = []
+    for a in e.args:
+        out.extend(_flat(a) if a.func is e.func else [a])
+    return out
+
+
+def _flatten(func, args) -> list:
+    out = []
+    for a in args:
+        out.extend(_flat(a) if a.func is func else [a])
+    return out
+
+
+def _mul(args) -> sp.Basic:
+    """Unevaluated product with the parser's artifacts removed: subtraction's
+    -1*5*x becomes -5*x and the 1 in 1*k goes. Nothing else is multiplied."""
+    fs = _flatten(sp.Mul, args)
+    while len(fs) > 1 and fs[0] == sp.S.NegativeOne and fs[1].is_Number:
+        fs = [-fs[1]] + fs[2:]
+    fs = [f for f in fs if f != sp.S.One] or [sp.S.One]
+    return fs[0] if len(fs) == 1 else sp.Mul(*fs, evaluate=False)
+
+
+def _matrix_op(func, args) -> sp.Basic:
+    """Matrix arithmetic stays symbolic too (MatAdd/MatMul/MatPow), for the CAS to do."""
+    try:
+        if func is sp.Add:
+            return sp.MatAdd(*_flatten(sp.MatAdd, args))
+        if func is sp.Mul:
+            fs = [f for f in _flatten(sp.MatMul, args) if f != sp.S.One]
+            return fs[0] if len(fs) == 1 else sp.MatMul(*fs)
+        return sp.MatPow(*args)
+    except Exception as e:
+        raise LatexError(f"Couldn't combine the matrices: {e}") from None
+
+
+def _is_matrix(e) -> bool:
+    return isinstance(e, (sp.MatrixBase, sp.MatrixExpr))
 
 
 def _bound_symbols(e: sp.Basic) -> set[str]:
@@ -249,6 +354,22 @@ def _bound_symbols(e: sp.Basic) -> set[str]:
     return names
 
 
+def _ode_indep(raw, dep: str, all_syms: set[str]) -> str:
+    """Independent variable of an ODE whose LaTeX doesn't name it (no dy/dx)."""
+    dep_fn = re.compile(re.escape(dep) + "'*")
+    for e in raw:  # written as an argument: y'(t) = y(t)
+        for node in sp.preorder_traversal(e):
+            if isinstance(node, AppliedUndef) and dep_fn.fullmatch(node.func.__name__) \
+                    and len(node.args) == 1 and node.args[0].is_Symbol and node.args[0].name != dep:
+                return node.args[0].name
+    others = {s for s in all_syms if s.rstrip("'") != dep}
+    if "x" in others:
+        return "x"
+    if "t" in others:
+        return "t"
+    return "t" if dep == "x" else "x"  # x' = 3 is x(t), never deSolve(...,x,x)
+
+
 def parse(latex: str) -> Parsed:
     pre = _Pre()
     pieces = pre.run(latex)
@@ -256,12 +377,11 @@ def parse(latex: str) -> Parsed:
         raise LatexError("The LaTeX is empty.")
     raw = [_parse_one(p) for p in pieces]
 
-    # matrix placeholders: parse their cells
-    ph_values: dict[str, sp.Basic] = {}
+    # matrix placeholders: parse their cells (cleaned up by walk() below)
+    ph_values: dict[str, tuple[str, sp.ImmutableMatrix]] = {}
     for name, (kind, payload) in pre.placeholders.items():
         if kind in ("matrix", "det"):
-            m = sp.Matrix([[_parse_one(c) for c in row] for row in payload])
-            ph_values[name] = sp.Function("det")(m) if kind == "det" else m
+            ph_values[name] = (kind, sp.ImmutableMatrix([[_parse_one(c) for c in row] for row in payload]))
 
     prime_names = set()
     for e in raw:
@@ -270,7 +390,7 @@ def parse(latex: str) -> Parsed:
             if nm and re.fullmatch(r"[A-Za-z]'+", nm):
                 prime_names.add(nm)
     # primes make an ODE only alongside an equation; a bare f'(x) is a derivative
-    has_rel = any(isinstance(e, sp.core.relational.Relational) for e in raw)
+    has_rel = any(isinstance(e, Relational) for e in raw)
     ode_dep = sorted(prime_names)[0][0] if prime_names and has_rel else None
     all_syms = {s.name for e in raw for s in e.free_symbols}
 
@@ -281,7 +401,9 @@ def parse(latex: str) -> Parsed:
             if isinstance(node, sp.Symbol):
                 n = node.name
                 if n in ph_values:
-                    return ph_values[n]
+                    kind, m = ph_values[n]
+                    m = m.applyfunc(walk)
+                    return sp.Function("det")(m) if kind == "det" else m
                 if n in pre.placeholders:
                     return sp.Symbol(pre.placeholders[n][1])
                 if n not in bound:
@@ -309,15 +431,21 @@ def parse(latex: str) -> Parsed:
                 if not is_func and len(args) == 1 and n not in ("e",):
                     # x(x+1) is a product, not a call
                     sym = {"e": sp.E, "i": sp.I}.get(n, sp.Symbol(n))
-                    return sp.Mul(sym, args[0], evaluate=False)
+                    return _mul([sym, args[0]])
                 return sp.Function(n)(*args)
             if not node.args:
                 return node
             new = [walk(a) for a in node.args]
-            if node.func in (sp.Add, sp.Mul, sp.Pow) and not any(isinstance(a, sp.MatrixBase) for a in new):
-                # arithmetic only: folds 1*5*x and flattens (a+b)+c; integrals,
-                # limits, sums etc. below stay unevaluated for the CAS
-                return node.func(*new)
+            if node.func in (sp.Add, sp.Mul, sp.Pow):
+                # Rebuilt unevaluated: the CAS does the arithmetic, not SymPy
+                # (0.1+0.2, 1/3+0.5, e^(i*pi) and √(8) reach it as written)
+                if any(_is_matrix(a) for a in new):
+                    return _matrix_op(node.func, new)
+                if node.func is sp.Mul:
+                    return _mul(new)
+                if node.func is sp.Add:
+                    return sp.Add(*_flatten(sp.Add, new), evaluate=False)
+                return sp.Pow(*new, evaluate=False)
             try:
                 return node.func(*new, evaluate=False)
             except TypeError:
@@ -327,7 +455,7 @@ def parse(latex: str) -> Parsed:
     exprs = [fix(e) for e in raw]
     indep = pre.ode_indep
     if ode_dep and not indep:
-        indep = "t" if "t" in all_syms and "x" not in all_syms else "x"
+        indep = _ode_indep(raw, ode_dep, all_syms)
     return Parsed(exprs=exprs, ode_dep=ode_dep, ode_indep=indep if ode_dep else None,
                   placeholders=pre.placeholders)
 
@@ -380,46 +508,135 @@ class NspirePrinter(StrPrinter):
         return "undef"
 
     def _print_Float(self, e):
-        s = repr(float(e))
-        if "e" in s:
-            m, x = s.split("e")
-            return f"({m}*10^({int(x)}))"
-        return s
+        # The digits as written (0.1, not 0.1000000000000000055...), in positional
+        # notation: LaTeX decimals are always written that way, and TI-Nspire's
+        # own exponent mark isn't an ASCII e.
+        dps = max(1, prec_to_dps(e._prec))
+        return mpf_to_str(e._mpf_, dps, strip_zeros=True, min_fixed=-10**6, max_fixed=10**6)
 
     def _print_Rational(self, e):
         return f"{e.p}/{e.q}" if e.q != 1 else str(e.p)
 
-    # operators
-    def _wrap(self, e, simple_ok=True):
+    # operators. Trees are unevaluated (see parse), so these print args in the
+    # order written and add only the parentheses TI-Nspire needs. Precedence,
+    # loosest first: relation, + -, * /, negation, ^, atoms.
+    ATOM, POW, NEG, MUL, ADD, REL = 100, 30, 15, 20, 10, 1
+
+    @staticmethod
+    def _inverse_int(x) -> int | None:
+        """n if the exponent x is 1/n (as a Rational or the parser's unevaluated 3^-1)."""
+        if x.is_Rational and x.p == 1 and x.q > 1:
+            return int(x.q)
+        if isinstance(x, sp.Pow) and x.exp == sp.S.NegativeOne and x.base.is_Integer and x.base > 1:
+            return int(x.base)
+        return None
+
+    def _prec(self, e) -> int:
+        if isinstance(e, Relational):
+            return self.REL
+        if isinstance(e, (sp.Add, sp.MatAdd)):
+            return self.ADD
+        if isinstance(e, (sp.Mul, sp.MatMul)):
+            return self.MUL
+        if isinstance(e, sp.Number):
+            if e.is_extended_negative:
+                return self.NEG
+            return self.MUL if e.is_Rational and not e.is_Integer else self.ATOM
+        if isinstance(e, sp.Pow):
+            if self._inverse_int(e.exp):
+                return self.ATOM  # √(b), root(b,n)
+            if e.exp in (sp.S.NegativeOne, -sp.S.Half):
+                return self.MUL   # 1/b
+            return self.POW
+        if isinstance(e, sp.MatPow):
+            return self.POW
+        if isinstance(e, sp.factorial):
+            return self.POW + 1
+        return self.ATOM
+
+    def _paren(self, e, need: int) -> str:
         s = self._print(e)
-        if simple_ok and (e.is_Symbol or (e.is_Integer and e >= 0) or e.is_Function
-                          or isinstance(e, (sp.Matrix, sp.ImmutableMatrix)) or e in (sp.pi, sp.E, sp.I)):
-            return s
-        return f"({s})"
+        return f"({s})" if self._prec(e) < need else s
+
+    def _print_Add(self, e, order=None):
+        out = ""
+        for i, t in enumerate(_flat(e)):
+            s = self._paren(t, self.ADD)
+            if i == 0:
+                out = s
+            elif s.startswith("-"):
+                out += " - " + s[1:]
+            else:
+                out += " + " + s
+        return out
+
+    def _print_Mul(self, e):
+        matrix = isinstance(e, sp.MatMul)  # keep factor order, no denominators
+        neg, num, den = False, [], []
+        for f in _flat(e):
+            if f == sp.S.NegativeOne:
+                neg = not neg
+                continue
+            if f == sp.S.One:
+                continue
+            if not num and not den and isinstance(f, sp.Number) and f.is_extended_negative:
+                neg, f = not neg, -f
+            if not matrix and isinstance(f, sp.Rational) and not f.is_Integer:
+                if f.p != 1:
+                    num.append(sp.Integer(f.p))
+                den.append(sp.Integer(f.q))
+                continue
+            if not matrix and isinstance(f, sp.Pow) and f.exp.is_Number and f.exp.is_extended_negative:
+                k = -f.exp
+                den.append(f.base if k == 1 else sp.Pow(f.base, k, evaluate=False))
+                continue
+            num.append(f)
+
+        def factors(fs):
+            out = []
+            for f in fs:
+                s = self._print(f)
+                if self._prec(f) < self.MUL or (out and s.startswith("-")):
+                    s = f"({s})"
+                out.append(s)
+            return "*".join(out)
+
+        s = factors(num) or "1"
+        if len(den) == 1:
+            s += "/" + self._paren(den[0], self.POW)
+        elif den:
+            s += f"/({factors(den)})"
+        return ("-" if neg else "") + s
+
+    _print_MatAdd = _print_Add
+    _print_MatMul = _print_Mul
 
     def _print_Pow(self, e, rational=False):
         b, x = e.args
-        if isinstance(b, sp.MatrixBase):
-            return f"{self._print(b)}^({self._print(x)})"
-        if x == sp.S.Half:
+        if _is_matrix(b):
+            return f"{self._paren(b, self.ATOM)}^({self._print(x)})"
+        n = self._inverse_int(x)
+        if n == 2:
             return f"√({self._print(b)})"
+        if n:
+            return f"root({self._print(b)},{n})"
         if x == -sp.S.Half:
             return f"1/√({self._print(b)})"
         if x == sp.S.NegativeOne:
-            return f"1/{self._wrap(b)}"
-        if x.is_Rational and x.p == 1 and x.q > 2:
-            return f"root({self._print(b)},{x.q})"
+            return f"1/{self._paren(b, self.POW)}"
         if b == sp.E:
             return f"{NS_E}^({self._print(x)})"
         exp = self._print(x) if (x.is_Symbol or (x.is_Integer and x >= 0)) else f"({self._print(x)})"
-        return f"{self._wrap(b)}^{exp}"
+        return f"{self._paren(b, self.ATOM)}^{exp}"
+
+    _print_MatPow = _print_Pow
 
     def _print_Relational(self, e):
         op = {"==": "=", "!=": "≠", "<=": "≤", ">=": "≥", "<": "<", ">": ">"}[e.rel_op]
         return f"{self._print(e.lhs)}{op}{self._print(e.rhs)}"
 
     def _print_factorial(self, e):
-        return f"{self._wrap(e.args[0])}!"
+        return f"{self._paren(e.args[0], self.ATOM)}!"
 
     def _print_log(self, e):
         if len(e.args) == 1 or e.args[1] == sp.E:
@@ -430,8 +647,9 @@ class NspirePrinter(StrPrinter):
 
     def _print_Function(self, e):
         n = e.func.__name__
-        if isinstance(e, AppliedUndef) and n == self.ode_dep and len(e.args) == 1 \
-                and str(e.args[0]) == self.ode_indep:
+        if isinstance(e, AppliedUndef) and self.ode_dep and len(e.args) == 1 \
+                and str(e.args[0]) == self.ode_indep and re.fullmatch(re.escape(self.ode_dep) + "'*", n):
+            # y(x) and y'(x) are written y and y' in deSolve; y'(0)=1 keeps its point
             return n
         n = _FN_MAP.get(n, n)
         if isinstance(e, AppliedUndef):
@@ -547,7 +765,7 @@ def plan(latex: str, action: str = "auto", var: str | None = None, order: int | 
         raise LatexError(f"Unknown action {action!r}. Use auto or one of: {', '.join(ACTIONS)}.")
     p = parse(latex)
     exprs = p.exprs
-    rels = [e for e in exprs if isinstance(e, sp.core.relational.Relational)]
+    rels = [e for e in exprs if isinstance(e, Relational)]
     user_vars = [v.strip() for v in re.split(r"[,\s]+", var) if v.strip()] if var else []
 
     if action in ("auto", "define") and len(exprs) == 1 and isinstance(exprs[0], sp.Eq) \
@@ -579,7 +797,7 @@ def plan(latex: str, action: str = "auto", var: str | None = None, order: int | 
     if action in ("solve", "csolve", "nsolve") and len(exprs) > 1:
         n = len(exprs)
         vs = user_vars or (free if len(free) <= n else free[:n])
-        body = " and ".join(to_nspire(e if isinstance(e, sp.core.relational.Relational) else sp.Eq(e, 0), p)
+        body = " and ".join(to_nspire(e if isinstance(e, Relational) else sp.Eq(e, 0, evaluate=False), p)
                             for e in exprs)
         vtxt = "{" + ",".join(vs) + "}"
         return Plan(tmpl.format(e=body, v=vtxt), action, f"{desc} for {', '.join(vs)}", vs, p)
@@ -588,8 +806,8 @@ def plan(latex: str, action: str = "auto", var: str | None = None, order: int | 
         body = "{" + ",".join(to_nspire(e, p) for e in exprs) + "}"
     else:
         e = exprs[0]
-        if action in ("solve", "csolve", "nsolve") and not isinstance(e, sp.core.relational.Relational):
-            e = sp.Eq(e, 0)
+        if action in ("solve", "csolve", "nsolve") and not isinstance(e, Relational):
+            e = sp.Eq(e, 0, evaluate=False)
         body = to_nspire(e, p)
     vs: list[str] = []
     if needs_var:
@@ -605,20 +823,38 @@ def plan(latex: str, action: str = "auto", var: str | None = None, order: int | 
 
 # ================================================================ result -> LaTeX
 
-def _log(x, b=None):
-    if b is None or b == sp.E:
-        return sp.log(x)
+def _log(x, b=10, **kw):
+    if b == sp.E:
+        return sp.log(x, **kw)
     return sp.Function(f"log_{{{sp.latex(b)}}}")(x)
 
 
-_OUT_FN = {"arcsin": sp.asin, "arccos": sp.acos, "arctan": sp.atan, "arccot": sp.acot,
+def _root(x, n, **kw):
+    k = sp.Rational(1, n) if n.is_Integer and n != 0 else sp.Pow(n, -1, evaluate=False)
+    return sp.Pow(x, k, evaluate=False)  # shown as \sqrt[n]{x}
+
+
+# Functions the CAS prints, as SymPy classes that only display them (parsing
+# runs with evaluation off). Any other called name, such as limit or
+# derivative in an unevaluated result, becomes an undefined function and is
+# shown, not recomputed.
+_OUT_FN = {"sin": sp.sin, "cos": sp.cos, "tan": sp.tan, "cot": sp.cot, "sec": sp.sec, "csc": sp.csc,
+           "sinh": sp.sinh, "cosh": sp.cosh, "tanh": sp.tanh, "coth": sp.coth, "sech": sp.sech,
+           "csch": sp.csch, "arcsin": sp.asin, "arccos": sp.acos, "arctan": sp.atan, "arccot": sp.acot,
            "arcsec": sp.asec, "arccsc": sp.acsc, "arcsinh": sp.asinh, "arccosh": sp.acosh,
-           "arctanh": sp.atanh, "ln": sp.log, "abs": sp.Abs, "floor": sp.floor, "ceiling": sp.ceiling,
-           "sign": sp.sign, "nCr": sp.binomial, "real": sp.re, "imag": sp.im, "conj": sp.conjugate,
-           "sqrt": sp.sqrt, "exp": sp.exp, "E": sp.E, "I": sp.I, "pi": sp.pi, "oo": sp.oo,
-           "log": lambda x, b=10: _log(x, b), "root": lambda x, n: sp.root(x, n),
-           "max": sp.Max, "min": sp.Min, "Matrix": sp.Matrix}
+           "arctanh": sp.atanh, "ln": sp.log, "log": _log, "exp": sp.exp, "sqrt": sp.sqrt, "root": _root,
+           "abs": sp.Abs, "floor": sp.floor, "ceiling": sp.ceiling, "sign": sp.sign, "nCr": sp.binomial,
+           "real": sp.re, "imag": sp.im, "conj": sp.conjugate, "max": sp.Max, "min": sp.Min,
+           "factorial": sp.factorial, "Matrix": sp.ImmutableMatrix}
+_OUT_CONST = {"E": sp.E, "I": sp.I, "pi": sp.pi, "oo": sp.oo}
+# What parse_expr's generated code may call. No builtins: parse_expr evals.
+_PARSE_GLOBALS = {"__builtins__": {}, "Symbol": sp.Symbol, "Function": sp.Function, "Integer": sp.Integer,
+                  "Float": sp.Float, "Rational": sp.Rational, "Add": sp.Add, "Mul": sp.Mul, "Pow": sp.Pow,
+                  "factorial": sp.factorial}
+_PARSE_TRANSFORMS = (auto_symbol, auto_number, factorial_notation)
+_UNSAFE = re.compile(r"__|['\"\\;:@`]|[A-Za-z_)\]]\s*\.\s*[A-Za-z_]")  # attribute access, strings, ...
 _REL_TEX = {"<=": r"\leq", ">=": r"\geq", "!=": r"\neq", "=": "=", "<": "<", ">": ">"}
+_INV_TRIG = re.compile(r"\b((?:sin|cos|tan|cot|sec|csc)h?)⁻¹\(")
 
 
 def _norm_result(text: str) -> str:
@@ -626,6 +862,7 @@ def _norm_result(text: str) -> str:
     t = re.sub(NS_C + r"(\d+)", r"c_\1", t)
     t = re.sub(NS_N + r"(\d+)", r"n_\1", t)
     t = t.replace(NS_E, "E").replace(NS_I, "I").replace(NS_EXP, "e")
+    t = _INV_TRIG.sub(r"arc\1(", t)  # tan⁻¹(x) -> arctan(x)
     t = t.replace("√(", "sqrt(").replace("π", "pi").replace("∞", "oo").replace("^", "**")
     t = t.replace("≤", "<=").replace("≥", ">=").replace("≠", "!=")
     for g, r in [("θ", "theta"), ("α", "alpha"), ("β", "beta"), ("λ", "lamda"), ("ω", "omega")]:
@@ -657,12 +894,64 @@ def _split_rel(s: str) -> tuple[list[str], list[str]]:
     return parts, ops
 
 
+class _ResultLatex(LatexPrinter):
+    """LaTeX for unevaluated CAS results: the CAS's term order and form, with
+    the signs of the parser's -1*x factors written as subtraction."""
+
+    def __init__(self):
+        super().__init__({"ln_notation": True, "order": "none", "inv_trig_style": "full"})
+
+    @staticmethod
+    def _split_sign(e) -> tuple[bool, sp.Basic]:
+        """(negative?, e without its sign), dropping 1 and -1 factors."""
+        if isinstance(e, sp.Number) and e.is_extended_negative:
+            return True, -e
+        if not isinstance(e, sp.Mul):
+            return False, e
+        neg, rest = False, []
+        for f in _flat(e):
+            if f == sp.S.NegativeOne:
+                neg = not neg
+            elif f != sp.S.One:
+                rest.append(f)
+        if rest and isinstance(rest[0], sp.Number) and rest[0].is_extended_negative:
+            neg, rest[0] = not neg, -rest[0]
+        if not rest:
+            return neg, sp.S.One
+        return neg, rest[0] if len(rest) == 1 else sp.Mul(*rest, evaluate=False)
+
+    def _signed(self, e) -> tuple[bool, str]:
+        neg, rest = self._split_sign(e)
+        if isinstance(rest, sp.Mul):
+            s = super()._print_Mul(rest)
+        else:
+            s = self._print(rest)
+            if isinstance(rest, sp.Add):
+                s = r"\left(" + s + r"\right)"
+        return neg, s
+
+    def _print_Add(self, expr, order=None):
+        tex = ""
+        for i, term in enumerate(_flat(expr)):
+            neg, s = self._signed(term)
+            if i == 0:
+                tex = ("- " if neg else "") + s
+            else:
+                tex += (" - " if neg else " + ") + s
+        return tex
+
+    def _print_Mul(self, expr):
+        if not isinstance(expr, sp.Mul):  # LatexPrinter._print_Pow sends 1/x here
+            return super()._print_Mul(expr)
+        neg, s = self._signed(expr)
+        return ("- " if neg else "") + s
+
+
 def _expr_latex(s: str, ld: dict) -> str:
-    try:
-        e = parse_expr(s, local_dict=ld, transformations=standard_transformations)
-    except Exception:
-        e = parse_expr(s, local_dict=ld, transformations=standard_transformations, evaluate=False)
-    return sp.latex(e, ln_notation=True)
+    with sp.evaluate(False):
+        e = parse_expr(s, local_dict=dict(ld), global_dict=dict(_PARSE_GLOBALS),
+                       transformations=_PARSE_TRANSFORMS, evaluate=False)
+    return _ResultLatex().doprint(e)
 
 
 def _atom_latex(s: str, ld: dict) -> str:
@@ -691,18 +980,18 @@ def result_to_latex(text: str) -> str | None:
         return None
     try:
         norm = _norm_result(t)
-        ld = dict(_OUT_FN)
+        if _UNSAFE.search(norm) or any(ord(c) > 127 and not c.isalpha() for c in norm):
+            return None  # e.g. an unevaluated ∫(...) the CAS hands back
+        ld: dict = {}
         for m in re.finditer(r"[A-Za-z_][A-Za-z_0-9]*", norm):
             n = m.group()
             if n in ld:
                 continue
-            called = norm[m.end():m.end() + 1] == "("
-            if called and n.islower() and callable(getattr(sp, n, None)):
-                ld[n] = getattr(sp, n)           # sin, cos, tanh, ...
-            elif called:
-                ld[n] = sp.Function(n)           # user function f(x)
+            called = norm[m.end():].lstrip().startswith("(")
+            if called:
+                ld[n] = _OUT_FN.get(n) or sp.Function(n)  # sin(x), or f(x) / limit(...) as written
             else:
-                ld[n] = sp.Symbol(n)
+                ld[n] = _OUT_CONST.get(n) or sp.Symbol(n)
         alts = []
         for alt in _split_top(norm, (" or ",)):
             alts.append(r",\quad ".join(_atom_latex(a, ld) for a in _split_top(alt, (" and ",))))
@@ -727,24 +1016,54 @@ def is_exact_numeric(text: str) -> bool:
 
 # ================================================================ run
 
-def solve_latex(bridge, latex: str, action: str = "auto", var: str | None = None,
-                order: int | None = None, point: str | None = None, timeout_s: float = 10) -> dict:
-    """Translate, evaluate on the CAS and convert back. Call inside bridge.session()."""
-    from nspire_bridge import readable
-    p = plan(latex, action, var, order, point)
+@dataclass
+class CasRun:
+    plan: Plan
+    raw: str                       # CAS reply, private-use characters kept
+    approx_raw: str | None = None  # approx() of an exact numeric answer, if it differs
+
+
+def run_plan(bridge, p: Plan, timeout_s: float = 10) -> CasRun:
+    """Evaluate a plan on the CAS, plus approx() of an exact numeric answer.
+
+    Call inside bridge.session(). Only CAS round trips happen here, so the
+    user's clipboard is held no longer than needed; convert with
+    format_answer() after the session.
+    """
     raw = bridge.eval_one(p.command, timeout_s, raw=True)
+    run = CasRun(p, raw)
+    if p.action not in ("approx", "nsolve", "define") and not raw.startswith("[") and is_exact_numeric(readable(raw)):
+        try:
+            ar = bridge.eval_one(f"approx({p.command})", timeout_s, raw=True)
+            if ar != raw:
+                run.approx_raw = ar
+        except Exception:
+            pass
+    return run
+
+
+def format_answer(run: CasRun) -> dict:
+    """{action, nspire, result, result_latex, approx?, approx_latex?} for a CasRun. No bridge use."""
+    p, raw = run.plan, run.raw
     out = {
         "action": p.description,
         "nspire": readable(p.command),
         "result": readable(raw) or ("Done" if p.action == "define" else ""),
         "result_latex": result_to_latex(raw),
     }
-    if p.action not in ("approx", "nsolve", "define") and not raw.startswith("[") and is_exact_numeric(readable(raw)):
-        try:
-            ar = bridge.eval_one(f"approx({p.command})", timeout_s, raw=True)
-            if ar != raw:
-                out["approx"] = readable(ar)
-                out["approx_latex"] = result_to_latex(ar)
-        except Exception:
-            pass
+    if run.approx_raw is not None:
+        out["approx"] = readable(run.approx_raw)
+        out["approx_latex"] = result_to_latex(run.approx_raw)
     return out
+
+
+def solve_latex(bridge, latex: str, action: str = "auto", var: str | None = None,
+                order: int | None = None, point: str | None = None, timeout_s: float = 10) -> dict:
+    """plan(), then run_plan() in a bridge.session() of its own, then format_answer().
+
+    Opens the session itself: don't call it inside bridge.session() (the
+    session lock isn't reentrant). Inside one, use run_plan() instead.
+    """
+    p = plan(latex, action, var, order, point)
+    run = bridge.session(lambda: run_plan(bridge, p, timeout_s))
+    return format_answer(run)
