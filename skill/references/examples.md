@@ -38,14 +38,15 @@ removes `f` so it does not affect later work.
 | LaTeX | action | What runs |
 | --- | --- | --- |
 | `\int_0^1 x e^x\,dx` | auto | evaluate the integral (result `1`) |
-| `x^2-4=0` | auto | `solve(x^2-4=0,x)` |
+| `x^2-4=0` | auto | `solve(x^2 - 4=0,x)` |
 | `\begin{cases}2x+y=5\\x-y=1\end{cases}` | auto | solve the system for `{x,y}` |
 | `\lim_{x\to 0^+} x\ln x` | auto | one-sided limit (result `0`) |
 | `y''+y=0,\ y(0)=0,\ y'(0)=1` | auto | `deSolve(...)` (result `y=sin(x)`) |
 | `\begin{vmatrix}1&2\\3&4\end{vmatrix}` | auto | determinant (result `−2`) |
 | `\sin x` | taylor, order 5, point 0 | Taylor polynomial |
-| `x^4-1` | factor | `factor(x^4-1)` |
-| `f(x)=x^2+1` | auto | `Define f(x)=x^2+1` (stays defined) |
+| `x^4-1` | factor | `factor(x^4 - 1)` |
+| `\sqrt{8}` | auto | `√(8)`, sent as written (result `2*√(2)`) |
+| `f(x)=x^2+1` | auto | `Define f(x)=x^2 + 1` (stays defined) |
 
 Show the user `result_latex` when present; it is ready to paste into a
 document.

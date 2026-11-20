@@ -45,8 +45,15 @@ Retry once, or ask the user to pause that tool.
 ## Odd answers
 
 Variables stored in the bridge document (`a:=5`, `Define f(x)=...`) are
-substituted into later answers. Check by evaluating `a` with `nspire_eval`; clear with
-`DelVar a`. The user may have stored them, or an earlier session may have.
+substituted into later answers. List them with `nspire_vars`. The user may have
+stored them, or an earlier session may have, so ask before deleting any with
+`nspire_clear(["a"])` or `DelVar a`.
+
+## `nspire_status` reports `protocol: 1`
+
+The open `nspire_bridge.tns` has the older bridge script. Everything works, but
+`nspire_eval_batch` sends one request per expression. Suggest the user open the
+current `nspire_bridge.tns` from the nspire-mcp folder.
 
 ## Symbolic input returns an error with a note about CAS
 
@@ -65,3 +72,7 @@ Translate the problem to TI-Nspire syntax yourself and use `nspire_eval`.
 - Wrong page type or wrong kind of document: the menus of the user's
   TI-Nspire version differ from version 6.x, which the tool assumes. Try
   `page_size="handheld"`, which uses a different route.
+- "TI-Nspire window not found" although a window says TI-Nspire: the tool only
+  types into the TI-Nspire CX (CAS) Student or Teacher Software program, never a
+  browser tab or editor with that title. The error names the programs it
+  ignored. Ask the user to open the TI-Nspire software.

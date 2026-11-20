@@ -53,7 +53,7 @@ Pitfalls).
 ## Before the first call: `nspire_status`
 
 Call `nspire_status()` once at the start of a math session. It returns
-`{alive, api_level, cas}`.
+`{alive, api_level, cas, protocol}`.
 
 - `alive: false` means the bridge document is not open or not on its first
   page. Ask the user to open `nspire_bridge.tns` (the "TI-Nspire bridge"
@@ -61,6 +61,9 @@ Call `nspire_status()` once at the start of a math session. It returns
   `NSPIRE BRIDGE  tick N`. Then call `nspire_status` again.
 - `cas: false` means the non-CAS edition: numeric expressions work, symbolic
   ones (solve, factor, integrals with variables) return errors. Tell the user.
+- `protocol: 1` means an older `nspire_bridge.tns`. Everything works, but
+  batches are slower; you can suggest the user open the current one from the
+  nspire-mcp folder.
 
 ## The tools
 
@@ -68,9 +71,13 @@ Call `nspire_status()` once at the start of a math session. It returns
 | --- | --- |
 | `nspire_status()` | Health check. First call; again after any timeout. |
 | `nspire_eval` (expr, timeout_s=5) | One expression in TI-Nspire syntax. Your default tool. |
-| `nspire_eval_batch(exprs, timeout_s=5)` | Several expressions in order, e.g. Define then use. One clipboard session, faster than many single calls. |
+| `nspire_eval_batch(exprs, timeout_s=5)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?}`. |
 | `nspire_notes(steps, title, page_size="computer")` | The user wants the worked solution written into TI-Nspire itself. |
+| `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
+| `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
+
+`timeout_s` is limited to 0.5–120 seconds.
 
 ### `nspire_eval`
 
@@ -111,7 +118,13 @@ e.g. `"t"` or `"x,y"`.
 
 Conventions: `\log` without a base is base 10, `\ln` is natural; `e` and `i`
 are constants unless used as a summation or integration variable; `1,5`
-between digits is a decimal comma.
+between digits is a decimal comma, also inside `{}` groups such as
+`\frac{1,5}{2}`, but not inside `()`, `[]` or `\{\}` (`f(1,5)` and
+`\gcd(12,18)` keep their commas).
+
+The LaTeX is sent as written and the CAS does all the arithmetic, so `nspire`
+(the command run) mirrors the input: `\sqrt{8}` runs as `√(8)`, not `2*√(2)`.
+`result_latex` keeps the CAS's form (a factored result stays factored).
 
 If it reports that the LaTeX could not be parsed, translate it to TI-Nspire
 syntax yourself and use `nspire_eval`. Show the user `result_latex` when it is
@@ -146,24 +159,31 @@ Before calling it:
    finishes.
 
 Every math step is validated through the bridge first; if one fails, nothing
-is typed and the error names the step. If TI-Nspire loses focus it stops,
-leaving a half-built page, rather than typing anywhere else. The new document
-is unsaved; tell the user to save it if they want to keep it. Use
+is typed and the error names the step. What validation changes in the bridge
+document is undone afterwards. The new document does not have the bridge
+document's stored variables: define everything a step needs in an earlier step.
+The result's `warnings` lists steps that read a stored variable (their page
+result may differ) and anything validation couldn't restore; pass them on.
+
+TI-Nspire is found by its program, never by window title, and `window` in the
+result says which window was used. If TI-Nspire loses focus it stops, leaving
+a half-built page, rather than typing anywhere else. The new document is
+unsaved; tell the user to save it if they want to keep it. Use
 `page_size="handheld"` if they will move the document to a physical calculator.
 
 ## Pitfalls
 
 - **Stored variables persist.** Definitions (`a:=5`, `Define f(x)=...`) stay in
   the open bridge document and are substituted into later answers. If a result
-  looks wrong (a number where you expected a symbol), check for stored
-  variables with `nspire_eval` and clear them with `DelVar a`. Prefer names
-  the user is unlikely to reuse, and clear your own definitions when done if
-  they could confuse later work.
+  looks wrong (a number where you expected a symbol), list stored variables
+  with `nspire_vars`. Delete your own definitions with `nspire_clear(["f"])` or
+  `DelVar f`; ask before deleting anything you didn't define, and never clear
+  everything without the user's OK. Prefer names the user is unlikely to reuse.
 - **The clipboard is the transport.** Each call briefly replaces the user's
-  clipboard text and restores it afterwards (well under a second). Tell the
-  user not to copy anything while a call runs. Avoid long loops of calls while
-  they are working; batch instead. Non-text clipboard contents, such as an
-  image, are not restored.
+  clipboard and puts it back afterwards (well under a second), including images,
+  HTML and copied files, and keeps the traffic out of Win+V history. A copy the
+  user makes during a call is kept. Still, avoid long loops of calls while they
+  are working; batch instead.
 - **The bridge page must stay open and on its first page.** The document
   `nspire_bridge.tns` must be open in TI-Nspire, showing
   `NSPIRE BRIDGE  tick N` with N counting up. TI-Nspire may be in the

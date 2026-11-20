@@ -56,8 +56,16 @@ hotkey.
 - **The clipboard is the transport.** Every request briefly replaces the user's
   clipboard and restores it afterwards. Don't run long test loops while the user
   is working, and never leave a `NSPIRE_IN:`/`NSPIRE_OUT:` string on their
-  clipboard. Use `bridge.session(...)` from `nspire_bridge.py`, which saves and
-  restores it.
+  clipboard. Use `bridge.session(...)` from `nspire_bridge.py`. It saves every
+  format it can copy (text, HTML, images, files) and puts it back, keeps a copy the
+  user makes during a request, keeps bridge traffic out of Win+V history, and cleans
+  up a reply that arrives after a timeout. `clip_set()` inside a session counts as
+  temporary and is put back too.
+- **Bridge script protocol.** `nspire_status` reports `protocol`: 2 is the current
+  `bridge.lua` (batch requests, late replies held back), 1 an older
+  `nspire_bridge.tns`. The Python side works with both. A change to `bridge.lua` only
+  takes effect once the user pastes it into the document in TI-Nspire (README,
+  "Rebuilding the bridge document"); ask them to, and commit the saved `.tns`.
 - **Don't drive the TI-Nspire window** (keystrokes, clicks) unless the user asks.
   Nothing in setup needs it. The `nspire_notes` tool does type into it; only call
   it when the user wants a Notes page, and tell them not to use the keyboard
@@ -66,8 +74,10 @@ hotkey.
   `served` doesn't, TI-Nspire has stopped seeing clipboard changes. Ask the user
   to close and reopen `nspire_bridge.tns`; there's no fix from the Python side.
 - **Variables persist** in the open document (`a:=5`), and are substituted into
-  answers. If a self-test case fails with a strange result, check with
-  `nspire_eval` for stored variables before suspecting the code.
+  answers. If a self-test case fails with a strange result, list stored variables
+  with `nspire_vars` before suspecting the code. `nspire_clear` deletes variables
+  and can't be undone: ask the user before using it, and never clear everything
+  without their OK.
 - **First MCP connection timing out** means dependencies were still installing.
   `setup.ps1` pre-installs them; otherwise run `uv sync --script server.py`.
 - Everything runs through `uv run --script <file>`; each script declares its own
@@ -75,9 +85,18 @@ hotkey.
 
 ## Working on the code
 
-- `nspire_bridge.py`: clipboard transport (`Bridge.session`, `Bridge.eval_one`).
+- `nspire_bridge.py`: clipboard transport (`Bridge.session`, `Bridge.eval_one`,
+  `Bridge.eval_batch`, `Bridge.list_vars`, `Bridge.clear_vars`). `timeout_s` is
+  clamped to 0.5–120 s here.
+- `nspire_chars.py`: TI-Nspire's private-use characters (`NS_*`), `readable()`,
+  `to_cas_chars()`. No pywin32, so the translator imports on any OS;
+  `nspire_bridge` re-exports them.
 - `nspire_latex.py`: `plan()` turns LaTeX into a TI-Nspire command without touching
-  the bridge, so you can test translation offline; `solve_latex()` runs it.
+  the bridge, so you can test translation offline. `run_plan()` evaluates a plan
+  inside `bridge.session()`, and `format_answer()` converts the result to LaTeX
+  after the session. `solve_latex()` does all three and opens its own session, so
+  don't call it inside one (the lock isn't reentrant). Trees stay unevaluated:
+  SymPy only reads and writes the math, and the CAS does all arithmetic.
 - `server.py`: MCP tools. Keep heavy imports (SymPy) lazy: the client times out a
   server that is slow to answer `initialize`.
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
@@ -96,5 +115,14 @@ hotkey.
   (no menu window, no Windows menu mode), so the check compares sampled pixels of
   the window's top-left area before and after (`menu_area` in `nspire_keys.py`). Never send Esc to back out: if focus
   has moved, it lands in another program (in Claude it cancels the command).
-- Test against the real CAS with `selftest.py`; add a case to `LATEX_CASES` when
-  you change the translator.
+  The window is chosen once per run by its process (`is_nspire_image`,
+  `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
+  throughout. Validation undoes what it changes in the bridge document and warns
+  about steps that read variables the new document won't have.
+- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa pytest -q tests`
+  (CI runs them on Ubuntu and Windows; tests needing pywin32 or lupa are skipped
+  without them). When you change the translator, add the expected command to
+  `tests/test_plan.py`, and a case to `LATEX_CASES` in `selftest.py` when the
+  result needs the real CAS.
+- After changing a script's PEP 723 header, run `uv lock --script <file>` so its
+  `.lock` file matches.

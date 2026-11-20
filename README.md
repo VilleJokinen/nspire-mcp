@@ -73,11 +73,15 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 
 | Tool | Does |
 | --- | --- |
-| `nspire_status()` | ping: `alive`, `api_level`, `cas` |
+| `nspire_status()` | ping: `alive`, `api_level`, `cas`, `protocol` (2 = current bridge script, 1 = older `.tns`) |
 | `nspire_eval(expr, timeout_s=5)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)` |
-| `nspire_eval_batch(exprs, timeout_s=5)` | several in order: `[{expr, ok, result \| error}]`; stops at the first timeout |
+| `nspire_eval_batch(exprs, timeout_s=5)` | several in order: `[{expr, ok, result \| error}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?}` |
 | `nspire_notes(steps, title, page_size="computer")` | write a worked solution onto a new TI-Nspire Notes page (see below) |
+| `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
+| `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
+
+`timeout_s` is limited to 0.5–120 s.
 
 ### Worked solutions on a Notes page
 
@@ -91,12 +95,20 @@ The page is computer size (fills the window) by default. Ask for a handheld-size
 page (`page_size="handheld"`) if you'll move the document to a calculator.
 
 - Every math step is first checked through the bridge; if one fails, nothing is
-  typed. Names the check defines (`Define f(x)=…`, `h:=3`) are deleted from the
-  bridge document again unless they existed before; an existing variable that a
-  step reassigns keeps the new value there.
+  typed. What the check changes in the bridge document is undone afterwards: new
+  names (`Define f(x)=…`, `f(x):=…`, `h:=3`, `3→h`) are deleted, and variables that
+  already existed get their old values back. An existing function that a step
+  redefines can't be read back, so that only produces a warning.
+- The new document doesn't have the variables stored in the bridge document. A step
+  that uses one (and doesn't define it in an earlier step) gets a warning in the
+  result, because the page may show something different from the checked result.
 - It **types into the TI-Nspire window**, about a second per step, and brings it to
   the front. Don't type or click while it runs. If TI-Nspire loses focus it stops
   (leaving the page half built) rather than typing anywhere else.
+- The window is found by its program (`TI-Nspire … Student/Teacher Software.exe`),
+  never by its title, so a browser tab or editor named "TI-Nspire" is never typed
+  into. With several TI-Nspire windows open, the one in front is used. The result
+  says which window it used: `{document, window, steps, warnings, note}`.
 - The bridge document stays open on its page; the new document is unsaved.
 - It navigates TI-Nspire's menus by position, not by name, so it works in any UI
   language, but it assumes the layout of CX CAS Student/Teacher Software 6.x:
@@ -151,8 +163,15 @@ inverse rref eigenvalues eigenvectors desolve define`.
 Conventions: `\log` without a base is base 10 (as on the calculator), `\ln` is
 natural; `e` and `i` are the constants unless used as a sum/integral variable;
 `x(x+1)` is a product (only `f g h F G H` are functions); `1,5` between digits
-is a decimal comma. Exact numeric answers also get an `approx`. Variables stored
-in the open document (e.g. `a:=5`) are substituted, so `DelVar a` if answers look odd.
+is a decimal comma, also inside `{}` groups such as `\frac{1,5}{2}`, but not inside
+`()`, `[]` or `\{\}`, where commas separate arguments (`f(1,5)`, `\gcd(12,18)`).
+Exact numeric answers also get an `approx`. Variables stored in the open document
+(e.g. `a:=5`) are substituted, so check with `nspire_vars` (or `DelVar a`) if answers
+look odd.
+
+The LaTeX reaches the CAS as written: SymPy only reads and writes the math, and
+TI-Nspire does all the arithmetic (`\sqrt{8}` is sent as `√(8)`, `0.1+0.2` as
+`0.1 + 0.2`). `result_latex` keeps the CAS's form, so a factored answer stays factored.
 
 ## Manual setup
 
@@ -218,9 +237,21 @@ uv run --script selftest.py
 ```
 
 Pings, then checks `2+2`, `factor`, `solve`, `∫`, `cSolve`, a deliberate syntax error,
-and ten LaTeX problems (integral, limit, sum, system, determinant, ODE…).
-On the non-CAS edition the symbolic cases pass if they return a clean error, and
-the LaTeX cases are skipped.
+and a set of LaTeX problems (integral, limit, sum, system, determinant, ODEs, decimal
+comma…). On the non-CAS edition the symbolic cases pass if they return a clean error,
+and the LaTeX cases are skipped.
+
+### Offline tests (no TI-Nspire needed)
+
+```powershell
+uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa pytest -q tests
+```
+
+They cover the LaTeX translator and result converter, the Notes-page safety checks,
+and the clipboard transport (the real `bridge.lua` and the older protocol-1 script run
+in [lupa](https://pypi.org/project/lupa/) against a fake clipboard; your clipboard is
+never touched). Without pywin32 or lupa, the tests that need them are skipped.
+GitHub Actions runs them on Ubuntu and Windows (`.github/workflows/tests.yml`).
 
 ## Troubleshooting
 
@@ -239,7 +270,12 @@ the LaTeX cases are skipped.
   it; retry, or pause that tool.
 - **Hotkey does nothing:** another program owns the key combination. Start `hotkey.py`
   in a terminal to see which keys failed, and pick others with `--hotkey`.
-- **Odd answers:** variables stored in the document are substituted. `DelVar` them.
+- **Odd answers:** variables stored in the document are substituted. List them with
+  `nspire_vars` (or ask Claude), and `DelVar` the ones you don't want.
+- **`nspire_status` says `protocol: 1`:** you have an older `nspire_bridge.tns` (or a
+  copy of it). Everything still works, but batches are slower and late replies are
+  cleaned up from the Python side. Open the current `nspire_bridge.tns` from this folder,
+  or update the script in yours (see [Rebuilding the bridge document](#rebuilding-the-bridge-document)).
 - **Non-CAS edition:** symbolic input returns a TI-Nspire error with a note; numeric
   expressions work.
 
@@ -248,13 +284,23 @@ the LaTeX cases are skipped.
 ### Clipboard caveat
 
 While a request runs (well under a second) the clipboard holds the request,
-then the reply, then your old text again. Don't copy anything yourself during
-that window, or your copy may be lost or the request may time out.
-The clipboard text is saved before each call and restored after (only if the
-clipboard still holds bridge traffic, so a copy you made meanwhile wins).
-Non-text clipboard contents, such as an image, are not restored. One request
-is in flight at a time, across processes (the MCP server and the hotkey share a
-named mutex).
+then the reply, then your old contents again:
+
+- Everything on the clipboard that can be copied as bytes is saved before each call
+  and put back after: text, HTML, RTF, images, copied files. "Virtual" files, such as
+  Outlook attachments, can't be put back.
+- It's put back only if the clipboard still holds the bridge's own writes. A copy you
+  make while a request runs is kept: it is what gets put back, and the request is sent
+  again.
+- Requests and replies are marked so they stay out of Win+V clipboard history and cloud
+  clipboard sync.
+- If the CAS takes longer than the timeout, its late reply can't overwrite your
+  clipboard: the current bridge script only writes a reply while its request is still
+  on the clipboard. With an older `.tns`, a background thread puts your clipboard back
+  over the late reply for two minutes afterwards.
+
+One request is in flight at a time, across processes (the MCP server and the hotkey
+share a named mutex).
 
 ### Protocol
 
@@ -263,10 +309,17 @@ named mutex).
 | `NSPIRE_IN:<id>:<expr>` | evaluate `expr` |
 | `NSPIRE_IN:<id>:__PING__` | health check |
 | `NSPIRE_OUT:<id>:OK:<result>` | result, exactly as the CAS writes it |
-| `NSPIRE_OUT:<id>:OK:PONG:<apiLevel>:<cas\|nocas>` | ping reply |
+| `NSPIRE_OUT:<id>:OK:PONG:<apiLevel>:<cas\|nocas>:<protocol>` | ping reply (protocol 1 scripts omit the last field) |
+| `NSPIRE_IN:<id>:]BATCH:<e1>;<e2>;…` | protocol 2: evaluate several expressions in order |
+| `NSPIRE_OUT:<id>:OK:BATCH:<n>:<s1><r1>;<s2><r2>;…` | batch reply; `s` is `O` (result) or `E` (error message) |
 | `NSPIRE_OUT:<id>:ERR:<message>` | e.g. `error 910 (syntax error)` |
 
-`<id>` must not contain `:`. Each id is answered once.
+`<id>` must not contain `:`. Each id is evaluated once. In batches, `%`, `;`, CR and LF
+are written as `%25`, `%3B`, `%0D`, `%0A`; the leading `]` makes a protocol 1 script
+reject a batch as a syntax error instead of running part of it. A protocol 2 script
+writes a reply only while its request is still on the clipboard, and resends the kept
+reply (without evaluating again) if the same request is posted again. Error messages
+come from the error-code list in TI's Reference Guide; unknown codes are reported by number.
 
 - Negative numbers come back with the Unicode minus `−` (U+2212), e.g. `x=−2 or x=2`.
 - The CAS writes ℯ, 𝑖, the exponent mark ᴇ and the constants c1/n1 as private-use
@@ -279,6 +332,7 @@ named mutex).
 | --- | --- |
 | `bridge.lua` | the TI-Nspire side (inside `nspire_bridge.tns`) |
 | `nspire_bridge.py` | clipboard transport shared by everything below |
+| `nspire_chars.py` | TI-Nspire's private-use characters (no pywin32, so the translator runs anywhere) |
 | `nspire_latex.py` | LaTeX → TI-Nspire syntax → result → LaTeX (SymPy) |
 | `nspire_notes.py` | builds a Notes page of text and math boxes |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
@@ -287,6 +341,9 @@ named mutex).
 | `launch.py` | opens the document and starts the hotkey (desktop shortcut) |
 | `setup.ps1` | one-step setup |
 | `selftest.py` | end-to-end check |
+| `*.py.lock` | pinned dependencies for each script (`uv lock --script <file>` after changing its header) |
+| `tests/` | offline test suite; `.github/workflows/tests.yml` runs it |
+| `skill/` | the `nspire-cas` agent skill; `skill/build.ps1` packs it into `skill.zip` |
 
 ## License
 
