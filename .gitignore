@@ -1,1 +1,13 @@
 __pycache__/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Built marketplace upload (made by skill/build.ps1)
+skill.zip
+
+# Per-machine Claude Code settings
+.claude/settings.local.json
