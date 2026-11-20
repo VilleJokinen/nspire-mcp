@@ -1,0 +1,34 @@
+Copyright (c) 2026 Ville Jokinen. All rights reserved.
+
+Personal use permission
+
+You may download, install and run this software on computers you use, for
+your own personal, non-commercial use. You may modify your own copy for that
+use (for example, to make the bridge script work with your TI-Nspire
+version).
+
+You may not, without the copyright holder's written permission:
+
+- redistribute, publish, sublicense or sell this software or any modified
+  version of it, in whole or in part;
+- use it, or any modified version of it, as part of a product or service
+  offered to others.
+
+Forking this repository on GitHub, as allowed by GitHub's Terms of Service,
+does not grant any rights beyond those above.
+
+Third-party software
+
+This software uses third-party packages (installed separately when you run
+it) that are covered by their own licenses. TI-Nspire software is not
+included; it is a product of Texas Instruments and must be licensed from
+Texas Instruments.
+
+No warranty
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

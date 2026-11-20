@@ -287,3 +287,9 @@ named mutex).
 | `launch.py` | opens the document and starts the hotkey (desktop shortcut) |
 | `setup.ps1` | one-step setup |
 | `selftest.py` | end-to-end check |
+
+## License
+
+All rights reserved. You may download, run and modify this software for your
+own personal, non-commercial use; redistribution and commercial use need
+written permission. See [LICENSE](LICENSE).
