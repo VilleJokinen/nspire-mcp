@@ -31,7 +31,11 @@ mcp = FastMCP("nspire")
 
 @mcp.tool()
 async def nspire_status() -> dict:
-    """Ping the TI-Nspire bridge. Returns alive, the Lua API level, and whether the CAS is available."""
+    """Ping the TI-Nspire bridge.
+
+    Returns alive, the Lua API level, whether the CAS is available, and the bridge
+    script's protocol (2 = batch support; 1 = an older nspire_bridge.tns).
+    """
     def work():
         try:
             return bridge.ping()
@@ -62,25 +66,47 @@ async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5) -> list[dict
     """Evaluate expressions in order. Returns one {expr, ok, result | error} per input.
 
     Definitions made by earlier expressions are visible to later ones and persist
-    in the open document's problem. If the bridge stops answering, the remaining
-    expressions are skipped.
+    in the open document's problem. timeout_s is per expression. If the bridge stops
+    answering, the remaining expressions are skipped. Much faster than separate
+    nspire_eval calls: with a current nspire_bridge.tns the whole list is one request.
     """
     def work():
-        out: list[dict] = []
-        dead: str | None = None
-        for e in exprs:
-            if dead:
-                out.append({"expr": e, "ok": False, "error": "skipped: " + dead})
-                continue
-            try:
-                out.append({"expr": e, "ok": True, "result": bridge.eval_one(e, timeout_s)})
-            except BridgeTimeout as t:
-                dead = str(t)
-                out.append({"expr": e, "ok": False, "error": dead})
-            except Exception as x:
-                out.append({"expr": e, "ok": False, "error": str(x)})
-        return out
+        return bridge.eval_batch(exprs, timeout_s)
     log.info("batch of %d", len(exprs))
+    return await asyncio.to_thread(bridge.session, work)
+
+
+@mcp.tool()
+async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[dict]:
+    """List the variables and functions stored in the open document's problem (getVarInfo()).
+
+    Returns one {name, type, library, locked, value?} per variable. type is TI-Nspire's,
+    e.g. NUM, EXPR, LIST, MAT, STR, FUNC, PRGM. With values=True, value is the stored value
+    of NUM/EXPR/LIST/MAT/STR variables, cut to 300 characters. Stored variables are
+    substituted into every result (x:=3 turns solve(x^2=4,x) into false), so check here
+    when an answer looks oddly specific. Empty list: nothing stored.
+    """
+    def work():
+        return bridge.list_vars(values, timeout_s)
+    log.info("vars")
+    return await asyncio.to_thread(bridge.session, work)
+
+
+@mcp.tool()
+async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> dict:
+    """DESTRUCTIVE: delete stored variables and functions from the open document's problem.
+
+    Runs DelVar on each name, e.g. names=["a", "f"] (bare names: "f", not "f(x)").
+    With no names, EVERY variable and function stored in the problem is deleted,
+    including ones the user defined by hand. This can't be undone (only by closing the
+    document without saving, which loses everything since the last save). Prefer
+    deleting specific names; ask the user before clearing everything or deleting
+    variables you didn't create. Returns {deleted: [names], errors: [{name, error}]};
+    locked variables can't be deleted and show up in errors.
+    """
+    def work():
+        return bridge.clear_vars(names, timeout_s)
+    log.info("clear %s", names if names else "all")
     return await asyncio.to_thread(bridge.session, work)
 
 
