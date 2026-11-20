@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import ntpath
+import re
 import time
+from dataclasses import dataclass
 
 import win32con
 import win32gui
@@ -75,20 +78,115 @@ def type_text(text: str, per_char: float = 0.004) -> None:
         time.sleep(per_char)
 
 
-def find_nspire_window() -> int:
-    found: list[int] = []
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+# TI-Nspire CX (CAS) Student / Teacher Software: "TI-Nspire CX CAS Student Software.exe",
+# normally under Program Files\TI Education. Matched by the exe's name, not its folder, so a
+# custom install location works. "TI-Nspire Computer Link" and similar don't match.
+_NSPIRE_EXE = re.compile(r"^TI-Nspire\b.*\b(?:Student|Teacher)\s+Software\.exe$", re.IGNORECASE)
+MAIN_WINDOW_CLASS = "SunAwtFrame"  # TI-Nspire is a Java (AWT/Swing) app; its main window is a Frame
+
+
+@dataclass(frozen=True)
+class WinInfo:
+    hwnd: int
+    title: str
+    cls: str
+    pid: int
+    image: str | None  # full path of the owning process's exe, None if it couldn't be read
+
+
+def is_nspire_image(path: str | None) -> bool:
+    """True if path is the exe of the TI-Nspire desktop software."""
+    return bool(path) and bool(_NSPIRE_EXE.match(ntpath.basename(path)))
+
+
+def process_image(pid: int) -> str | None:
+    """Full path of the exe a process runs, or None (process gone, or access denied)."""
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wt.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return None
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def list_windows() -> list[WinInfo]:
+    """Visible top-level windows with a title, front to back."""
+    out: list[WinInfo] = []
+    images: dict[int, str | None] = {}
 
     def cb(h, _):
-        if win32gui.IsWindowVisible(h) and "TI-Nspire" in win32gui.GetWindowText(h):
-            found.append(h)
+        if not win32gui.IsWindowVisible(h):
+            return
+        title = win32gui.GetWindowText(h)
+        if not title:
+            return
+        pid = win32process.GetWindowThreadProcessId(h)[1]
+        if pid not in images:
+            images[pid] = process_image(pid)
+        out.append(WinInfo(h, title, win32gui.GetClassName(h), pid, images[pid]))
     win32gui.EnumWindows(cb, None)
-    if not found:
-        raise RuntimeError("TI-Nspire window not found. Is the TI-Nspire app open?")
-    return found[0]
+    return out
 
 
-def focus_nspire() -> int:
-    h = find_nspire_window()
+def pick_nspire_window(windows: list[WinInfo], foreground: int = 0) -> tuple[WinInfo, list[WinInfo]]:
+    """Choose the TI-Nspire main window among windows. Returns (chosen, all candidates).
+
+    Only windows of a TI-Nspire process count; the title is never trusted (a browser tab
+    or editor can say "TI-Nspire" too). Main frames (SunAwtFrame) beat its dialogs and
+    popups. With several candidates (Student and Teacher both open, say) the one in front
+    wins, otherwise the lowest handle, so the choice is the same every time.
+    """
+    mine = [w for w in windows if is_nspire_image(w.image)]
+    frames = [w for w in mine if w.cls == MAIN_WINDOW_CLASS]
+    cands = frames or [w for w in mine if "TI-Nspire" in w.title]
+    if not cands:
+        others = sorted({ntpath.basename(w.image or "?") for w in windows if "TI-Nspire" in w.title})
+        hint = (f" (Ignored window(s) of other programs with 'TI-Nspire' in the title: {', '.join(others)}.)"
+                if others else "")
+        raise RuntimeError("TI-Nspire window not found. Is the TI-Nspire CX (CAS) Student or Teacher "
+                           "Software open?" + hint)
+    cands = sorted(cands, key=lambda w: (w.hwnd != foreground, w.hwnd))
+    return cands[0], cands
+
+
+def find_nspire_window() -> int:
+    return find_nspire_windows()[0].hwnd
+
+
+def find_nspire_windows() -> list[WinInfo]:
+    """Candidate TI-Nspire main windows, the one to use first."""
+    return pick_nspire_window(list_windows(), win32gui.GetForegroundWindow())[1]
+
+
+def describe_window(hwnd: int) -> dict:
+    """Which window is being driven, for the tool result."""
+    pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+    image = process_image(pid)
+    return {"hwnd": hwnd, "title": win32gui.GetWindowText(hwnd),
+            "process": ntpath.basename(image) if image else None}
+
+
+def focus_nspire(hwnd: int | None = None) -> int:
+    """Bring a TI-Nspire window to the front. Pass the hwnd chosen at the start of a run."""
+    h = hwnd or find_nspire_window()
+    if not win32gui.IsWindow(h):
+        raise RuntimeError("The TI-Nspire window was closed.")
+    if not is_nspire_image(process_image(win32process.GetWindowThreadProcessId(h)[1])):
+        raise RuntimeError("Refusing to type into a window that doesn't belong to the TI-Nspire software.")
     if win32gui.IsIconic(h):
         win32gui.ShowWindow(h, win32con.SW_RESTORE)
     if win32gui.GetForegroundWindow() == h:
@@ -172,10 +270,13 @@ def menu_changed(before: bytes, after: bytes) -> int:
 def foreground_is(hwnd: int) -> bool:
     """True if the foreground window belongs to hwnd's process (its menus and popups count)."""
     fg = win32gui.GetForegroundWindow()
-    if not fg:
+    if not fg or not win32gui.IsWindow(hwnd):
         return False
     return win32process.GetWindowThreadProcessId(fg)[1] == win32process.GetWindowThreadProcessId(hwnd)[1]
 
 
-def window_title() -> str:
-    return win32gui.GetWindowText(find_nspire_window())
+def window_title(hwnd: int) -> str:
+    """Title of the given window (the one chosen at the start; never searches again)."""
+    if not win32gui.IsWindow(hwnd):
+        raise RuntimeError("The TI-Nspire window was closed.")
+    return win32gui.GetWindowText(hwnd)
