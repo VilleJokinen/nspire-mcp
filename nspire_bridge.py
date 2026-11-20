@@ -72,9 +72,14 @@ def clip_get() -> str | None:
 
 
 def clip_set(text: str) -> None:
+    # Pass NUL-terminated UTF-16 bytes, not a str: pywin32's own str conversion
+    # in SetClipboardData fails on some short strings such as "11" (error 6,
+    # invalid handle) and corrupts the heap, so the next write crashes Python.
+    data = (text + "\0").encode("utf-16-le")
+
     def write():
         wcb.EmptyClipboard()
-        wcb.SetClipboardData(wcb.CF_UNICODETEXT, text)
+        wcb.SetClipboardData(wcb.CF_UNICODETEXT, data)
     _with_clipboard(write)
 
 
