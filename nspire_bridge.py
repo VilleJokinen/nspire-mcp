@@ -98,30 +98,63 @@ _tls = threading.local()      # .in_session: this thread is inside Bridge.sessio
 _ours_seq: int | None = None  # clipboard sequence number when it last held this process's traffic
 
 
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+_kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+_kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+_kernel32.GlobalLock.restype = wintypes.LPVOID
+_kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+_kernel32.GlobalUnlock.restype = wintypes.BOOL
+_kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+_kernel32.GlobalFree.restype = wintypes.HGLOBAL
+_GMEM_MOVEABLE = 0x0002
+
+
 def _seq() -> int:
     return wcb.GetClipboardSequenceNumber()
+
+
+def _set_data(fmt: int, data: bytes) -> None:
+    """SetClipboardData with memory allocated here, exactly len(data) bytes.
+
+    Never hand pywin32 a str or bytes: its str conversion fails on some short
+    strings such as "11" (error 6, invalid handle) and corrupts the heap, so
+    the next write crashes Python; and it adds a byte to text formats, which
+    would grow the user's clipboard on every restore. Clipboard must be open.
+    """
+    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, max(len(data), 1))
+    if not h:
+        raise ctypes.WinError(ctypes.get_last_error())
+    p = _kernel32.GlobalLock(h)
+    if not p:
+        _kernel32.GlobalFree(h)
+        raise ctypes.WinError(ctypes.get_last_error())
+    ctypes.memmove(p, data, len(data))
+    _kernel32.GlobalUnlock(h)
+    try:
+        wcb.SetClipboardData(fmt, h)  # an int is passed through as the handle; the clipboard owns it now
+    except Exception:
+        _kernel32.GlobalFree(h)
+        raise
 
 
 def _keep_out_of_history() -> None:
     """Mark what is on the clipboard as not for history or cloud sync. Clipboard must be open."""
     for fmt in (_CF_HISTORY, _CF_CLOUD):
         try:
-            wcb.SetClipboardData(fmt, _DWORD_0)
-        except pywintypes.error as e:
+            _set_data(fmt, _DWORD_0)
+        except Exception as e:
             log.debug("could not set clipboard format %d: %s", fmt, e)
 
 
 def _write_text(text: str, transient: bool) -> int:
     """Replace the clipboard with text. Returns the clipboard sequence number after the write."""
     global _ours_seq
-    # Pass NUL-terminated UTF-16 bytes, not a str: pywin32's own str conversion
-    # in SetClipboardData fails on some short strings such as "11" (error 6,
-    # invalid handle) and corrupts the heap, so the next write crashes Python.
-    data = (text + "\0").encode("utf-16-le")
+    data = (text + "\0").encode("utf-16-le", errors="surrogatepass")
 
     def write():
         wcb.EmptyClipboard()
-        wcb.SetClipboardData(wcb.CF_UNICODETEXT, data)
+        _set_data(wcb.CF_UNICODETEXT, data)
         if transient:
             _keep_out_of_history()
     _with_clipboard(write)
@@ -246,11 +279,10 @@ def _read_all() -> ClipSnapshot:
 def _write_all(snap: ClipSnapshot | None) -> None:
     """Replace the clipboard with snap; empty it if snap is None. Clipboard must be open."""
     wcb.EmptyClipboard()
-    if snap is None or not snap.items:
+    items = [(f, d) for f, d in (snap.items if snap else []) if f not in (_CF_HISTORY, _CF_CLOUD)]
+    if not items:
         return
-    for f, data in snap.items:
-        if f in (_CF_HISTORY, _CF_CLOUD):
-            continue  # set below
+    for f, data in items:
         try:
             if f == _CF_ENHMETAFILE:
                 h = _gdi32.SetEnhMetaFileBits(len(data), data)
@@ -262,7 +294,7 @@ def _write_all(snap: ClipSnapshot | None) -> None:
                     _gdi32.DeleteEnhMetaFile(h)
                     raise
             else:
-                wcb.SetClipboardData(f, data or b"\0")  # bytes, never str (see _write_text)
+                _set_data(f, data)
         except Exception as e:
             log.warning("could not restore clipboard format %d: %s", f, e)
     # The copy went into history when the user made it; don't add it twice.
