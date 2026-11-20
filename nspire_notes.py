@@ -14,11 +14,9 @@ from __future__ import annotations
 import re
 import time
 
-import win32gui
-
 from nspire_bridge import Bridge, clip_set, readable, to_cas_chars
-from nspire_keys import (chord, focus_nspire, foreground_is, process_windows, type_text, wait_for_popup,
-                         window_title)
+from nspire_keys import (chord, focus_nspire, foreground_is, menu_area, menu_changed, process_windows,
+                         type_text, wait_for_popup, window_title)
 
 NOTES_MENU_KEY = "6"  # "Add Notes" in the add-page menu (CX CAS Student/Teacher 6.x)
 
@@ -104,7 +102,7 @@ def _wait_doc_change(old: str, timeout: float) -> str | None:
     return None
 
 
-def _new_notes_document(hwnd: int) -> str:
+def _new_handheld_notes(hwnd: int) -> str:
     """Ctrl+N (handheld-size document), then "Add Notes" from the add-page menu."""
     before = _doc_name()
     chord("ctrl+n", pause=0.2)
@@ -121,50 +119,70 @@ def _new_notes_document(hwnd: int) -> str:
     return name
 
 
-def _convert_to_computer(hwnd: int, handheld: str) -> str:
-    """File > Convert to > computer page size, then close the handheld original.
+MENU_OPEN_PIXELS = 1000  # sampled pixels that change when a drop-down opens (measured 3000-5600; idle 0)
 
-    Conversion makes a new document (a copy). Menus are reached by position, so this
-    works in any UI language: File items are New handheld, New computer, Open, Close,
-    Save, Save As, Save to Handheld, Convert to; in the Convert submenu the current
-    size is disabled, so the only enabled entry (computer size) is selected.
+
+def _settled_menu_area(hwnd: int, timeout: float = 4.0) -> bytes:
+    """menu_area once the window has stopped redrawing (e.g. a document still opening)."""
+    prev = menu_area(hwnd)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        cur = menu_area(hwnd)
+        if menu_changed(prev, cur) < 50:
+            return cur
+        prev = cur
+    return prev
+
+
+def _menu(hwnd: int, menu_index: int, item_index: int, what: str) -> None:
+    """Pick a menu-bar item by position (1-based), so any UI language works.
+
+    Right after a new document opens TI-Nspire ignores the Alt. Its menus are drawn
+    by Java inside the window, invisible to Windows, so whether one opened is told
+    from the pixels where it appears; if it didn't, try again.
     """
-    _guard(hwnd)
-    chord("alt", pause=0.15)
-    chord("down", pause=0.25)
-    for _ in range(7):
-        chord("down", pause=0.05)
-    chord("right", pause=0.3)
-    _guard(hwnd)
-    chord("enter", pause=0.3)
-    computer = _wait_doc_change(handheld, 15)  # it shows "Saving…" while it copies
-    if not computer:
-        chord("esc"); chord("esc")
-        raise NotesAborted("Converting to computer page size didn't open a new document. "
-                           "The handheld-size page is open; try page_size='handheld'.")
-    time.sleep(0.5)
+    for attempt in range(5):
+        _guard(hwnd)
+        base = _settled_menu_area(hwnd)
+        chord("alt", pause=0.15)
+        for _ in range(menu_index - 1):
+            chord("right", pause=0.05)
+        chord("down", pause=0.05)  # opens the menu with its first item highlighted
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            if menu_changed(base, menu_area(hwnd)) > MENU_OPEN_PIXELS:
+                time.sleep(0.1)
+                for _ in range(item_index - 1):
+                    chord("down", pause=0.05)
+                _guard(hwnd)
+                chord("enter", pause=0.2)
+                return
+            time.sleep(0.05)
+        # No Esc to back out: if focus had moved to another program, Esc would land
+        # there (in Claude it cancels the running command). Usually the Alt was
+        # simply ignored, so there's nothing to undo.
+        time.sleep(0.4 + 0.3 * attempt)
+    raise NotesAborted(f"Couldn't open TI-Nspire's menu for {what}; nothing was typed.")
 
-    # Close the handheld original: it sits just left of the copy.
-    _guard(hwnd)
-    chord("ctrl+shift+tab", pause=0.5)
-    if _doc_name() == handheld:
-        chord("ctrl+w", pause=0.8)
-        # "Save changes?" Yes/No/Cancel: Tab moves from the default (Yes) to No, and
-        # Space presses the focused button (Enter would press Yes). Only if that
-        # dialog (its own window) is up, so the keys can't land in a document.
-        _guard(hwnd)
-        if win32gui.GetForegroundWindow() != hwnd:
-            chord("tab", pause=0.2)
-            chord("space", pause=0.8)
-    # Back to the computer-size copy.
-    for _ in range(40):
-        if _doc_name() == computer:
-            break
-        _guard(hwnd)
-        chord("ctrl+tab", pause=0.25)
-    if _doc_name() != computer:
-        raise NotesAborted(f"Couldn't switch back to {computer}; nothing was typed.")
-    return computer
+
+def _new_computer_notes(hwnd: int) -> str:
+    """File > New computer document, then Insert > Notes.
+
+    A new computer-size document shows no add-page menu, just an empty page
+    ("click here to add an application"); inserting an app fills that page.
+    File items: New handheld, New computer, ...; Insert (4th menu) items: Problem,
+    Page, Calculator, Graphs, Geometry, Lists & Spreadsheet, Data & Statistics, Notes.
+    """
+    before = _doc_name()
+    _menu(hwnd, 1, 2, "File > New computer document")
+    name = _wait_doc_change(before, 8)
+    if not name:
+        raise NotesAborted("TI-Nspire didn't open a new document (is a dialog open in it?).")
+    time.sleep(0.5)
+    _menu(hwnd, 4, 8, "Insert > Notes")
+    time.sleep(0.8)
+    return name
 
 
 def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, page_size: str = "computer",
@@ -178,9 +196,10 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     if page_size not in ("computer", "handheld"):
         raise ValueError("page_size must be 'computer' or 'handheld'")
     hwnd = focus_nspire()
-    doc = _new_notes_document(hwnd)
     if page_size == "computer":
-        doc = _convert_to_computer(hwnd, doc)
+        _new_computer_notes(hwnd)
+    else:
+        _new_handheld_notes(hwnd)
 
     if title:
         _guard(hwnd)

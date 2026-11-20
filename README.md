@@ -101,9 +101,10 @@ page (`page_size="handheld"`) if you'll move the document to a calculator.
 - It navigates TI-Nspire's menus by position, not by name, so it works in any UI
   language, but it assumes the layout of CX CAS Student/Teacher Software 6.x:
   "Add Notes" is item 6 of the add-page menu (`NOTES_MENU_KEY` in
-  `nspire_notes.py`), and File > Convert to is the 8th File menu item. If a page
-  comes out as a Calculator page, or the size conversion fails, your version's
-  menus differ; `page_size="handheld"` skips the conversion.
+  `nspire_notes.py`), New computer document is the 2nd File menu item, and Notes
+  is the 8th item of the Insert menu (the 4th menu). If a page comes out as the
+  wrong app, or the wrong kind of document opens, your version's menus differ;
+  `page_size="handheld"` uses Ctrl+N and the add-page menu instead.
 
 ### Clipboard hotkey
 

@@ -87,12 +87,14 @@ hotkey.
   templates), Enter to evaluate, Backspace to drop the empty box Enter leaves.
   Steps are validated on the bridge first because a math-box error opens a modal
   popup inside TI-Nspire that can't be detected from outside.
-  Computer-size pages: creating a computer-size document directly is unreliable
-  (its add-page menu needs `6` then Enter, and a lost `6` makes Enter pick
-  Calculator), so it makes a handheld Notes document, runs File > Convert to >
-  computer size (which creates a converted copy), closes the handheld original
-  without saving (Tab + Space on the save prompt; Enter would press Yes), and
-  switches back with Ctrl+Tab. Each step checks the window title. Menus are
-  reached by position so any UI language works.
+  Computer-size pages: File > New computer document (2nd File item), then
+  Insert > Notes (4th menu, 8th item), which fills the new document's empty
+  first page (computer documents show no add-page menu). Menus are reached by
+  position (Alt, Right, Down...) so any UI language works. Right after a document
+  opens TI-Nspire ignores the Alt, so each menu step checks that the menu opened
+  and retries. TI-Nspire is a Java app whose menus are drawn inside its window
+  (no menu window, no Windows menu mode), so the check compares sampled pixels of
+  the window's top-left area before and after (`menu_area` in `nspire_keys.py`). Never send Esc to back out: if focus
+  has moved, it lands in another program (in Claude it cancels the command).
 - Test against the real CAS with `selftest.py`; add a case to `LATEX_CASES` when
   you change the translator.

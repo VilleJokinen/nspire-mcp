@@ -136,6 +136,39 @@ def wait_for_popup(hwnd: int, before: set[int], timeout: float = 6.0) -> bool:
     return False
 
 
+def menu_area(hwnd: int, step: int = 6) -> bytes:
+    """Sampled pixels of the window's top-left area, where its drop-down menus open.
+
+    TI-Nspire is a Java (Swing) app: its menus are drawn inside the main window,
+    so Windows reports neither a menu window nor menu mode. The pixels are the
+    only outside sign that a menu opened (compare with menu_changed).
+    """
+    import win32ui
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    w, h = max(1, int((right - left) * 0.6)), max(1, int((bottom - top) * 0.6))
+    hdc = win32gui.GetWindowDC(0)
+    src = win32ui.CreateDCFromHandle(hdc)
+    mem = src.CreateCompatibleDC()
+    bmp = win32ui.CreateBitmap()
+    try:
+        bmp.CreateCompatibleBitmap(src, w, h)
+        mem.SelectObject(bmp)
+        mem.BitBlt((0, 0), (w, h), src, (left, top), win32con.SRCCOPY)
+        bits = bmp.GetBitmapBits(True)  # 4 bytes per pixel, rows of w pixels
+    finally:
+        mem.DeleteDC()
+        src.DeleteDC()
+        win32gui.ReleaseDC(0, hdc)
+        win32gui.DeleteObject(bmp.GetHandle())
+    return b"".join(bits[(y * w + x) * 4:(y * w + x) * 4 + 3] for y in range(0, h, step) for x in range(0, w, step))
+
+
+def menu_changed(before: bytes, after: bytes) -> int:
+    """How many sampled pixels differ (a caret blink is a few, an open menu hundreds)."""
+    n = min(len(before), len(after)) // 3
+    return sum(before[i * 3:i * 3 + 3] != after[i * 3:i * 3 + 3] for i in range(n))
+
+
 def foreground_is(hwnd: int) -> bool:
     """True if the foreground window belongs to hwnd's process (its menus and popups count)."""
     fg = win32gui.GetForegroundWindow()
