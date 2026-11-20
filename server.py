@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
-# dependencies = ["mcp>=1.2,<2", "pywin32>=306"]
+# dependencies = ["mcp>=1.2,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """MCP server: evaluate expressions in the TI-Nspire CX (CAS) desktop app.
 
@@ -10,125 +10,20 @@ Windows clipboard. Run with:  uv run --script server.py
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import os
 import sys
-import threading
-import time
-import uuid
 
-import pywintypes
-import win32clipboard as wcb
-from mcp.server.fastmcp import FastMCP
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
+
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
 log = logging.getLogger("nspire")
-
-PREFIX_IN = "NSPIRE_IN:"
-PREFIX_OUT = "NSPIRE_OUT:"
-POLL_S = 0.03
-TIMEOUT_HINT = "Is TI-Nspire open with nspire_bridge.tns on the bridge page?"
-
-
-class BridgeTimeout(Exception):
-    pass
-
-
-# ---------------------------------------------------------------- clipboard
-
-def _with_clipboard(fn, retries: int = 40):
-    """Open the clipboard, run fn, close it. Retries while another app holds it."""
-    for attempt in range(retries):
-        try:
-            wcb.OpenClipboard()
-        except pywintypes.error:
-            time.sleep(0.025)
-            continue
-        try:
-            return fn()
-        finally:
-            wcb.CloseClipboard()
-    raise RuntimeError("Windows clipboard stayed locked by another program; try again.")
-
-
-def clip_get() -> str | None:
-    def read():
-        if not wcb.IsClipboardFormatAvailable(wcb.CF_UNICODETEXT):
-            return None
-        return wcb.GetClipboardData(wcb.CF_UNICODETEXT)
-    return _with_clipboard(read)
-
-
-def clip_set(text: str) -> None:
-    def write():
-        wcb.EmptyClipboard()
-        wcb.SetClipboardData(wcb.CF_UNICODETEXT, text)
-    _with_clipboard(write)
-
-
-# ---------------------------------------------------------------- bridge
-
-class Bridge:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.cas: bool | None = None
-
-    def _roundtrip(self, payload: str, timeout_s: float) -> tuple[bool, str]:
-        """Send one request and wait for its reply. Caller holds the lock."""
-        rid = uuid.uuid4().hex[:12]
-        clip_set(f"{PREFIX_IN}{rid}:{payload}")
-        want = f"{PREFIX_OUT}{rid}:"
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            time.sleep(POLL_S)
-            clip = clip_get()
-            if clip and clip.startswith(want):
-                status, _, body = clip[len(want):].partition(":")
-                return status == "OK", body
-        raise BridgeTimeout(f"No reply from the TI-Nspire bridge within {timeout_s:g} s. {TIMEOUT_HINT}")
-
-    def session(self, work):
-        """Hold the lock, save the user's clipboard text, run work, restore it."""
-        with self._lock:
-            saved = clip_get()
-            try:
-                return work()
-            finally:
-                try:
-                    current = clip_get()
-                    # Restore only if the clipboard still holds our traffic,
-                    # so a copy the user made meanwhile isn't overwritten.
-                    ours = current is None or current.startswith((PREFIX_IN, PREFIX_OUT))
-                    if saved is not None and ours:
-                        clip_set(saved)
-                except Exception as e:  # never mask the real result
-                    log.warning("clipboard restore failed: %s", e)
-
-    def ping(self, timeout_s: float = 3.0) -> dict:
-        ok, body = self._roundtrip("__PING__", timeout_s)
-        parts = body.split(":")
-        if not ok or len(parts) != 3 or parts[0] != "PONG":
-            raise RuntimeError(f"Unexpected ping reply: {body!r}")
-        self.cas = parts[2] == "cas"
-        return {"alive": True, "api_level": parts[1], "cas": self.cas}
-
-    def eval_one(self, expr: str, timeout_s: float) -> str:
-        if not expr.strip():
-            raise ValueError("Empty expression.")
-        if "\n" in expr or "\r" in expr:
-            raise ValueError("Expression must be a single line.")
-        ok, body = self._roundtrip(expr, timeout_s)
-        if ok:
-            return body
-        msg = f"TI-Nspire error: {body}"
-        if self.cas is None:
-            try:
-                self.ping(timeout_s)
-            except Exception:
-                pass
-        if self.cas is False:
-            msg += " (this is the non-CAS edition: symbolic input like solve/factor/∫ with free variables isn't supported; use numeric expressions)"
-        raise ValueError(msg)
-
 
 bridge = Bridge()
 mcp = FastMCP("nspire")
@@ -151,6 +46,8 @@ async def nspire_eval(expr: str, timeout_s: float = 5) -> str:
 
     Use TI-Nspire syntax, e.g. solve(x^2=4,x), factor(x^2-5x+6), ∫(x^2,x), approx(π).
     Results come back as the CAS writes them; negatives use the Unicode minus "−".
+    The constants ℯ and 𝑖 and the exponent mark ᴇ appear as those characters and can be
+    sent back as input. Arbitrary constants show as c1, c2 (deSolve) and n1, n2 (integers).
     Definitions (Define f(x)=..., a:=5) persist in the open document's problem,
     so later calls can use them. Undefine with DelVar a.
     """
@@ -184,6 +81,85 @@ async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5) -> list[dict
                 out.append({"expr": e, "ok": False, "error": str(x)})
         return out
     log.info("batch of %d", len(exprs))
+    return await asyncio.to_thread(bridge.session, work)
+
+
+@mcp.tool()
+async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
+                       order: int | None = None, point: str | None = None,
+                       timeout_s: float = 10) -> dict:
+    """Solve or evaluate a LaTeX problem on the TI-Nspire CAS; returns the answer as text and LaTeX.
+
+    Accepts $…$ / \\[…\\] delimiters, \\frac, \\sqrt[n]{}, \\int (with limits, \\,dx or \\mathrm{d}x),
+    \\iint, \\sum, \\prod, \\lim (x\\to a, a^+), \\frac{d}{dx}, derivatives y', y'', \\frac{dy}{dx},
+    \\dot y, matrices (pmatrix/bmatrix; vmatrix = determinant), cases/align systems, several
+    equations separated by \\\\ , commas or ;, degrees (30^\\circ), |x|, n!, \\binom.
+    \\log without a base is base 10 and \\ln is natural; e and i are the constants unless they
+    are summation/integration variables. "1,5" between digits is a decimal comma.
+
+    action="auto" picks:
+      f(x)=…            -> Define (f stays defined for later calls)
+      equation(s) with y', y'' or dy/dx -> deSolve (initial conditions like y(0)=1 allowed)
+      equation / inequality / system    -> solve for x (or the variables present)
+      anything else     -> evaluate (integrals, limits, sums, derivatives, matrices, simplification)
+    Or force one: eval, approx, solve, csolve, nsolve, zeros, czeros, factor, cfactor, expand,
+    propfrac, comdenom, texpand, tcollect, diff, integrate, taylor (order, point), limit (point),
+    det, inverse, rref, eigenvalues, eigenvectors, desolve, define.
+    var: the variable(s) to solve/differentiate for, e.g. "t" or "x,y".
+
+    Returns {action, nspire (the command run), result, result_latex, approx?, approx_latex?}.
+    result_latex is null when the result couldn't be converted; result is always the raw CAS text.
+    Variables stored in the open document (e.g. a:=5) are substituted. If the LaTeX can't be
+    parsed, the error says so; then translate it to TI-Nspire syntax yourself and use nspire_eval.
+    """
+    # Imported here, not at startup: sympy takes seconds to load and the MCP
+    # client times out a server that's slow to answer initialize.
+    lx = await asyncio.to_thread(importlib.import_module, "nspire_latex")
+
+    def work():
+        return lx.solve_latex(bridge, latex, action, var, order, point, timeout_s)
+    log.info("latex %r action=%s", latex, action)
+    try:
+        lx.plan(latex, action, var, order, point)  # fail fast on bad LaTeX, no clipboard use
+    except lx.LatexError as e:
+        raise ValueError(str(e)) from None
+    return await asyncio.to_thread(bridge.session, work)
+
+
+@mcp.tool()
+async def nspire_notes(steps: list[dict], title: str | None = None, page_size: str = "computer",
+                       timeout_s: float = 10) -> dict:
+    """Write a worked solution onto a new TI-Nspire Notes page, with live math boxes.
+
+    Use this when the user wants the solution shown *in TI-Nspire* (e.g. "write this up
+    in a notes page"). It opens a new document in the TI-Nspire app, adds a Notes page and
+    types it out: each step is one line of text followed by an optional math box, which
+    TI-Nspire evaluates and shows as  input ▸ result.
+
+    steps: list of objects, each one line:
+      {"text": "Factor the left side:", "math": "factor(x^2-5*x+6)"}
+      {"text": "so the solutions are"}                       (text only)
+      {"text": "Area:", "latex": "\\int_0^1 x^2\\,dx"}         (LaTeX, translated like nspire_latex;
+                                                              optional "action"/"var" as there)
+    math uses TI-Nspire syntax (as in nspire_eval). Put Define f(x)=... in an early step to
+    use f later. Keep text to one line per step; plan the steps from the actual math, and
+    check results with nspire_eval first if unsure.
+
+    Every math step is evaluated through the bridge first; if one errors, nothing is typed
+    and the error names the step. The bridge document must be open (it stays on its page).
+    It takes about a second per step and types into the TI-Nspire window, which comes to the
+    front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus it stops
+    without typing anywhere else. Returns {document, steps:[{text, math, result}], note}.
+    The new document is unsaved.
+
+    page_size: "computer" (default: large page, fills the TI-Nspire window) or "handheld"
+    (the calculator's small screen, e.g. to transfer the document to a handheld).
+    """
+    nb = await asyncio.to_thread(importlib.import_module, "nspire_notes")
+
+    def work():
+        return nb.build_notes(bridge, steps, title, page_size, timeout_s)
+    log.info("notes: %d steps", len(steps))
     return await asyncio.to_thread(bridge.session, work)
 
 

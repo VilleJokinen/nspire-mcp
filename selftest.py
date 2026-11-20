@@ -1,17 +1,21 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
-# dependencies = ["mcp>=1.2,<2", "pywin32>=306"]
+# dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
-"""Check the bridge end to end:  uv run --script selftest.py
+"""Check the bridge and the LaTeX translator end to end:  uv run --script selftest.py
 
 Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
+LaTeX cases need the CAS and are skipped without it. Variables stored in the
+open document (e.g. x:=3) can change answers; DelVar them if a case fails oddly.
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from server import BridgeTimeout, bridge  # noqa: E402
+from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
+
+bridge = Bridge()
 
 # (expr, expected with CAS, needs CAS?)  None expected = must be an error
 CASES = [
@@ -19,7 +23,22 @@ CASES = [
     ("factor(x^2-5x+6)", "(x-3)*(x-2)", True),
     ("solve(x^2=4,x)", "x=-2 or x=2", True),
     ("∫(x^2,x)", "x^3/3", True),
+    ("cSolve(x^2=-1,x)", "x=𝑖 or x=-𝑖", True),
     ("2+*3", None, False),
+]
+
+# (latex, action, expected CAS result)
+LATEX_CASES = [
+    (r"x^2-5x+6=0", "auto", "x=2 or x=3"),
+    (r"\int_0^1 x^2\,dx", "auto", "1/3"),
+    (r"\lim_{x\to 0}\frac{\sin x}{x}", "auto", "1"),
+    (r"\sum_{k=1}^{n} k", "auto", "n*(n+1)/2"),
+    (r"\frac{d}{dx}\sin(x^2)", "auto", "2*x*cos(x^2)"),
+    (r"\begin{cases} x+y=3 \\ x-y=1 \end{cases}", "auto", "x=2 and y=1"),
+    (r"\begin{vmatrix}1&2\\3&4\end{vmatrix}", "auto", "-2"),
+    (r"y''+y=0,\ y(0)=1,\ y'(0)=0", "auto", "y=cos(x)"),
+    (r"|x-1| < 3", "auto", "-2<x<4"),
+    (r"x^3-6x^2+11x-6", "factor", "(x-3)*(x-2)*(x-1)"),
 ]
 
 
@@ -28,17 +47,18 @@ def norm(s: str) -> str:
 
 
 def run() -> int:
-    failures = 0
+    failures = total = 0
 
     def report(ok: bool, name: str, detail: str) -> None:
-        nonlocal failures
+        nonlocal failures, total
+        total += 1
         failures += not ok
-        print(f"{'PASS' if ok else 'FAIL'}  {name:<20} {detail}")
+        print(f"{'PASS' if ok else 'FAIL'}  {name:<42} {detail}")
 
     try:
         st = bridge.ping()
     except BridgeTimeout as e:
-        print(f"FAIL  ping                 {e}")
+        print(f"FAIL  ping  {e}")
         return 1
     cas = st["cas"]
     report(True, "ping", f"api {st['api_level']}, {'CAS' if cas else 'non-CAS'}")
@@ -58,7 +78,22 @@ def run() -> int:
             ok = got is not None and norm(got) == norm(want)
             report(ok, expr, repr(got) if err is None else err)
 
-    print(f"\n{len(CASES) + 1 - failures}/{len(CASES) + 1} passed")
+    if not cas:
+        print("(non-CAS edition: LaTeX cases skipped)")
+    else:
+        from nspire_latex import solve_latex
+        for latex, action, want in LATEX_CASES:
+            try:
+                r = solve_latex(bridge, latex, action, timeout_s=10)
+                ok = norm(r["result"]) == norm(want) and r["result_latex"] is not None
+                report(ok, latex, f"{r['nspire']}  =>  {r['result']}   [{r['result_latex']}]")
+            except BridgeTimeout as e:
+                report(False, latex, str(e))
+                return 1
+            except Exception as e:
+                report(False, latex, f"{type(e).__name__}: {e}")
+
+    print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 
 
