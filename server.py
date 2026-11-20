@@ -145,12 +145,17 @@ async def nspire_notes(steps: list[dict], title: str | None = None, page_size: s
     use f later. Keep text to one line per step; plan the steps from the actual math, and
     check results with nspire_eval first if unsure.
 
-    Every math step is evaluated through the bridge first; if one errors, nothing is typed
-    and the error names the step. The bridge document must be open (it stays on its page).
-    It takes about a second per step and types into the TI-Nspire window, which comes to the
-    front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus it stops
-    without typing anywhere else. Returns {document, steps:[{text, math, result}], note}.
-    The new document is unsaved.
+    Arguments are checked first, then every math step is evaluated through the bridge; if one
+    errors, nothing is typed and the error names the step. The bridge document must be open (it
+    stays on its page). Definitions the check makes there (a:=5, Define f(x)=...) are undone
+    afterwards and changed values restored (an overwritten function can't be: that's a warning).
+    The new document does NOT have the variables stored in the bridge document, so a step that
+    uses one gets a warning (its page result may differ from the returned one): define it in an
+    earlier step instead. It takes about a second per step and types into the TI-Nspire window
+    (found by its process, never by title; if several are open the one in front is used), which
+    comes to the front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus it
+    stops without typing anywhere else. Returns {document, window:{hwnd, title, process},
+    steps:[{text, math, result}], warnings:[str], note}. The new document is unsaved.
 
     page_size: "computer" (default: large page, fills the TI-Nspire window) or "handheld"
     (the calculator's small screen, e.g. to transfer the document to a handheld).
