@@ -95,7 +95,9 @@ async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
     \\dot y, matrices (pmatrix/bmatrix; vmatrix = determinant), cases/align systems, several
     equations separated by \\\\ , commas or ;, degrees (30^\\circ), |x|, n!, \\binom.
     \\log without a base is base 10 and \\ln is natural; e and i are the constants unless they
-    are summation/integration variables. "1,5" between digits is a decimal comma.
+    are summation/integration variables. "1,5" between digits is a decimal comma, also inside
+    {} groups such as \\frac{1,5}{2}, but not inside (), [] or \\{\\} (f(1,5), \\gcd(12,18), lists).
+    The expression reaches the CAS as written (0.1+0.2, \\sqrt{8}); the CAS does all arithmetic.
 
     action="auto" picks:
       f(x)=…            -> Define (f stays defined for later calls)
@@ -115,15 +117,18 @@ async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
     # Imported here, not at startup: sympy takes seconds to load and the MCP
     # client times out a server that's slow to answer initialize.
     lx = await asyncio.to_thread(importlib.import_module, "nspire_latex")
-
-    def work():
-        return lx.solve_latex(bridge, latex, action, var, order, point, timeout_s)
     log.info("latex %r action=%s", latex, action)
     try:
-        lx.plan(latex, action, var, order, point)  # fail fast on bad LaTeX, no clipboard use
+        # translate first: bad LaTeX fails without touching the clipboard
+        p = await asyncio.to_thread(lx.plan, latex, action, var, order, point)
     except lx.LatexError as e:
         raise ValueError(str(e)) from None
-    return await asyncio.to_thread(bridge.session, work)
+
+    def work():
+        return lx.run_plan(bridge, p, timeout_s)
+    run = await asyncio.to_thread(bridge.session, work)
+    # LaTeX conversion after the session, with the user's clipboard already restored
+    return await asyncio.to_thread(lx.format_answer, run)
 
 
 @mcp.tool()
