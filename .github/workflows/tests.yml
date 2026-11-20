@@ -6,8 +6,9 @@ on:
 
 jobs:
   offline:
-    # The translator and result converter, without TI-Nspire. Windows also
-    # checks that nspire_bridge (pywin32) re-exports nspire_chars.
+    # Everything that runs without TI-Nspire. Linux: the translator and result
+    # converter. Windows adds the Notes-safety tests and the transport tests
+    # (bridge.lua run in lupa against a fake clipboard; the real one is untouched).
     strategy:
       fail-fast: false
       matrix:
@@ -18,7 +19,7 @@ jobs:
             python: "3.13"
           - os: windows-latest
             python: "3.13"
-            extra: --with "pywin32>=306"
+            extra: --with "pywin32>=306" --with lupa
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
