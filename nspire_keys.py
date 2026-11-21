@@ -10,6 +10,7 @@ import ctypes.wintypes as wt
 import ntpath
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import win32con
@@ -60,17 +61,27 @@ VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12, "enter": 0x0D, "return": 0x0D, "
       "home": 0x24, "backspace": 0x08, "delete": 0x2E, "space": 0x20}
 
 
-def chord(spec: str, pause: float = 0.05) -> None:
-    """Press e.g. 'ctrl+m', 'enter', 'right'."""
+Guard = Callable[[], None]  # raises to stop before a key is sent (e.g. focus moved to another program)
+
+
+def chord(spec: str, pause: float = 0.05, guard: Guard | None = None) -> None:
+    """Press e.g. 'ctrl+m', 'enter', 'right'. guard runs first; if it raises, nothing is sent."""
     parts = spec.lower().split("+")
     vks = [VK[p] if p in VK else ord(p.upper()) for p in parts]
+    if guard is not None:
+        guard()
     _send([_key(v) for v in vks] + [_key(v, flags=KEYEVENTF_KEYUP) for v in reversed(vks)])
     time.sleep(pause)
 
 
-def type_text(text: str, per_char: float = 0.004) -> None:
-    """Type any Unicode text (no layout dependence). Newlines are not special: use chord('enter')."""
+def type_text(text: str, per_char: float = 0.004, guard: Guard | None = None) -> None:
+    """Type any Unicode text (no layout dependence). Newlines are not special: use chord('enter').
+
+    guard runs before every character; if it raises, typing stops before that character.
+    """
     for ch in text:
+        if guard is not None:
+            guard()
         units = ch.encode("utf-16-le")
         codes = [int.from_bytes(units[i:i + 2], "little") for i in range(0, len(units), 2)]
         _send([_key(scan=c, flags=KEYEVENTF_UNICODE) for c in codes]

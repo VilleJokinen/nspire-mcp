@@ -53,7 +53,7 @@ Pitfalls).
 ## Before the first call: `nspire_status`
 
 Call `nspire_status()` once at the start of a math session. It returns
-`{alive, api_level, cas, protocol}`.
+`{alive, api_level, cas, protocol, modes}`.
 
 - `alive: false` means the bridge document is not open or not on its first
   page. Ask the user to open `nspire_bridge.tns` (the "TI-Nspire bridge"
@@ -64,6 +64,10 @@ Call `nspire_status()` once at the start of a math session. It returns
 - `protocol: 1` means an older `nspire_bridge.tns`. Everything works, but
   batches are slower; you can suggest the user open the current one from the
   nspire-mcp folder.
+- `modes` is the document's settings, e.g. `angle: "Radian"`,
+  `auto_or_approx: "Auto"`. Degree mode changes every trig answer and
+  Approximate mode gives decimals instead of exact results; mention it when it
+  explains an answer. `null` means they couldn't be read.
 
 ## The tools
 
@@ -72,7 +76,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_status()` | Health check. First call; again after any timeout. |
 | `nspire_eval` (expr, timeout_s=5) | One expression in TI-Nspire syntax. Your default tool. |
 | `nspire_eval_batch(exprs, timeout_s=5)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
-| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?}`. |
+| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer")` | The user wants the worked solution written into TI-Nspire itself. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
@@ -126,8 +130,14 @@ The LaTeX is sent as written and the CAS does all the arithmetic, so `nspire`
 (the command run) mirrors the input: `\sqrt{8}` runs as `√(8)`, not `2*√(2)`.
 `result_latex` keeps the CAS's form (a factored result stays factored).
 
-If it reports that the LaTeX could not be parsed, translate it to TI-Nspire
-syntax yourself and use `nspire_eval`. Show the user `result_latex` when it is
+It also reads evaluation bars (`\left.\frac{d}{dx}x^2\right|_{x=2}`),
+`\frac{d^n}{dx^n}`, lists `\{1,2,3\}`, conditions (`\text{for } x>0` becomes
+`|x>0`) and `:=` (`a:=5` stores `a`, so it persists like a definition). Accents
+are separate variables (`\bar x` is `xbar`).
+
+If it reports that the LaTeX could not be parsed, or that a command isn't
+supported (it refuses rather than guesses), translate it to TI-Nspire syntax
+yourself and use `nspire_eval`. Show the user `result_latex` when it is
 not null; otherwise show `result`.
 
 ### `nspire_notes`
@@ -176,7 +186,8 @@ unsaved; tell the user to save it if they want to keep it. Use
 - **Stored variables persist.** Definitions (`a:=5`, `Define f(x)=...`) stay in
   the open bridge document and are substituted into later answers. If a result
   looks wrong (a number where you expected a symbol), list stored variables
-  with `nspire_vars`. Delete your own definitions with `nspire_clear(["f"])` or
+  with `nspire_vars`. `nspire_latex` adds a `warnings` entry when it
+  substituted a stored variable or used a stored function. Delete your own definitions with `nspire_clear(["f"])` or
   `DelVar f`; ask before deleting anything you didn't define, and never clear
   everything without the user's OK. Prefer names the user is unlikely to reuse.
 - **The clipboard is the transport.** Each call briefly replaces the user's

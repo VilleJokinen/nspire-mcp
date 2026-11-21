@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11,<3.14"
+# requires-python = ">=3.11,<3.15"
 # dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """Check the bridge and the LaTeX translator end to end:  uv run --script selftest.py
@@ -48,6 +48,13 @@ LATEX_CASES = [
     # x is the dependent variable here, so t is the independent one
     (r"x'=3,\ x(0)=1", "auto", "x=3*t+1"),
     (r"x'(t)=x(t),\ x(0)=2", "auto", "x=2*ℯ^t"),
+    # evaluation bar, operator-form derivative, \det, lists, conditions, \bmod (none stores anything)
+    (r"\left.\frac{d}{dx}x^3\right|_{x=2}", "auto", "12"),
+    (r"\frac{d^2}{dx^2}x^4", "auto", "12*x^2"),
+    (r"\det\begin{pmatrix}1&2\\3&4\end{pmatrix}", "auto", "-2"),
+    (r"2\cdot\{1,2,3\}", "auto", "{2,4,6}"),
+    (r"x^2=2 \text{ for } x>0", "auto", "x=√(2)"),
+    (r"12 \bmod 5", "auto", "2"),
 ]
 
 

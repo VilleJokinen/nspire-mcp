@@ -1,6 +1,6 @@
 # /// script
-# requires-python = ">=3.11,<3.14"
-# dependencies = ["mcp>=1.2,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# requires-python = ">=3.11,<3.15"
+# dependencies = ["mcp>=1.30,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """MCP server: evaluate expressions in the TI-Nspire CX (CAS) desktop app.
 
@@ -13,38 +13,85 @@ import asyncio
 import importlib
 import logging
 import os
+import re
 import sys
+import threading
+from typing import Annotated, Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
+from pydantic import Field  # noqa: E402
+from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
-from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
+from nspire_bridge import (VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_setting,  # noqa: E402
+                           parse_var_info, readable)
 
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
 log = logging.getLogger("nspire")
 
+INSTRUCTIONS = """\
+Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used as an exact CAS.
+- TI-Nspire must be open with nspire_bridge.tns on its bridge page ("NSPIRE BRIDGE tick N"). If a call
+  times out, ask the user to check that; nspire_status pings the bridge.
+- Requests travel through the Windows clipboard: each call briefly replaces it and puts it back.
+- Variables and functions stored in the open document (a:=5, Define f(x)=...) persist and are
+  substituted into every answer. If an answer looks oddly specific, check nspire_vars.
+- nspire_clear deletes stored variables and can't be undone: ask the user first.
+- nspire_notes types into the TI-Nspire window: use it only when the user wants a Notes page, and
+  tell them not to type or click while it runs.
+- Report results as the CAS gives them; explain the steps yourself."""
+
 bridge = Bridge()
-mcp = FastMCP("nspire")
+mcp = FastMCP("nspire", instructions=INSTRUCTIONS)
+
+# "auto" plus the keys of nspire_latex.ACTIONS, listed here so SymPy isn't
+# imported at startup (tests/test_server.py checks that they match).
+LatexAction = Literal[
+    "auto", "eval", "simplify", "approx", "solve", "csolve", "nsolve", "zeros", "czeros", "factor",
+    "cfactor", "expand", "propfrac", "comdenom", "texpand", "tcollect", "diff", "integrate", "taylor",
+    "limit", "det", "inverse", "rref", "eigenvalues", "eigenvectors", "desolve", "define",
+]
 
 
-@mcp.tool()
+class NotesStep(TypedDict, total=False):
+    """One line of a Notes page: text, then an optional math box (math or latex)."""
+    text: Annotated[str, Field(description="One line of text, shown before the math box.")]
+    math: Annotated[str, Field(description="TI-Nspire expression for a live math box, e.g. factor(x^2-5*x+6).")]
+    latex: Annotated[str, Field(description="LaTeX instead of math, translated like nspire_latex.")]
+    action: Annotated[LatexAction, Field(description="With latex: what to do with it, as in nspire_latex.")]
+    var: Annotated[str, Field(description="With latex: the variable(s), as in nspire_latex.")]
+
+
+# Every tool talks only to the local TI-Nspire app.
+def _hints(title: str, **kw) -> ToolAnnotations:
+    return ToolAnnotations(title=title, openWorldHint=False, **kw)
+
+
+@mcp.tool(annotations=_hints("TI-Nspire bridge status", readOnlyHint=True, idempotentHint=True))
 async def nspire_status() -> dict:
     """Ping the TI-Nspire bridge.
 
-    Returns alive, the Lua API level, whether the CAS is available, and the bridge
-    script's protocol (2 = batch support; 1 = an older nspire_bridge.tns).
+    Returns alive, the Lua API level, whether the CAS is available, the bridge script's
+    protocol (2 = batch support; 1 = an older nspire_bridge.tns), and the document's mode
+    settings: modes = {angle, auto_or_approx, real_or_complex, display_digits,
+    exponential_format, vector_format, base, unit_system}, or null if they couldn't be read.
+    Angle mode Degree changes trig answers; Approximate mode gives decimals instead of
+    exact results.
     """
     def work():
         try:
-            return bridge.ping()
+            st = bridge.ping()
         except BridgeTimeout as e:
             return {"alive": False, "error": str(e)}
+        st["modes"] = bridge.modes()
+        return st
     return await asyncio.to_thread(bridge.session, work)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_hints("Evaluate a TI-Nspire expression"))
 async def nspire_eval(expr: str, timeout_s: float = 5) -> str:
     """Evaluate one expression in TI-Nspire (CAS if available) and return the result as text.
 
@@ -61,7 +108,7 @@ async def nspire_eval(expr: str, timeout_s: float = 5) -> str:
     return await asyncio.to_thread(bridge.session, work)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_hints("Evaluate several TI-Nspire expressions"))
 async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5) -> list[dict]:
     """Evaluate expressions in order. Returns one {expr, ok, result | error} per input.
 
@@ -76,7 +123,7 @@ async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5) -> list[dict
     return await asyncio.to_thread(bridge.session, work)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_hints("List stored TI-Nspire variables", readOnlyHint=True, idempotentHint=True))
 async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[dict]:
     """List the variables and functions stored in the open document's problem (getVarInfo()).
 
@@ -92,7 +139,7 @@ async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[dict]:
     return await asyncio.to_thread(bridge.session, work)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_hints("Delete stored TI-Nspire variables", destructiveHint=True, idempotentHint=True))
 async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> dict:
     """DESTRUCTIVE: delete stored variables and functions from the open document's problem.
 
@@ -110,16 +157,92 @@ async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> 
     return await asyncio.to_thread(bridge.session, work)
 
 
-@mcp.tool()
-async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
+# ---------------------------------------------------------------- document checks for nspire_latex
+
+_TRIG_RE = re.compile(r"(?<![\w.])(?:arc)?(?:sin|cos|tan|cot|sec|csc)(?:⁻¹)?\s*\(")
+
+
+def _import_optional(name: str):
+    try:
+        return importlib.import_module(name)
+    except Exception as e:  # fewer warnings rather than a failed tool
+        log.info("couldn't import %s: %s", name, e)
+        return None
+
+
+def _short(v: str) -> str:
+    return v if len(v) <= VALUE_MAX_CHARS else v[:VALUE_MAX_CHARS] + "…"
+
+
+def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None) -> list[str]:
+    """Warnings about the open document for command: stored variables or functions it
+    uses or replaces, and an angle mode other than radian when it uses trig functions.
+
+    Call inside bridge.session(), before running command. One round trip, plus one to read
+    values when a stored variable is used. Never fails the tool: anything unexpected just
+    gives fewer warnings. Raises BridgeTimeout only if the bridge doesn't answer at all, in
+    which case command would time out too. notes_mod is nspire_notes (for scan_names).
+    """
+    t = min(float(timeout_s), 5.0)
+    res = bridge.eval_batch(["getVarInfo()", "getMode(2)"], t)
+    if bridge.last_timeout:
+        raise BridgeTimeout(bridge.last_timeout)
+    warnings: list[str] = []
+    try:
+        if notes_mod is not None and res[0]["ok"]:
+            names = notes_mod.scan_names(command)
+            stored = {r[0].lower(): (r[0], r[1].upper() if len(r) > 1 else "")
+                      for r in parse_var_info(res[0]["result"]) if r}
+            used = [stored[n] for n in sorted(names.uses) if n in stored]
+            replaced = [stored[n.lower()] for n in names.defines
+                        if n.lower() in stored and n.lower() not in names.uses]
+            with_value = [name for name, typ in used if typ in VALUE_TYPES]
+            values: dict[str, str] = {}
+            if with_value:
+                for name, r in zip(with_value, bridge.eval_batch(with_value, t)):
+                    if r["ok"]:
+                        values[name] = _short(r["result"])
+            for name, typ in used:
+                if name in values:
+                    warnings.append(f"{name} is stored in the document ({name} = {values[name]}), so its value "
+                                    f"was substituted. If that isn't intended, ask the user before deleting it "
+                                    f"(nspire_clear), or use another variable name.")
+                elif typ in ("FUNC", "PRGM"):
+                    warnings.append(f"{name} is defined in the document ({typ}); its stored definition was used.")
+                else:
+                    warnings.append(f"{name} is stored in the document ({typ or 'unknown type'}) and was "
+                                    f"substituted; see nspire_vars.")
+            for name, typ in replaced:
+                warnings.append(f"{name} was already stored in the document ({typ or 'unknown type'}); "
+                                f"this replaced it.")
+    except Exception as e:
+        log.info("stored-variable check failed: %s", e)
+    try:
+        if res[1]["ok"] and _TRIG_RE.search(readable(command)):
+            angle = mode_setting(2, res[1]["result"])
+            if angle is not None and angle != "Radian":
+                warnings.append(f"The document's angle mode is {angle}, so trig functions here work in "
+                                f"{angle} rather than radians. The user can change it in TI-Nspire's "
+                                f"document settings.")
+    except Exception as e:
+        log.info("angle-mode check failed: %s", e)
+    return warnings
+
+
+@mcp.tool(annotations=_hints("Solve LaTeX on the TI-Nspire CAS"))
+async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None = None,
                        order: int | None = None, point: str | None = None,
                        timeout_s: float = 10) -> dict:
     """Solve or evaluate a LaTeX problem on the TI-Nspire CAS; returns the answer as text and LaTeX.
 
     Accepts $…$ / \\[…\\] delimiters, \\frac, \\sqrt[n]{}, \\int (with limits, \\,dx or \\mathrm{d}x),
-    \\iint, \\sum, \\prod, \\lim (x\\to a, a^+), \\frac{d}{dx}, derivatives y', y'', \\frac{dy}{dx},
-    \\dot y, matrices (pmatrix/bmatrix; vmatrix = determinant), cases/align systems, several
-    equations separated by \\\\ , commas or ;, degrees (30^\\circ), |x|, n!, \\binom.
+    \\iint, \\sum, \\prod, \\lim (x\\to a, a^+), \\frac{d}{dx}, \\frac{d^n}{dx^n}, \\partial, derivatives
+    y', y'', \\frac{dy}{dx}, \\dot y, evaluation bars (\\left. ... \\right|_{x=2}, |_0^1), matrices
+    (pmatrix/bmatrix; vmatrix = determinant; \\det A), lists \\{1,2,3\\}, cases/align systems, several
+    equations separated by \\\\ , commas or ;, conditions (\\text{for } x>0 -> |x>0), degrees
+    (30^\\circ), |x|, n!, \\binom, \\arg, \\Re, \\Im, sgn, a \\bmod b, := (a:=5 stores, f(x):=... defines).
+    Any other backslash command, or input that can't be read to the end, is an error, not a guess.
+    Accents are separate names (\\bar x -> xbar, x^* -> xstar); T(t)=... with t on the right defines T.
     \\log without a base is base 10 and \\ln is natural; e and i are the constants unless they
     are summation/integration variables. "1,5" between digits is a decimal comma, also inside
     {} groups such as \\frac{1,5}{2}, but not inside (), [] or \\{\\} (f(1,5), \\gcd(12,18), lists).
@@ -135,10 +258,12 @@ async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
     det, inverse, rref, eigenvalues, eigenvectors, desolve, define.
     var: the variable(s) to solve/differentiate for, e.g. "t" or "x,y".
 
-    Returns {action, nspire (the command run), result, result_latex, approx?, approx_latex?}.
-    result_latex is null when the result couldn't be converted; result is always the raw CAS text.
-    Variables stored in the open document (e.g. a:=5) are substituted. If the LaTeX can't be
-    parsed, the error says so; then translate it to TI-Nspire syntax yourself and use nspire_eval.
+    Returns {action, nspire (the command run), result, result_latex, approx?, approx_latex?,
+    warnings?}. result_latex is null when the result couldn't be converted; result is always the
+    raw CAS text. warnings is there when variables stored in the open document (e.g. a:=5) were
+    substituted, a stored function was used or replaced, or the angle mode isn't radian for a
+    trig function: tell the user. If the LaTeX can't be parsed, the error says so; then
+    translate it to TI-Nspire syntax yourself and use nspire_eval.
     """
     # Imported here, not at startup: sympy takes seconds to load and the MCP
     # client times out a server that's slow to answer initialize.
@@ -149,16 +274,22 @@ async def nspire_latex(latex: str, action: str = "auto", var: str | None = None,
         p = await asyncio.to_thread(lx.plan, latex, action, var, order, point)
     except lx.LatexError as e:
         raise ValueError(str(e)) from None
+    notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")  # scan_names, imported outside the session
 
     def work():
-        return lx.run_plan(bridge, p, timeout_s)
-    run = await asyncio.to_thread(bridge.session, work)
+        warnings = doc_warnings(bridge, p.command, timeout_s, notes_mod)
+        return lx.run_plan(bridge, p, timeout_s), warnings
+    run, warnings = await asyncio.to_thread(bridge.session, work)
     # LaTeX conversion after the session, with the user's clipboard already restored
-    return await asyncio.to_thread(lx.format_answer, run)
+    out = await asyncio.to_thread(lx.format_answer, run)
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
-@mcp.tool()
-async def nspire_notes(steps: list[dict], title: str | None = None, page_size: str = "computer",
+@mcp.tool(annotations=_hints("Write a worked solution on a TI-Nspire Notes page"))
+async def nspire_notes(steps: list[NotesStep], title: str | None = None,
+                       page_size: Literal["computer", "handheld"] = "computer",
                        timeout_s: float = 10) -> dict:
     """Write a worked solution onto a new TI-Nspire Notes page, with live math boxes.
 
@@ -184,19 +315,26 @@ async def nspire_notes(steps: list[dict], title: str | None = None, page_size: s
     uses one gets a warning (its page result may differ from the returned one): define it in an
     earlier step instead. It takes about a second per step and types into the TI-Nspire window
     (found by its process, never by title; if several are open the one in front is used), which
-    comes to the front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus it
-    stops without typing anywhere else. Returns {document, window:{hwnd, title, process},
-    steps:[{text, math, result}], warnings:[str], note}. The new document is unsaved.
+    comes to the front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus, or
+    the call is cancelled, it stops without typing anywhere else. Returns {document,
+    window:{hwnd, title, process}, steps:[{text, math, result}], warnings:[str], note}.
+    The new document is unsaved.
 
     page_size: "computer" (default: large page, fills the TI-Nspire window) or "handheld"
     (the calculator's small screen, e.g. to transfer the document to a handheld).
     """
     nb = await asyncio.to_thread(importlib.import_module, "nspire_notes")
+    cancel = threading.Event()  # set when the client cancels the call: the worker stops typing
 
     def work():
-        return nb.build_notes(bridge, steps, title, page_size, timeout_s)
+        return nb.build_notes(bridge, steps, title, page_size, timeout_s, cancel=cancel)
     log.info("notes: %d steps", len(steps))
-    return await asyncio.to_thread(bridge.session, work)
+    try:
+        return await asyncio.to_thread(bridge.session, work)
+    except asyncio.CancelledError:
+        cancel.set()
+        log.info("notes: cancelled")
+        raise
 
 
 if __name__ == "__main__":

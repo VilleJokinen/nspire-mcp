@@ -33,6 +33,10 @@ class LatexError(ValueError):
     pass
 
 
+class TiList(sp.Function):
+    """A TI-Nspire list {a,b,...} (from \\{a,b\\}); never evaluated."""
+
+
 # ================================================================ preprocess
 
 _PH = "Omega"  # placeholder symbols are \Omega_{9NN}; restored after parsing
@@ -42,13 +46,43 @@ _DROP = [r"\displaystyle", r"\textstyle", r"\limits", r"\nolimits", r"\middle",
 _UNICODE = {"−": "-", "·": r"\cdot ", "×": r"\times ", "÷": r"\div ", "≤": r"\leq ", "≥": r"\geq ",
             "≠": r"\neq ", "π": r"\pi ", "∞": r"\infty ", "√": r"\sqrt", "°": r"^{\circ}",
             "θ": r"\theta ", "α": r"\alpha ", "β": r"\beta ", "λ": r"\lambda ", "ω": r"\omega "}
-_STYLE_WRAPPERS = ["mathbf", "boldsymbol", "mathit", "mathsf", "mathtt", "vec", "hat", "bar",
-                   "tilde", "overline", "underline", "mathbb", "mathcal", "bm"]
+# Pure styling, unwrapped. Accents that make a different variable (\bar x, \hat x,
+# \tilde x) are not here: they become names of their own (xbar, xhat, xtilde).
+_STYLE_WRAPPERS = ["mathbf", "boldsymbol", "mathit", "mathsf", "mathtt", "vec", "underline",
+                   "mathbb", "mathcal", "bm"]
+_ACCENTS = {"bar": "bar", "overline": "bar", "hat": "hat", "widehat": "hat", "tilde": "tilde",
+            "widetilde": "tilde"}
 _MATRIX_ENVS = "pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|smallmatrix"
-# \operatorname / \mathrm names sympy's parser knows as commands
+# \operatorname / \mathrm names passed on as commands: sympy's parser knows them, or
+# they are in _FUNCLIKE below
 _KNOWN_CMDS = {"sin", "cos", "tan", "cot", "sec", "csc", "sinh", "cosh", "tanh", "arcsin", "arccos",
-               "arctan", "ln", "log", "exp", "max", "min", "gcd", "lcm", "det"}
+               "arctan", "ln", "log", "exp", "max", "min", "gcd", "lcm", "det", "arg", "Re", "Im",
+               "sgn", "sign", "coth", "sech", "csch"}
+# Commands the parser reads as a plain name: they are functions only when called with
+# parentheses (\max(1,2), \Re(z)); without them \Re z would silently become Re*z.
+_FUNCLIKE = {"max", "min", "gcd", "lcm", "det", "arg", "Re", "Im", "sgn", "sign", "coth", "sech", "csch"}
+# Names that are TI-Nspire or LaTeX functions: as a bare \operatorname{...} they'd be a variable.
+_FUNC_WORDS = {n.lower() for n in _FUNCLIKE} | {"mod", "real", "imag", "conj", "angle", "abs", "floor",
+                                               "ceiling", "ceil", "exp", "ln", "log"}
+_GREEK_CMDS = {"alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta", "vartheta",
+               "iota", "kappa", "varkappa", "lambda", "mu", "nu", "xi", "rho", "varrho", "sigma", "varsigma",
+               "tau", "upsilon", "phi", "varphi", "chi", "psi", "omega", "Gamma", "Delta", "Theta", "Lambda",
+               "Xi", "Sigma", "Upsilon", "Phi", "Psi", "Omega", "pi", "ell"}
+# Every command that may reach SymPy's parser. Any other one is refused: the parser
+# would read \foo as a variable named foo and multiply it in.
+_PARSER_CMDS = _GREEK_CMDS | _FUNCLIKE | {
+    "frac", "binom", "sqrt", "int", "sum", "prod", "lim", "to", "rightarrow", "Rightarrow", "longrightarrow",
+    "Longrightarrow", "exp", "log", "ln", "sin", "cos", "tan", "csc", "sec", "cot", "arcsin", "arccos",
+    "arctan", "arccsc", "arcsec", "arccot", "sinh", "cosh", "tanh", "arsinh", "arcosh", "artanh", "lfloor",
+    "rfloor", "lceil", "rceil", "times", "cdot", "div", "neq", "leq", "le", "leqq", "geq", "ge", "geqq",
+    "infty", "partial"}
+# \text{for x>0} and the like: what follows is a condition (TI-Nspire's "|")
+_CONDITION_WORDS = {"for", "where", "when", "if", "with", "given", "kun", "jos", "missä"}
 _RELATION = re.compile(r"(?<![<>!\\])=|<|>|\\leq?\b|\\geq?\b|\\neq\b|\\ne\b|\\leqslant|\\geqslant")
+# Markers left in the LaTeX between preprocessing steps (letters only, so they pass as commands)
+_WITH = r"\nspireWith"        # a condition follows
+_EVBAR = r"\nspireEvBar"      # an evaluation bar, + id letters
+_EVFROM = r"\nspireEvFrom"    # where the \left. of that bar was, + the same id
 _GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε",
           "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "θ", "iota": "ι", "kappa": "κ",
           "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "rho": "ρ", "sigma": "σ", "tau": "τ",
@@ -63,6 +97,8 @@ class Parsed:
     ode_dep: str | None = None    # dependent variable of an ODE, e.g. "y"
     ode_indep: str | None = None  # independent variable, e.g. "x"
     placeholders: dict = field(default_factory=dict)
+    constraints: list = field(default_factory=list)  # conditions from \text{for ...}, joined with "|"
+    assign: bool = False          # written with :=, e.g. a:=5
 
 
 def _match_brace(s: str, i: int) -> int:
@@ -85,6 +121,62 @@ def _unwrap_cmd(s: str, cmd: str, fn) -> str:
         end = _match_brace(s, m.end() - 1)
         s = s[:m.start()] + fn(s[m.end():end]) + s[end + 1:]
     return s
+
+
+_TOKEN = re.compile(r"\\[A-Za-z]+|\\.|.", re.S)
+_OPEN, _CLOSE = {"(", "[", "{", r"\{"}, {")", "]", "}", r"\}"}
+_REL_TOKENS = {"=", "<", ">", r"\leq", r"\le", r"\geq", r"\ge", r"\neq", r"\ne", r"\leqq", r"\geqq",
+               r"\lt", r"\gt", _WITH}
+_SEP_TOKENS = {",", ";", "&", "\\\\"}
+
+
+def _tokens(s: str) -> list[tuple[int, int, str]]:
+    return [(m.start(), m.end(), m.group()) for m in _TOKEN.finditer(s)]
+
+
+def _operand_start(s: str, pos: int, stops: set[str]) -> int:
+    """Start of the operand that ends at pos: back to a stop token or an unmatched bracket."""
+    depth = 0
+    for a, b, t in reversed([tk for tk in _tokens(s) if tk[1] <= pos]):
+        if t in _CLOSE:
+            depth += 1
+        elif t in _OPEN:
+            if depth == 0:
+                return b
+            depth -= 1
+        elif depth == 0 and t in stops:
+            return b
+    return 0
+
+
+def _operand_end(s: str, pos: int, stops: set[str]) -> int:
+    """End of the operand that starts at pos (a leading sign belongs to it)."""
+    depth, first = 0, True
+    for a, b, t in [tk for tk in _tokens(s) if tk[0] >= pos]:
+        if t.isspace():
+            continue
+        if first and t in "+-":
+            first = False
+            continue
+        first = False
+        if t in _OPEN:
+            depth += 1
+        elif t in _CLOSE:
+            if depth == 0:
+                return a
+            depth -= 1
+        elif depth == 0 and t in stops:
+            return a
+    return len(s)
+
+
+def _id_letters(n: int) -> str:
+    out = ""
+    while True:
+        out = chr(ord("a") + n % 26) + out
+        n = n // 26 - 1
+        if n < 0:
+            return out
 
 
 def _split_top(s: str, seps: tuple[str, ...]) -> list[str]:
@@ -152,6 +244,8 @@ class _Pre:
     def __init__(self) -> None:
         self.placeholders: dict[str, tuple[str, object]] = {}  # name -> (kind, payload)
         self.ode_indep: str | None = None
+        self.constraints: list[str] = []  # LaTeX of the conditions after \text{for ...}
+        self.assign = False                # the input used :=
 
     def ph(self, kind: str, payload) -> str:
         key = f"9{len(self.placeholders):02d}"
@@ -165,26 +259,38 @@ class _Pre:
         # math delimiters and display environments
         s = re.sub(r"^\$\$?|\$\$?$", "", s.strip())
         s = re.sub(r"^\\\[|\\\]$|^\\\(|\\\)$", "", s.strip())
-        s = re.sub(r"\\(begin|end)\{(equation|align|gather|multline|eqnarray|split)\*?\}", "", s)
+        s = re.sub(r"\\(begin|end)\{(equation|align|aligned|alignedat|gather|gathered|multline|eqnarray|split)"
+                   r"\*?\}(\{\d+\})?", "", s)
         s = re.sub(r"\\(label|tag)\{[^}]*\}", "", s)
         s = s.replace("&", " ") if not re.search(r"\\begin\{(" + _MATRIX_ENVS + r"|array|cases)\}", s) else s
+        s = self._assignment(s)
+        s = self._mark_eval_bars(s)  # before \left, \right and \Big are dropped
         for d in _DROP:
             s = s.replace(d, " ")
         s = re.sub(r"\\left\s*\.|\\right\s*\.", " ", s)
         s = re.sub(r"\\(left|right)\b\s*", "", s)  # keep the delimiter that follows
-        s = s.replace(r"\lbrace", r"\{").replace(r"\rbrace", r"\}")
+        s = s.replace(r"\lbrace", r"\{").replace(r"\rbrace", r"\}").replace(r"\lbrack", "[").replace(r"\rbrack", "]")
+        s = re.sub(r"\\[lr]?vert(?![A-Za-z])", "|", s)
         s = re.sub(r"\\q?quad\b", " ", s)
+        s = re.sub(r"\\(?:thin|med|thick|negthin|negmed|negthick)space(?![A-Za-z])", " ", s)
         s = re.sub(r"(?<!\\)\\[,;:! ]", " ", s)  # not the second half of a \\ row break
         s = s.replace("~", " ")
         s = s.replace(r"\dfrac", r"\frac").replace(r"\tfrac", r"\frac").replace(r"\dbinom", r"\binom")
+        s = s.replace(r"\tbinom", r"\binom")
         s = s.replace(r"\iiint", r"\int\int\int").replace(r"\iint", r"\int\int")
         s = s.replace(r"\leqslant", r"\leq").replace(r"\geqslant", r"\geq")
+        s = re.sub(r"\\ne(?![A-Za-z])", r"\\neq ", s)  # the parser knows only \neq
+        s = re.sub(r"\\lt(?![A-Za-z])", "<", s)
+        s = re.sub(r"\\gt(?![A-Za-z])", ">", s)
+        s = re.sub(r"\\arc(sinh|cosh|tanh)(?![A-Za-z])", r"\\ar\1", s)  # the parser's names: \arsinh ...
         s = re.sub(r"\\(land|wedge)\b", r" \\\\ ", s)
         if r"\pm" in s or r"\mp" in s:
             raise LatexError("± isn't supported; write the two cases separately or ask to solve the equation.")
+        s = self._accents(s)
         for w in _STYLE_WRAPPERS:
             s = _unwrap_cmd(s, w, lambda a: "{" + a + "}")
-        s = _unwrap_cmd(s, "text", self._text)
+        for t in ("text", "textrm", "textit", "textbf", "textnormal", "mbox"):
+            s = _unwrap_cmd(s, t, self._text)
         s = _unwrap_cmd(s, r"mathrm", self._name)
         s = _unwrap_cmd(s, r"operatorname\*?", self._name)
         # degrees: 30^\circ -> 30*pi/180
@@ -194,7 +300,11 @@ class _Pre:
         s = re.sub(r"\\log\b(?!\s*_)", r"\\log_{10}", s)
         s = self._derivatives(s)
         s = _decimal_commas(s)  # before matrices, so cells such as 1,5 are converted too
+        s = self._det(s)
         s = self._matrices(s)
+        s = self._lists(s)
+        s = self._bmod(s)
+        s = self._eval_bars(s)
         rows = self._cases(s)
         pieces: list[str] = []
         for r in rows:
@@ -207,16 +317,224 @@ class _Pre:
                     pieces.extend(comma)
                 else:
                     pieces.append(p)
+        pieces = self._split_conditions(pieces)
         pieces = [p.rstrip(".,; ") for p in pieces]
         return [p for p in pieces if p and not re.fullmatch(r"\s*", p)]
 
+    # -- :=
+
+    def _assignment(self, s: str) -> str:
+        """a := 5 (or \\coloneqq): remembered, then written as = for the parser."""
+        pat = re.compile(r"\s*(?::=|\\coloneqq?(?![A-Za-z]))\s*")
+        n = len(pat.findall(s))
+        if n > 1:
+            raise LatexError("Only one ':=' at a time; send each assignment separately.")
+        if n:
+            self.assign = True
+            s = pat.sub(" = ", s)
+        return s
+
+    # -- conditions: \text{for } x>0
+
     def _text(self, arg: str) -> str:
         w = arg.strip().lower()
-        if w in ("and", "ja", ",", "&", "") or w.startswith("and") or w.startswith("for") or w.startswith("kun"):
-            return r" \\ " if w in ("and", "ja", ",", "&") else " "
-        if w in ("or", "tai"):
+        words = w.split()
+        if w in ("and", "ja", ",", "&"):
+            return r" \\ "
+        if not words or w.startswith("and"):
+            return " "
+        if words[0] in ("or", "tai"):
             raise LatexError("'or' between equations isn't supported; send each case separately.")
+        if words[0] in _CONDITION_WORDS:
+            return f" {_WITH} "
         return " "
+
+    def _split_conditions(self, pieces: list[str]) -> list[str]:
+        """Everything after the first \\text{for/where/...} is a condition, not an equation."""
+        out: list[str] = []
+        found = False
+        for p in pieces:
+            parts = p.split(_WITH)
+            if not found:
+                out.append(parts[0])
+                parts = parts[1:]
+                found = bool(parts)
+            self.constraints.extend(parts)
+        if found:
+            conds = [c.strip().rstrip(".,; ") for c in self.constraints]
+            conds = [c for c in conds if c]
+            if not conds:
+                raise LatexError("Nothing follows the \\text{for ...}: write the condition, e.g. x>0.")
+            for c in conds:
+                if not _RELATION.search(c):
+                    raise LatexError(f"The condition {c.strip()!r} isn't a comparison such as x>0; "
+                                     "write it in TI-Nspire syntax with | and use nspire_eval.")
+            self.constraints = conds
+        return out
+
+    # -- accents: \bar x is a variable of its own
+
+    def _accents(self, s: str) -> str:
+        cmds = "|".join(_ACCENTS)
+        s = re.sub(r"\\(" + cmds + r")(?![A-Za-z])\s*(\\[A-Za-z]+|[A-Za-z])", r"\\\1{\2}", s)
+        for cmd, suffix in _ACCENTS.items():
+            s = _unwrap_cmd(s, cmd, lambda a, c=cmd, x=suffix: self._accented(a, c, x))
+        # x^* (conjugate, optimum, ...) is a name of its own too
+        star = re.compile(r"(\\[A-Za-z]+|[A-Za-z])\s*\^\s*(?:\{\s*(?:\*|\\ast|\\star)\s*\}|\*|\\ast(?![A-Za-z])"
+                          r"|\\star(?![A-Za-z]))")
+        return star.sub(lambda m: self._accented(m.group(1), "^*", "star"), s)
+
+    def _accented(self, arg: str, cmd: str, suffix: str) -> str:
+        a = arg.strip()
+        if re.fullmatch(r"[A-Za-z]", a):
+            return self.ph("name", a + suffix)
+        m = re.fullmatch(r"\\([A-Za-z]+)", a)
+        if m and m.group(1) in _GREEK_CMDS and m.group(1) != "pi":
+            return self.ph("name", m.group(1) + suffix)
+        what = f"{a}^*" if cmd == "^*" else f"\\{cmd}{{{a}}}"
+        raise LatexError(f"{what} isn't supported (only over a single letter); write it in TI-Nspire syntax "
+                         "and use nspire_eval.")
+
+    def _name(self, arg: str) -> str:
+        a = arg.strip()
+        if a in ("d",):
+            return " d"
+        if a in ("e", "i"):
+            return f" {a} "
+        if len(a) == 1:
+            return a
+        if a in _KNOWN_CMDS:
+            return f"\\{a} "
+        return self.ph("name", a)
+
+    # -- evaluation bars: \left. f \right|_{x=a}
+
+    def _mark_eval_bars(self, s: str) -> str:
+        """Mark evaluation bars before \\left, \\right and \\big are dropped.
+
+        A bar is one when it closes a \\left. or, outside any open |...|, is
+        followed by limits (_ or ^). The parser itself would substitute into
+        only the last factor before the bar (d/dx x^2 |_{x=2} -> derivative(2^2,x)).
+        """
+        bar = r"(?:\||\\[lr]?vert(?![A-Za-z]))"
+        pat = re.compile(r"\\(left|right)\s*(\\[A-Za-z]+|\\[{}|]|[.|()\[\]])"
+                         r"|\\(?:big|Big|bigg|Bigg)[lrm]?\s*" + bar + r"|(?<!\\)\||\\[lr]?vert(?![A-Za-z])")
+        stack: list[tuple[int, int, str]] = []
+        edits: list[tuple[int, int, str]] = []
+        parity, count = 0, 0
+        for m in pat.finditer(s):
+            limits = re.match(r"\s*[_^]", s[m.end():]) is not None
+            if m.group(1) == "left":
+                stack.append((m.start(), m.end(), m.group(2)))
+            elif m.group(1) == "right":
+                left = stack.pop() if stack else None
+                is_bar = re.fullmatch(bar, m.group(2)) is not None
+                if left and left[2] == "." and is_bar and limits:
+                    bid = _id_letters(count)
+                    count += 1
+                    edits += [(left[0], left[1], f" {_EVFROM}{bid} "), (m.start(), m.end(), f" {_EVBAR}{bid} ")]
+            elif limits and parity == 0:
+                edits.append((m.start(), m.end(), f" {_EVBAR}{_id_letters(count)} "))
+                count += 1
+            else:
+                parity ^= 1
+        for a, b, rep in sorted(edits, reverse=True):
+            s = s[:a] + rep + s[b:]
+        return s
+
+    def _eval_bars(self, s: str) -> str:
+        pat = re.compile(re.escape(_EVBAR) + r"([a-z]+)")
+        while (m := pat.search(s)):
+            lo, hi, end = self._bar_limits(s, m.end())
+            fm = re.search(re.escape(_EVFROM) + m.group(1) + r"(?![a-z])", s[:m.start()])
+            if fm:
+                start, body = fm.start(), s[fm.end():m.start()]
+            else:
+                start = _operand_start(s, m.start(), _REL_TOKENS | _SEP_TOKENS)
+                body = s[start:m.start()]
+            if not body.strip():
+                raise LatexError("Nothing to evaluate before the bar |_{...}.")
+            s = s[:start] + self.ph("evalat", (body, lo, hi)) + s[end:]
+        return re.sub(re.escape(_EVFROM) + r"[a-z]+", " ", s)
+
+    @staticmethod
+    def _bar_limits(s: str, i: int) -> tuple[str | None, str | None, int]:
+        lo = hi = None
+        while (m := re.compile(r"\s*([_^])\s*").match(s, i)):
+            j = m.end()
+            if j < len(s) and s[j] == "{":
+                k = _match_brace(s, j)
+                val, i = s[j + 1:k], k + 1
+            else:
+                t = re.compile(r"\\[A-Za-z]+|[A-Za-z0-9]").match(s, j)
+                if not t:
+                    raise LatexError("Couldn't read the limits after the evaluation bar.")
+                val, i = t.group(), t.end()
+            if m.group(1) == "_":
+                if lo is not None:
+                    raise LatexError("The evaluation bar has two lower limits.")
+                lo = val
+            else:
+                if hi is not None:
+                    raise LatexError("The evaluation bar has two upper limits.")
+                hi = val
+        return lo, hi, i
+
+    # -- \det, lists, \bmod
+
+    def _det(self, s: str) -> str:
+        """\\det before a matrix or a letter takes it as its argument: \\det A -> \\det(A)."""
+        s = re.sub(r"\\det\s*(\\begin\{(" + _MATRIX_ENVS + r")\}.*?\\end\{\2\})", r"\\det(\1)", s, flags=re.S)
+        return re.sub(r"\\det\s*(?:([A-Za-z])|\{\s*([A-Za-z])\s*\})(?![A-Za-z])",
+                      lambda m: rf"\det({m.group(1) or m.group(2)})", s)
+
+    def _lists(self, s: str) -> str:
+        """\\{1,2,3\\} -> a TI-Nspire list. A single item in \\{\\} stays a group."""
+        i = 0
+        while (j := s.find(r"\{", i)) != -1:
+            if j > 0 and s[j - 1] == "\\":  # the {...} after a \\ row break
+                i = j + 2
+                continue
+            depth, k = 0, j
+            while k < len(s):
+                if s.startswith(r"\{", k):
+                    depth += 1
+                    k += 2
+                    continue
+                if s.startswith(r"\}", k):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                    k += 2
+                    continue
+                k += 1
+            if k >= len(s) or r"\begin{cases}" in s[j:k]:
+                i = j + 2
+                continue
+            items = _split_top(s[j + 2:k], (",",))
+            if len(items) < 2:
+                i = j + 2
+                continue
+            rep = self.ph("list", items)
+            s = s[:j] + rep + s[k + 2:]
+            i = j + len(rep)
+        return s
+
+    def _bmod(self, s: str) -> str:
+        """a \\bmod b -> mod(a,b), with \\bmod binding like a product."""
+        if re.search(r"\\pmod(?![A-Za-z])", s):
+            raise LatexError("\\pmod (congruences) isn't supported; write mod(a,n)=mod(b,n) with nspire_eval.")
+        pat = re.compile(r"\\b?mod(?![A-Za-z])")
+        right_stops = _REL_TOKENS | _SEP_TOKENS | {"+", "-", r"\cdot", r"\times", "*", "/", r"\div",
+                                                   r"\bmod", r"\mod"}
+        while (m := pat.search(s)):
+            start = _operand_start(s, m.start(), _REL_TOKENS | _SEP_TOKENS | {"+", "-"})
+            end = _operand_end(s, m.end(), right_stops)
+            a, b = s[start:m.start()].strip(), s[m.end():end].strip()
+            if not a or not b:
+                raise LatexError("\\bmod needs a number on each side, e.g. 12 \\bmod 5.")
+            s = s[:start] + self.ph("name", "mod") + f"({a},{b})" + s[end:]
+        return s
 
     def _name(self, arg: str) -> str:
         a = arg.strip()
@@ -240,6 +558,21 @@ class _Pre:
             self.ode_indep = self.ode_indep or m.group(3)
             return f"{m.group(2)}{chr(39) * n}"
         s = pat.sub(rep, s)
+        # operator form \frac{d^2}{dx^2} f, \frac{\partial^2}{\partial x \partial y} f: the
+        # parser knows only \frac{d}{dx}, so repeat that
+        op = re.compile(r"\\frac\s*\{\s*(d|\\partial)\s*\^\s*\{?\s*(\d+)\s*\}?\s*\}\s*(?=\{)")
+        one = r"(?:d|\\partial)\s*\(?\s*(\\[A-Za-z]+|[A-Za-z])\s*\)?\s*(?:\^\s*\{?\s*(\d+)\s*\}?)?"
+        while (m := op.search(s)):
+            d, n = m.group(1), int(m.group(2))
+            end = _match_brace(s, m.end())
+            den = s[m.end() + 1:end]
+            parts = re.findall(one, den)
+            if not parts or re.sub(one, "", den).strip():
+                raise LatexError(f"Couldn't read the derivative \\frac{{{d}^{n}}}{{{den}}}.")
+            vs = [v for v, k in parts for _ in range(int(k or 1))]
+            if len(vs) != n:
+                raise LatexError(f"The orders in \\frac{{{d}^{n}}}{{{den}}} don't add up to {n}.")
+            s = s[:m.start()] + "".join(rf"\frac{{{d}}}{{{d} {v}}}" for v in vs) + s[end + 1:]
         # y^{\prime\prime}, y^{(3)}, \dot y, \ddot y
         s = re.sub(r"\^\s*\{\s*((?:\\prime\s*)+)\}", lambda m: "'" * m.group(1).count("prime"), s)
         s = re.sub(r"\^\s*\\prime", "'", s)
@@ -282,7 +615,25 @@ _RESERVED = {"e", "i", "pi"}
 _antlr_imported = False
 
 
+def _check_commands(src: str) -> None:
+    """Refuse commands the parser would misread: it takes any unknown \\foo as a variable foo."""
+    for m in re.finditer(r"\\([A-Za-z]+)|\\.", src):
+        cmd = m.group(1)
+        if cmd is None:
+            continue
+        if cmd in _FUNCLIKE:
+            if not re.match(r"\s*\(", src[m.end():]):
+                raise LatexError(f"Write \\{cmd} with its argument in parentheses, e.g. \\{cmd}(x).")
+        elif cmd not in _PARSER_CMDS:
+            if cmd.startswith("nspire"):
+                raise LatexError("Couldn't place the evaluation bar or the condition in this LaTeX; write it in "
+                                 "TI-Nspire syntax and use nspire_eval.")
+            raise LatexError(f"\\{cmd} isn't supported by the LaTeX translator; write the problem in TI-Nspire "
+                             "syntax and use nspire_eval instead.")
+
+
 def _parse_one(src: str) -> sp.Basic:
+    _check_commands(src)
     global _antlr_imported
     if not _antlr_imported:
         # Import the parser with evaluation on: importing it builds
@@ -296,9 +647,14 @@ def _parse_one(src: str) -> sp.Basic:
         # evaluate(False) keeps what the parser builds as written: x=x stays an
         # equation, -(x-1) isn't distributed, binomial(5,2) isn't computed
         with sp.evaluate(False):
-            return parse_latex(src, backend="antlr")
+            # strict: fail if the parser stops early. Without it, "2x ) + 7" reads as 2x
+            # and "x^2 = 4 ] ..." as x^2 = 4, silently dropping the rest.
+            return parse_latex(src, strict=True, backend="antlr")
     except Exception as e:
         first = str(e).splitlines()[0] if str(e) else type(e).__name__
+        if first == "Invalid LaTeX":
+            raise LatexError(f"Couldn't parse all of the LaTeX {src.strip()!r}: something in it isn't understood "
+                             "(an unmatched bracket, or text after the expression?).") from None
         raise LatexError(f"Couldn't parse LaTeX {src!r}: {first}") from None
 
 
@@ -376,12 +732,35 @@ def parse(latex: str) -> Parsed:
     if not pieces:
         raise LatexError("The LaTeX is empty.")
     raw = [_parse_one(p) for p in pieces]
+    raw_conds = [_parse_one(c) for c in pre.constraints]
 
-    # matrix placeholders: parse their cells (cleaned up by walk() below)
-    ph_values: dict[str, tuple[str, sp.ImmutableMatrix]] = {}
+    # placeholders with LaTeX inside: parse it (cleaned up by walk() below)
+    ph_values: dict[str, tuple[str, object]] = {}
     for name, (kind, payload) in pre.placeholders.items():
         if kind in ("matrix", "det"):
             ph_values[name] = (kind, sp.ImmutableMatrix([[_parse_one(c) for c in row] for row in payload]))
+        elif kind == "evalat":
+            ph_values[name] = (kind, tuple(None if x is None else _parse_one(x) for x in payload))
+        elif kind == "list":
+            ph_values[name] = (kind, [_parse_one(x) for x in payload])
+
+    # T(t) = 20+80e^{-0.1t} defines T: only f g h F G H are functions otherwise, so
+    # T(t) would be the product T*t. A name on the left called with bare variables
+    # that appear on the right (and the name itself doesn't) is a definition.
+    fn_heads: set[str] = set()
+    if len(raw) == 1 and isinstance(raw[0], sp.Eq) and isinstance(raw[0].lhs, AppliedUndef):
+        head, rhs = raw[0].lhs, raw[0].rhs
+        n = head.func.__name__
+        rhs_names = {s.name for s in rhs.free_symbols} | {f.func.__name__ for f in rhs.atoms(AppliedUndef)}
+        if n not in ("e", "i") and "'" not in n and n not in pre.placeholders \
+                and head.args and all(a.is_Symbol and a.name != n for a in head.args) \
+                and (pre.assign or (all(a.name in rhs_names for a in head.args) and n not in rhs_names)):
+            if n in ("x", "y", "z", "t") and not pre.assign and n not in _FUNC_NAMES:
+                # Defining x would turn the document's main variable into a function: ask
+                args = ",".join(a.name for a in head.args)
+                raise LatexError(f"{n}({args})=... would define {n} as a function in the document, replacing the "
+                                 f"variable {n}. Write {n}({args}):=... to define it, or {n}\\cdot({args}) for a product.")
+            fn_heads.add(n)
 
     prime_names = set()
     for e in raw:
@@ -401,11 +780,18 @@ def parse(latex: str) -> Parsed:
             if isinstance(node, sp.Symbol):
                 n = node.name
                 if n in ph_values:
-                    kind, m = ph_values[n]
-                    m = m.applyfunc(walk)
+                    kind, v = ph_values[n]
+                    if kind == "evalat":
+                        return _eval_at(*v)
+                    if kind == "list":
+                        return TiList(*[fix(x) for x in v], evaluate=False)
+                    m = v.applyfunc(walk)
                     return sp.Function("det")(m) if kind == "det" else m
                 if n in pre.placeholders:
-                    return sp.Symbol(pre.placeholders[n][1])
+                    name = pre.placeholders[n][1]
+                    if name.lower() in _FUNC_WORDS:
+                        raise LatexError(f"Write {name} with its argument in parentheses, e.g. {name}(x).")
+                    return sp.Symbol(name)
                 if n not in bound:
                     if n == "e":
                         return sp.E
@@ -427,7 +813,7 @@ def parse(latex: str) -> Parsed:
                     d = sp.Derivative(f(v), (v, k))
                     return d if a.is_Symbol else sp.Subs(d, v, a)
                 is_func = (n in _FUNC_NAMES or re.fullmatch(r"[A-Za-z]'+", n) or n == ode_dep
-                           or n in ("gcd", "lcm", "max", "min", "det"))
+                           or n in _FUNCLIKE or n in fn_heads)
                 if not is_func and len(args) == 1 and n not in ("e",):
                     # x(x+1) is a product, not a call
                     sym = {"e": sp.E, "i": sp.I}.get(n, sp.Symbol(n))
@@ -452,12 +838,39 @@ def parse(latex: str) -> Parsed:
                 return node.func(*new)
         return walk(e)
 
+    def _eval_at(body, lo, hi):
+        """f |_{x=a} -> (f|x=a);  f |_{a}^{b} -> (f|x=b) - (f|x=a). Applied after f is evaluated."""
+        body = fix(body)
+
+        def point(lim):
+            lim = fix(lim)
+            if isinstance(lim, sp.Eq):
+                if not lim.lhs.is_Symbol:
+                    raise LatexError("The evaluation bar's limit must look like x=2.")
+                return lim.lhs, lim.rhs
+            return None, lim
+        if lo is None:
+            raise LatexError("An evaluation bar needs a lower limit, e.g. \\Big|_{x=2} or \\Big|_{0}^{1}.")
+        v_lo, a = point(lo)
+        v_hi, b = point(hi) if hi is not None else (None, None)
+        var = v_lo or v_hi
+        if var is None:
+            free = sorted(body.free_symbols, key=str)
+            if len(free) != 1:
+                raise LatexError("Say which variable the evaluation bar sets, e.g. \\Big|_{x=0}^{1}.")
+            var = free[0]
+        if hi is None:
+            return sp.Subs(body, var, a)
+        return sp.Add(sp.Subs(body, var, b), sp.Mul(sp.S.NegativeOne, sp.Subs(body, var, a), evaluate=False),
+                      evaluate=False)
+
     exprs = [fix(e) for e in raw]
+    conds = [fix(c) for c in raw_conds]
     indep = pre.ode_indep
     if ode_dep and not indep:
         indep = _ode_indep(raw, ode_dep, all_syms)
     return Parsed(exprs=exprs, ode_dep=ode_dep, ode_indep=indep if ode_dep else None,
-                  placeholders=pre.placeholders)
+                  placeholders=pre.placeholders, constraints=conds, assign=pre.assign)
 
 
 # ================================================================ print (sympy -> TI-Nspire)
@@ -466,7 +879,7 @@ _FN_MAP = {"asin": "arcsin", "acos": "arccos", "atan": "arctan", "acot": "arccot
            "acsc": "arccsc", "asinh": "arcsinh", "acosh": "arccosh", "atanh": "arctanh",
            "Abs": "abs", "ceiling": "ceiling", "floor": "floor", "sign": "sign", "Max": "max",
            "Min": "min", "re": "real", "im": "imag", "Re": "real", "Im": "imag", "conjugate": "conj", "arg": "angle",
-           "binomial": "nCr", "exp": "exp", "gcd": "gcd", "lcm": "lcm"}
+           "binomial": "nCr", "exp": "exp", "gcd": "gcd", "lcm": "lcm", "sgn": "sign"}
 
 
 def _clean_name(n: str) -> str:
@@ -664,10 +1077,25 @@ class NspirePrinter(StrPrinter):
         return s
 
     def _print_Derivative(self, e):
-        s = self._print(e.expr)
-        for v, n in e.variable_count:
-            s = f"derivative({s},{self._print(v)}" + (f",{n})" if n != 1 else ")")
+        # \frac{d}{dx}\frac{d}{dx} f is nested, or merged with an unevaluated count (x, 1 + 1)
+        expr, counts = e.expr, list(e.variable_count)
+        while isinstance(expr, sp.Derivative):
+            counts = list(expr.variable_count) + counts
+            expr = expr.expr
+        merged: list[list] = []
+        for v, n in counts:
+            n = int(n) if n.is_number else n
+            if merged and merged[-1][0] == v:
+                merged[-1][1] = merged[-1][1] + n
+            else:
+                merged.append([v, n])
+        s = self._print(expr)
+        for v, n in merged:
+            s = f"derivative({s},{self._print(v)}" + (f",{self._print(sp.sympify(n))})" if n != 1 else ")")
         return s
+
+    def _print_TiList(self, e):
+        return "{" + ",".join(self._print(a) for a in e.args) + "}"
 
     def _print_Subs(self, e):
         expr, vs, pts = e.args
@@ -764,9 +1192,29 @@ def plan(latex: str, action: str = "auto", var: str | None = None, order: int | 
     if action != "auto" and action not in ACTIONS:
         raise LatexError(f"Unknown action {action!r}. Use auto or one of: {', '.join(ACTIONS)}.")
     p = parse(latex)
+    pl = _plan(p, action, var, order, point)
+    if p.constraints:
+        # \text{for } x>0: TI-Nspire's "with" operator, applied to the result
+        pl.command += "|" + " and ".join(to_nspire(c, p) for c in p.constraints)
+    return pl
+
+
+def _plan(p: Parsed, action: str, var: str | None, order: int | None, point: str | None) -> Plan:
     exprs = p.exprs
     rels = [e for e in exprs if isinstance(e, Relational)]
     user_vars = [v.strip() for v in re.split(r"[,\s]+", var) if v.strip()] if var else []
+
+    if p.assign:
+        if action not in ("auto", "define"):
+            raise LatexError("':=' stores a value; use action auto (or define).")
+        if len(exprs) != 1 or not isinstance(exprs[0], sp.Eq):
+            raise LatexError("':=' needs one name on the left, e.g. a:=5.")
+        lhs = exprs[0].lhs
+        if isinstance(lhs, sp.Symbol):
+            name = to_nspire(lhs, p)
+            return Plan(f"{name}:={to_nspire(exprs[0].rhs, p)}", "define", f"store {name}", [], p)
+        if not (isinstance(lhs, AppliedUndef) and all(a.is_Symbol for a in lhs.args)):
+            raise LatexError("':=' needs a name (a:=5) or a function (f(x):=x^2) on the left.")
 
     if action in ("auto", "define") and len(exprs) == 1 and isinstance(exprs[0], sp.Eq) \
             and isinstance(exprs[0].lhs, AppliedUndef) and all(a.is_Symbol for a in exprs[0].lhs.args) \
@@ -882,11 +1330,12 @@ def _split_rel(s: str) -> tuple[list[str], list[str]]:
             depth -= 1
         if depth == 0:
             two = s[i:i + 2]
-            if two in ("<=", ">=", "!="):
-                parts.append(cur); ops.append(two); cur = ""; i += 2
-                continue
-            if c in "=<>":
-                parts.append(cur); ops.append(c); cur = ""; i += 1
+            op = two if two in ("<=", ">=", "!=") else c if c in "=<>" else None
+            if op:
+                parts.append(cur)
+                ops.append(op)
+                cur = ""
+                i += len(op)
                 continue
         cur += c
         i += 1

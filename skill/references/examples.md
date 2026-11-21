@@ -47,6 +47,11 @@ removes `f` so it does not affect later work.
 | `x^4-1` | factor | `factor(x^4 - 1)` |
 | `\sqrt{8}` | auto | `√(8)`, sent as written (result `2*√(2)`) |
 | `f(x)=x^2+1` | auto | `Define f(x)=x^2 + 1` (stays defined) |
+| `\left.\frac{d}{dx}x^3\right\|_{x=2}` | auto | `(derivative(x^3,x)\|x=2)` (result `12`) |
+| `\frac{d^2}{dx^2}x^4` | auto | `derivative(x^4,x,2)` (result `12*x^2`) |
+| `x^2=2 \text{ for } x>0` | auto | `solve(x^2=2,x)\|x>0` (result `x=√(2)`) |
+| `\det\begin{pmatrix}1&2\\3&4\end{pmatrix}` | auto | `det([[1,2][3,4]])` (result `−2`) |
+| `x \in \mathbb{R}` | auto | error: `\in` isn't supported; write it for `nspire_eval` |
 
 Show the user `result_latex` when present; it is ready to paste into a
 document.

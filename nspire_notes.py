@@ -7,17 +7,19 @@ of text followed by a math box that TI-Nspire evaluates itself (live, editable).
 Every math expression is first checked through the bridge, because a math box
 that errors opens a modal popup in TI-Nspire; if any step fails, nothing is typed.
 The window is found once, by the exe of its process (never by its title), and that
-handle is used for the whole run. While typing, it stops as soon as TI-Nspire isn't
-the foreground window, so it never types into another program.
+handle is used for the whole run. Before every key and every typed character it
+checks that TI-Nspire is still the foreground window and that the run wasn't
+cancelled, so it stops instead of typing into another program.
 """
 from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 
-from nspire_bridge import Bridge, clip_set, readable, to_cas_chars
+from nspire_bridge import TIMEOUT_MAX_S, TIMEOUT_MIN_S, Bridge, clip_set, readable, to_cas_chars
 from nspire_keys import (chord, describe_window, find_nspire_windows, focus_nspire, foreground_is, menu_area,
                          menu_changed, process_windows, type_text, wait_for_popup, window_title)
 
@@ -80,8 +82,9 @@ def check_options(title: str | None, page_size: str, timeout_s: float) -> None:
         raise ValueError("page_size must be 'computer' or 'handheld'")
     if title is not None and (not isinstance(title, str) or "\n" in title or "\r" in title):
         raise ValueError("title must be a single line of text")
-    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not 0 < timeout_s <= 600:
-        raise ValueError("timeout_s must be a number of seconds between 0 and 600")
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) \
+            or not TIMEOUT_MIN_S <= timeout_s <= TIMEOUT_MAX_S:
+        raise ValueError(f"timeout_s must be a number of seconds between {TIMEOUT_MIN_S:g} and {TIMEOUT_MAX_S:g}")
 
 
 def plan_steps(steps: list[dict]) -> list[dict]:
@@ -126,6 +129,7 @@ class _Saved:
     name: str
     old_type: str       # "NONE" if it didn't exist
     value: str | None   # CAS text that restores it; None if it didn't exist or can't be read back
+    evaluated: bool = False  # value is the evaluated form, which may differ from what was stored
 
 
 def _type_of(bridge: Bridge, name: str, timeout_s: float) -> str:
@@ -147,14 +151,22 @@ def _bridge_vars(bridge: Bridge, timeout_s: float) -> dict[str, str] | None:
     return {n.lower(): t for n, t in rows} if rows else None
 
 
-def _snapshot(bridge: Bridge, name: str, old_type: str, timeout_s: float) -> _Saved:
+# Types whose stored value can hold other variables' names. Reading one back
+# evaluates it, so a:=x+1 stored while x was undefined reads back as 3 once x:=2.
+_SYMBOLIC_TYPES = {"EXPR", "LIST", "MAT"}
+
+
+def _snapshot(bridge: Bridge, name: str, old_type: str, timeout_s: float, others_stored: bool = True) -> _Saved:
+    """others_stored: other variables exist in the bridge document (or that's unknown).
+    Without them nothing can be substituted, so the value read back is exactly what was stored."""
     value = None
     if old_type not in ("NONE", "FUNC", "PRGM"):  # a function's body can't be read back by evaluating it
         try:
             value = bridge.eval_one(name, timeout_s, raw=True)
         except ValueError:
             pass
-    return _Saved(name, old_type, value)
+    evaluated = value is not None and old_type.upper() in _SYMBOLIC_TYPES and others_stored
+    return _Saved(name, old_type, value, evaluated)
 
 
 def _undo(bridge: Bridge, saved: dict[str, _Saved], timeout_s: float) -> list[str]:
@@ -166,6 +178,10 @@ def _undo(bridge: Bridge, saved: dict[str, _Saved], timeout_s: float) -> list[st
                 bridge.eval_one(f"DelVar {sv.name}", timeout_s)
             elif sv.value is not None:
                 bridge.eval_one(f"{sv.name}:={sv.value}", timeout_s)
+                if sv.evaluated:
+                    warnings.append(f"Checking the steps redefined {sv.name} ({sv.old_type}), which already existed "
+                                    f"in the bridge document; it was restored as {readable(sv.value)}. If it was "
+                                    f"stored as an expression of other variables, that link is lost.")
             else:
                 warnings.append(f"Checking the steps redefined {sv.name} ({sv.old_type}), which already existed in "
                                 f"the bridge document; its old definition couldn't be restored.")
@@ -175,14 +191,16 @@ def _undo(bridge: Bridge, saved: dict[str, _Saved], timeout_s: float) -> list[st
     return warnings
 
 
-def _prepare(bridge: Bridge, items: list[dict], timeout_s: float) -> list[str]:
+def _prepare(bridge: Bridge, items: list[dict], timeout_s: float,
+             cancel: threading.Event | None = None) -> list[str]:
     """Evaluate every math step on the bridge (fills result and seconds), then undo what that changed there.
 
-    Returns warnings. Raises ValueError naming the first step that fails.
+    Returns warnings. Raises ValueError naming the first step that fails, or NotesAborted
+    if cancel is set between steps (the undo runs either way).
     """
     saved: dict[str, _Saved] = {}
     try:
-        warnings = _run_steps(bridge, items, timeout_s, saved)
+        warnings = _run_steps(bridge, items, timeout_s, saved, cancel)
     except BaseException as e:
         extra = _undo(bridge, saved, timeout_s)
         if extra and isinstance(e, ValueError):
@@ -193,7 +211,17 @@ def _prepare(bridge: Bridge, items: list[dict], timeout_s: float) -> list[str]:
     return warnings + _undo(bridge, saved, timeout_s)
 
 
-def _run_steps(bridge: Bridge, items: list[dict], timeout_s: float, saved: dict[str, _Saved]) -> list[str]:
+def _check_cancel(cancel: threading.Event | None, typing: bool = False) -> None:
+    if cancel is not None and cancel.is_set():
+        if typing:
+            raise NotesAborted("Cancelled, so typing stopped. The new, unsaved document in TI-Nspire may hold a "
+                               "partly built page; nothing was typed elsewhere.")
+        raise NotesAborted("Cancelled before anything was typed into TI-Nspire.")
+
+
+def _run_steps(bridge: Bridge, items: list[dict], timeout_s: float, saved: dict[str, _Saved],
+               cancel: threading.Event | None = None) -> list[str]:
+    _check_cancel(cancel)
     existing = _bridge_vars(bridge, timeout_s)  # None: couldn't list them, so ask getType name by name
     types: dict[str, str] = {}
 
@@ -203,9 +231,13 @@ def _run_steps(bridge: Bridge, items: list[dict], timeout_s: float, saved: dict[
             types[key] = existing.get(key, "NONE") if existing is not None else _type_of(bridge, name, timeout_s)
         return types[key]
 
+    def others_stored(name: str) -> bool:
+        return existing is None or any(k != name.lower() for k in existing)
+
     warnings: list[str] = []
     defined: set[str] = set()  # names earlier steps define: the new document gets those too
     for i, it in enumerate(items, 1):
+        _check_cancel(cancel)
         cmd = it["cmd"]
         if not cmd:
             continue
@@ -217,7 +249,7 @@ def _run_steps(bridge: Bridge, items: list[dict], timeout_s: float, saved: dict[
                             f"Define {'it' if len(stale) == 1 else 'them'} in an earlier step or write the value in.")
         for name in names.defines:
             if name.lower() not in saved:
-                saved[name.lower()] = _snapshot(bridge, name, type_of(name), timeout_s)
+                saved[name.lower()] = _snapshot(bridge, name, type_of(name), timeout_s, others_stored(name))
         defined.update(n.lower() for n in names.defines)
         t0 = time.monotonic()
         try:
@@ -230,17 +262,26 @@ def _run_steps(bridge: Bridge, items: list[dict], timeout_s: float, saved: dict[
 
 # ------------------------------------------------------------ typing into TI-Nspire
 
-def _guard(hwnd: int) -> None:
-    if not foreground_is(hwnd):
-        raise NotesAborted("TI-Nspire stopped being the active window, so typing stopped. "
-                           "The page is partly built; nothing was typed elsewhere.")
+class _Guard:
+    """Runs before every key and typed character: stops the run if it was cancelled
+    or if TI-Nspire (hwnd's process) is no longer the foreground window."""
+
+    def __init__(self, hwnd: int, cancel: threading.Event | None = None):
+        self.hwnd = hwnd
+        self.cancel = cancel
+
+    def __call__(self) -> None:
+        _check_cancel(self.cancel, typing=True)
+        if not foreground_is(self.hwnd):
+            raise NotesAborted("TI-Nspire stopped being the active window, so typing stopped; nothing was typed "
+                               "elsewhere. The new, unsaved document in TI-Nspire may hold a partly built page.")
 
 
-def _paste(hwnd: int, text: str) -> None:
+def _paste(guard: _Guard, text: str) -> None:
+    guard()
     clip_set(text)
     time.sleep(0.12)
-    _guard(hwnd)
-    chord("ctrl+v", pause=0.35)
+    chord("ctrl+v", pause=0.35, guard=guard)
 
 
 def _doc_name(hwnd: int) -> str:
@@ -258,10 +299,11 @@ def _wait_doc_change(hwnd: int, old: str, timeout: float) -> str | None:
     return None
 
 
-def _new_handheld_notes(hwnd: int) -> str:
+def _new_handheld_notes(guard: _Guard) -> str:
     """Ctrl+N (handheld-size document), then "Add Notes" from the add-page menu."""
+    hwnd = guard.hwnd
     before = _doc_name(hwnd)
-    chord("ctrl+n", pause=0.2)
+    chord("ctrl+n", pause=0.2, guard=guard)
     name = _wait_doc_change(hwnd, before, 8)
     if not name:
         raise NotesAborted("TI-Nspire didn't open a new document (is a dialog open in it?).")
@@ -270,8 +312,7 @@ def _new_handheld_notes(hwnd: int) -> str:
     if not wait_for_popup(hwnd, windows):
         time.sleep(1.5)
     time.sleep(0.3)
-    _guard(hwnd)
-    chord(NOTES_MENU_KEY, pause=0.9)  # on handheld documents the number picks the item at once
+    chord(NOTES_MENU_KEY, pause=0.9, guard=guard)  # on handheld documents the number picks the item at once
     return name
 
 
@@ -291,28 +332,28 @@ def _settled_menu_area(hwnd: int, timeout: float = 4.0) -> bytes:
     return prev
 
 
-def _menu(hwnd: int, menu_index: int, item_index: int, what: str) -> None:
+def _menu(guard: _Guard, menu_index: int, item_index: int, what: str) -> None:
     """Pick a menu-bar item by position (1-based), so any UI language works.
 
     Right after a new document opens TI-Nspire ignores the Alt. Its menus are drawn
     by Java inside the window, invisible to Windows, so whether one opened is told
     from the pixels where it appears; if it didn't, try again.
     """
+    hwnd = guard.hwnd
     for attempt in range(5):
-        _guard(hwnd)
+        guard()
         base = _settled_menu_area(hwnd)
-        chord("alt", pause=0.15)
+        chord("alt", pause=0.15, guard=guard)
         for _ in range(menu_index - 1):
-            chord("right", pause=0.05)
-        chord("down", pause=0.05)  # opens the menu with its first item highlighted
+            chord("right", pause=0.05, guard=guard)
+        chord("down", pause=0.05, guard=guard)  # opens the menu with its first item highlighted
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
             if menu_changed(base, menu_area(hwnd)) > MENU_OPEN_PIXELS:
                 time.sleep(0.1)
                 for _ in range(item_index - 1):
-                    chord("down", pause=0.05)
-                _guard(hwnd)
-                chord("enter", pause=0.2)
+                    chord("down", pause=0.05, guard=guard)
+                chord("enter", pause=0.2, guard=guard)
                 return
             time.sleep(0.05)
         # No Esc to back out: if focus had moved to another program, Esc would land
@@ -322,7 +363,7 @@ def _menu(hwnd: int, menu_index: int, item_index: int, what: str) -> None:
     raise NotesAborted(f"Couldn't open TI-Nspire's menu for {what}; nothing was typed.")
 
 
-def _new_computer_notes(hwnd: int) -> str:
+def _new_computer_notes(guard: _Guard) -> str:
     """File > New computer document, then Insert > Notes.
 
     A new computer-size document shows no add-page menu, just an empty page
@@ -330,24 +371,26 @@ def _new_computer_notes(hwnd: int) -> str:
     File items: New handheld, New computer, ...; Insert (4th menu) items: Problem,
     Page, Calculator, Graphs, Geometry, Lists & Spreadsheet, Data & Statistics, Notes.
     """
-    before = _doc_name(hwnd)
-    _menu(hwnd, 1, 2, "File > New computer document")
-    name = _wait_doc_change(hwnd, before, 8)
+    before = _doc_name(guard.hwnd)
+    _menu(guard, 1, 2, "File > New computer document")
+    name = _wait_doc_change(guard.hwnd, before, 8)
     if not name:
         raise NotesAborted("TI-Nspire didn't open a new document (is a dialog open in it?).")
     time.sleep(0.5)
-    _menu(hwnd, 4, 8, "Insert > Notes")
+    _menu(guard, 4, 8, "Insert > Notes")
     time.sleep(0.8)
     return name
 
 
 def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, page_size: str = "computer",
-                timeout_s: float = 10) -> dict:
+                timeout_s: float = 10, cancel: threading.Event | None = None) -> dict:
     """Validate the steps, then type them into a new document's Notes page.
 
     Call inside bridge.session() (it uses the clipboard to paste math).
     Order: check the arguments, find the TI-Nspire window (by its process), check
     the math on the bridge, and only then bring the window forward and type.
+    Every key goes through a guard that stops (NotesAborted) if TI-Nspire isn't the
+    foreground window or cancel is set; set cancel from another thread to stop a run.
     """
     check_options(title, page_size, timeout_s)
     items = plan_steps(steps)
@@ -359,32 +402,31 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         warnings.append(f"{len(windows)} TI-Nspire windows are open; used '{windows[0].title}' "
                         f"(handle {hwnd}), the one in front or else the lowest handle.")
 
-    warnings += _prepare(bridge, items, timeout_s)
+    warnings += _prepare(bridge, items, timeout_s, cancel)
 
+    _check_cancel(cancel)  # last chance to stop before TI-Nspire is touched
     focus_nspire(hwnd)
+    guard = _Guard(hwnd, cancel)
     if page_size == "computer":
-        _new_computer_notes(hwnd)
+        _new_computer_notes(guard)
     else:
-        _new_handheld_notes(hwnd)
+        _new_handheld_notes(guard)
 
     if title:
-        _guard(hwnd)
-        type_text(title)
-        chord("enter", pause=0.15)
+        type_text(title, guard=guard)
+        chord("enter", pause=0.15, guard=guard)
 
     for it in items:
-        _guard(hwnd)
+        guard()
         if it["text"]:
-            type_text(it["text"] + (" " if it["cmd"] else ""))
+            type_text(it["text"] + (" " if it["cmd"] else ""), guard=guard)
         if it["cmd"]:
-            chord("ctrl+m", pause=0.35)
-            _paste(hwnd, it["cmd"])
-            _guard(hwnd)
-            chord("enter", pause=0.6 + 1.5 * it["seconds"])  # TI-Nspire evaluates the box
-            _guard(hwnd)
-            chord("backspace", pause=0.2)  # Enter leaves an empty math box on the next line
+            chord("ctrl+m", pause=0.35, guard=guard)
+            _paste(guard, it["cmd"])
+            chord("enter", pause=0.6 + 1.5 * it["seconds"], guard=guard)  # TI-Nspire evaluates the box
+            chord("backspace", pause=0.2, guard=guard)  # Enter leaves an empty math box on the next line
         else:
-            chord("enter", pause=0.15)
+            chord("enter", pause=0.15, guard=guard)
 
     try:
         window = describe_window(hwnd)

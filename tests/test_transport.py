@@ -134,6 +134,8 @@ class FakeNspire:
                 return '"NONE"', None
             rows = "".join(f'["{k}","NUM","none",0]' for k in self.vars)
             return f"[{rows}]", None
+        if expr == "getMode(0)":  # Float6, Degree, ..., Exact, and a mode number this code doesn't know
+            return "{1,7,2,2,3,1,4,1,5,3,6,1,7,1,8,1,9,4}", None
         if expr.startswith("DelVar "):
             for n in expr[7:].split(","):
                 self.vars.pop(n.strip(), None)
@@ -183,6 +185,66 @@ def test_pure_helpers():
     assert list(nb._chunks(list(range(60)), ["1"] * 60)) == [list(range(0, 25)), list(range(25, 50)), list(range(50, 60))]
     assert nb._NAME_RE.match("a1") and nb._NAME_RE.match("θ") and nb._NAME_RE.match("stat.results")
     assert not nb._NAME_RE.match("f(x)") and not nb._NAME_RE.match("a:=1") and not nb._NAME_RE.match("1a")
+
+
+def test_mode_parsing():
+    assert nb.parse_modes("{1,1,2,1,3,1,4,1,5,1,6,1,7,1,8,1}") == {
+        "display_digits": "Float", "angle": "Radian", "exponential_format": "Normal", "real_or_complex": "Real",
+        "auto_or_approx": "Auto", "vector_format": "Rectangular", "base": "Decimal", "unit_system": "SI"}
+    assert nb.parse_modes('{"1","13","2","3","5","2"}') == {
+        "display_digits": "Float12", "angle": "Gradian", "auto_or_approx": "Approximate"}
+    assert nb.parse_modes("{1,14,2,9,12,5}") == {"display_digits": "Fix0", "angle": 9, "mode_12": 5}
+    for bad in ("", "{}", "{1,2,3}", "{1,x}", "error 910 (syntax error)", "Done"):
+        assert nb.parse_modes(bad) is None
+    assert nb.mode_setting(2, "1") == "Radian" and nb.mode_setting(2, "2") == "Degree"
+    assert nb.mode_setting(2, "7") == 7 and nb.mode_setting(2, "x") is None and nb.mode_setting(2, "{1,2}") is None
+
+
+def test_modes(env):
+    kind, ns, b = env
+    assert b.session(b.modes) == {
+        "display_digits": "Float6", "angle": "Degree", "exponential_format": "Normal", "real_or_complex": "Real",
+        "auto_or_approx": "Exact", "vector_format": "Rectangular", "base": "Decimal", "unit_system": "SI",
+        "mode_9": 4}
+    assert clip.text() == "user text"
+
+
+def test_modes_never_raise(env):
+    kind, ns, b = env
+    ns.close()
+    assert b.session(lambda: b.modes(0.5)) is None
+
+
+def test_batch_records_timeout(env):
+    kind, ns, b = env
+    b.session(lambda: b.eval_batch(["2+2", "3+3"], 3))
+    assert b.last_timeout is None
+    ns.close()
+    b.session(lambda: b.eval_batch(["2+2", "3+3"], 0.5))
+    assert b.last_timeout and "No reply" in b.last_timeout
+
+
+def test_session_lock_times_out():
+    """A second request in the same process waits at most wait_s, not forever."""
+    clip.set_text("user text")
+    b = nb.Bridge()
+    inside, release = threading.Event(), threading.Event()
+    t = threading.Thread(target=lambda: b.session(lambda: (inside.set(), release.wait(10))), daemon=True)
+    t.start()
+    assert inside.wait(5)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(nb.BridgeTimeout, match="busy for 0.3 s"):
+            b.session(lambda: None, wait_s=0.3)
+        assert time.monotonic() - t0 < 2
+        # another Bridge in this process: same named mutex, owned by the other thread
+        with pytest.raises(nb.BridgeTimeout, match="busy for 0.3 s"):
+            nb.Bridge().session(lambda: None, wait_s=0.3)
+    finally:
+        release.set()
+        t.join(5)
+    assert b.session(lambda: "free again", wait_s=1) == "free again"
+    assert clip.text() == "user text"
 
 
 def test_ping_eval_restore(env):

@@ -35,8 +35,12 @@ hotkey.
      rerun with `-InstallUv` (installs uv via winget). After a fresh uv install,
      a new shell may be needed for PATH; the script refreshes PATH itself.
    - Pass `-NoShortcut` if the user doesn't want a desktop shortcut,
-     `-Startup` if they want the hotkey at login, `-Scope project` if they want
-     the MCP server for one project only. Default is user scope (all projects).
+     `-Startup` if they want the hotkey at login, and
+     `-Scope local -ProjectDir <their project folder>` if they want the MCP server
+     for one project only (`-Scope project` instead writes it to that folder's
+     `.mcp.json`, with this computer's paths in it). Default is user scope (all
+     projects). The script stops if `-Scope local`/`project` is given without
+     `-ProjectDir`.
    - Read the output. Every step prints `OK` or `WARN`. The script registers the
      server with whichever `claude` CLI it finds (PATH, or the one bundled with the
      Claude desktop app). If it prints the `claude mcp add` command instead, run
@@ -86,8 +90,12 @@ hotkey.
 ## Working on the code
 
 - `nspire_bridge.py`: clipboard transport (`Bridge.session`, `Bridge.eval_one`,
-  `Bridge.eval_batch`, `Bridge.list_vars`, `Bridge.clear_vars`). `timeout_s` is
-  clamped to 0.5–120 s here.
+  `Bridge.eval_batch`, `Bridge.list_vars`, `Bridge.clear_vars`, `Bridge.modes`).
+  `timeout_s` is clamped to 0.5–120 s here. `Bridge.session(work, wait_s)` waits at
+  most `wait_s` for both its thread lock and the cross-process mutex, then raises
+  `BridgeTimeout`. `Bridge.modes()` reads `getMode(0)` and never raises (None on
+  failure); the setting numbers in `MODES` come from TI's Reference Guide and haven't
+  all been checked against the real CAS (the angle mode is the most certain).
 - `nspire_chars.py`: TI-Nspire's private-use characters (`NS_*`), `readable()`,
   `to_cas_chars()`. No pywin32, so the translator imports on any OS;
   `nspire_bridge` re-exports them.
@@ -97,8 +105,18 @@ hotkey.
   after the session. `solve_latex()` does all three and opens its own session, so
   don't call it inside one (the lock isn't reentrant). Trees stay unevaluated:
   SymPy only reads and writes the math, and the CAS does all arithmetic.
+  The translator refuses rather than guesses: `parse_latex(..., strict=True)` fails
+  on input it can't read to the end, and `_check_commands` rejects any `\command`
+  not in `_PARSER_CMDS` (`_FUNCLIKE` ones need parentheses). To support a new
+  command, rewrite it in `_Pre` or add it there, with a case in `tests/test_plan.py`.
 - `server.py`: MCP tools. Keep heavy imports (SymPy) lazy: the client times out a
-  server that is slow to answer `initialize`.
+  server that is slow to answer `initialize` (`tests/test_server.py` checks that
+  startup imports neither SymPy nor the Notes modules). It also holds the server
+  `INSTRUCTIONS`, each tool's annotations (read-only / destructive), and
+  `doc_warnings()`, which adds `warnings` to `nspire_latex` results (stored variables
+  substituted, stored functions used or replaced, a non-radian angle mode with trig).
+  `LatexAction` lists `nspire_latex.ACTIONS` by hand so SymPy stays lazy: keep the two
+  in step when you add an action (a test enforces it).
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
 - `nspire_notes.py` / `nspire_keys.py`: Notes-page builder. It works by keystrokes:
   Ctrl+N, `6` (Add Notes), text typed as Unicode, Ctrl+M for a math box, the
@@ -106,6 +124,9 @@ hotkey.
   templates), Enter to evaluate, Backspace to drop the empty box Enter leaves.
   Steps are validated on the bridge first because a math-box error opens a modal
   popup inside TI-Nspire that can't be detected from outside.
+  Every chord and every typed character goes through `_Guard` (TI-Nspire still in
+  front, call not cancelled); `build_notes(..., cancel=threading.Event)` is set by
+  server.py when the MCP call is cancelled. Tests fake `nspire_keys._send`.
   Computer-size pages: File > New computer document (2nd File item), then
   Insert > Notes (4th menu, 8th item), which fills the new document's empty
   first page (computer documents show no add-page menu). Menus are reached by
@@ -119,9 +140,10 @@ hotkey.
   `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
   throughout. Validation undoes what it changes in the bridge document and warns
   about steps that read variables the new document won't have.
-- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa pytest -q tests`
-  (CI runs them on Ubuntu and Windows; tests needing pywin32 or lupa are skipped
-  without them). When you change the translator, add the expected command to
+- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests`
+  (CI runs them on Ubuntu and Windows, again on Windows with the versions pinned in
+  `server.py.lock`, and runs `ruff check` with `ruff.toml`; tests needing pywin32,
+  lupa or mcp are skipped without them). Lint locally with `uvx ruff check .`. When you change the translator, add the expected command to
   `tests/test_plan.py`, and a case to `LATEX_CASES` in `selftest.py` when the
   result needs the real CAS.
 - After changing a script's PEP 723 header, run `uv lock --script <file>` so its

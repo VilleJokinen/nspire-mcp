@@ -11,6 +11,11 @@
   Install uv with winget if it is missing (otherwise the script stops and says how).
 .PARAMETER Scope
   Claude Code scope for the MCP server: user (default, all projects), local or project.
+  local and project register it for one project folder only, given with -ProjectDir.
+.PARAMETER ProjectDir
+  The project folder for -Scope local or project (required for those scopes).
+  local: only you, in that folder. project: written to that folder's .mcp.json,
+  which holds this computer's paths, so think twice before committing it.
 .PARAMETER NoMcp
   Don't register the MCP server with Claude Code.
 .PARAMETER NoShortcut
@@ -21,6 +26,7 @@
 param(
     [switch]$InstallUv,
     [ValidateSet('user', 'local', 'project')][string]$Scope = 'user',
+    [string]$ProjectDir,
     [switch]$NoMcp,
     [switch]$NoShortcut,
     [switch]$Startup
@@ -34,6 +40,25 @@ $ok = $true
 function Step($msg) { Write-Host "`n== $msg" -ForegroundColor Cyan }
 function Good($msg) { Write-Host "   OK   $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "   WARN $msg" -ForegroundColor Yellow; $script:ok = $false }
+
+# local and project scope belong to one project folder: claude records them for
+# the folder it runs in, so it must run there, not wherever this script was started.
+if (-not $NoMcp -and $Scope -ne 'user') {
+    if (-not $ProjectDir) {
+        Write-Host "   -Scope $Scope registers the MCP server for one project folder. Say which with" -ForegroundColor Red
+        Write-Host "   -ProjectDir <folder>, or use the default -Scope user (all projects)." -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $ProjectDir -PathType Container)) {
+        Write-Host "   -ProjectDir: folder not found: $ProjectDir" -ForegroundColor Red
+        exit 1
+    }
+    $ProjectDir = (Resolve-Path -LiteralPath $ProjectDir).Path
+}
+elseif ($ProjectDir) {
+    Write-Host "   (-ProjectDir is ignored: it only applies to -Scope local or project.)" -ForegroundColor Yellow
+    $ProjectDir = $null
+}
 
 # ------------------------------------------------------------------ TI-Nspire
 Step 'TI-Nspire desktop software'
@@ -77,7 +102,8 @@ foreach ($s in 'server.py', 'hotkey.py', 'launch.py', 'selftest.py') {
 $server = Join-Path $Here 'server.py'
 $addArgs = @('mcp', 'add', '-s', $Scope, 'nspire', '--', $uv, 'run', '--script', $server)
 if (-not $NoMcp) {
-    Step "Register MCP server with Claude Code (scope: $Scope)"
+    $where = if ($ProjectDir) { ", folder: $ProjectDir" } else { '' }
+    Step "Register MCP server with Claude Code (scope: $Scope$where)"
     $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
     if (-not $claude) {
         # The desktop app bundles a CLI here; take the newest.
@@ -85,12 +111,20 @@ if (-not $NoMcp) {
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
     if ($claude) {
-        & $claude mcp remove -s $Scope nspire 2>&1 | Out-Null   # fine if it wasn't registered
-        & $claude @addArgs 2>&1 | Out-Host
-        if ($LASTEXITCODE -eq 0) { Good "registered with $claude" } else { Warn 'claude mcp add failed (see above).' }
+        if ($ProjectDir) { Push-Location -LiteralPath $ProjectDir }
+        try {
+            & $claude mcp remove -s $Scope nspire 2>&1 | Out-Null   # fine if it wasn't registered
+            & $claude @addArgs 2>&1 | Out-Host
+            $added = $LASTEXITCODE -eq 0
+        }
+        finally {
+            if ($ProjectDir) { Pop-Location }
+        }
+        if ($added) { Good "registered with $claude" } else { Warn 'claude mcp add failed (see above).' }
     }
     else {
         Warn 'Claude Code CLI not found. Register by hand:'
+        if ($ProjectDir) { Write-Host "   (run it in $ProjectDir)" }
         Write-Host ("   claude " + (($addArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '))
     }
 }

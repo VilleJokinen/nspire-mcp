@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11,<3.14"
+# requires-python = ">=3.11,<3.15"
 # dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """Global hotkey: copy LaTeX, press the hotkey, get the TI-Nspire answer.

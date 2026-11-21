@@ -28,7 +28,7 @@ document").
 - On the very first run the connection can time out while dependencies
   download. The user runs `uv sync --script server.py` in the server folder
   and restarts Claude Code.
-- An import error means the wrong Python; uv must pick 3.11 to 3.13.
+- An import error means the wrong Python; uv must pick 3.11 to 3.14.
 - Rerunning `setup.ps1` repairs the registration (for example after moving
   the folder).
 
@@ -45,9 +45,14 @@ Retry once, or ask the user to pause that tool.
 ## Odd answers
 
 Variables stored in the bridge document (`a:=5`, `Define f(x)=...`) are
-substituted into later answers. List them with `nspire_vars`. The user may have
-stored them, or an earlier session may have, so ask before deleting any with
+substituted into later answers. `nspire_latex` lists the ones it substituted in
+its `warnings`; `nspire_vars` lists all of them. The user may have stored them,
+or an earlier session may have, so ask before deleting any with
 `nspire_clear(["a"])` or `DelVar a`.
+
+Trig answers that look like degrees, or decimals where you expected exact values,
+come from the document's settings: check `modes` in `nspire_status` (angle mode,
+auto or approx). The user changes them in TI-Nspire's document settings.
 
 ## `nspire_status` reports `protocol: 1`
 

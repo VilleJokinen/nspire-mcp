@@ -362,6 +362,51 @@ _NAME_RE = re.compile(r"^[^\W\d_]\w*(?:\.\w+)?$")
 VALUE_TYPES = {"NUM", "EXPR", "LIST", "MAT", "STR"}
 VALUE_MAX_CHARS = 300
 
+# getMode() numbers: mode -> (key, {setting: name}), as listed under setMode in
+# the TI-Nspire Reference Guide. Unknown numbers are passed through as numbers.
+_DIGITS = {1: "Float", **{k: f"Float{k - 1}" for k in range(2, 14)}, **{k: f"Fix{k - 14}" for k in range(14, 27)}}
+MODES = {
+    1: ("display_digits", _DIGITS),
+    2: ("angle", {1: "Radian", 2: "Degree", 3: "Gradian"}),
+    3: ("exponential_format", {1: "Normal", 2: "Scientific", 3: "Engineering"}),
+    4: ("real_or_complex", {1: "Real", 2: "Rectangular", 3: "Polar"}),
+    5: ("auto_or_approx", {1: "Auto", 2: "Approximate", 3: "Exact"}),
+    6: ("vector_format", {1: "Rectangular", 2: "Cylindrical", 3: "Spherical"}),
+    7: ("base", {1: "Decimal", 2: "Hex", 3: "Binary"}),
+    8: ("unit_system", {1: "SI", 2: "Eng/US"}),
+}
+
+
+def _mode_ints(text: str) -> list[int] | None:
+    """'{1,7,2,1}' or '2' -> [1, 7, 2, 1] / [2]; None if it isn't integers."""
+    t = text.strip()
+    if t.startswith("{") and t.endswith("}"):
+        t = t[1:-1]
+    items = [i.strip().strip('"') for i in t.split(",")] if t.strip() else []
+    if not items or not all(i.isdigit() for i in items):
+        return None
+    return [int(i) for i in items]
+
+
+def mode_setting(mode: int, text: str) -> str | int | None:
+    """Name of one mode's setting from getMode(mode)'s reply, e.g. (2, '2') -> 'Degree'."""
+    nums = _mode_ints(text)
+    if not nums or len(nums) != 1:
+        return None
+    return MODES.get(mode, ("", {}))[1].get(nums[0], nums[0])
+
+
+def parse_modes(text: str) -> dict | None:
+    """getMode(0)'s list of (mode, setting) pairs -> {"angle": "Radian", ...}; None if unreadable."""
+    nums = _mode_ints(text)
+    if not nums or len(nums) % 2:
+        return None
+    out: dict = {}
+    for mode, setting in zip(nums[::2], nums[1::2]):
+        key, names = MODES.get(mode, (f"mode_{mode}", {}))
+        out[key] = names.get(setting, setting)
+    return out
+
 
 def parse_var_info(text: str) -> list[list[str]]:
     """Rows of getVarInfo()'s matrix, e.g. [["a","NUM","none",0]["f","FUNC","none",0]].
@@ -490,6 +535,7 @@ class Bridge:
         self._fallback: ClipSnapshot | None = None  # user's clipboard while late replies may come
         self._watcher: _LateReplyWatcher | None = None
         self._batch_checked = False
+        self.last_timeout: str | None = None  # timeout message if the last eval_batch hit one
 
     # -- session
 
@@ -500,10 +546,15 @@ class Bridge:
         something else written during the session), so a copy the user made
         after the last request survives. A copy made during a request is kept
         and put back instead of the older one. Must run start to finish on one
-        thread (the mutex is thread-owned).
+        thread (the mutex is thread-owned). Waits at most wait_s in all for
+        another request (in this process or another) to finish.
         """
-        with self._lock:
-            got = win32event.WaitForSingleObject(self._mutex, int(wait_s * 1000))
+        deadline = time.monotonic() + wait_s
+        if not self._lock.acquire(timeout=max(wait_s, 0)):
+            raise BridgeTimeout(f"Another request kept the TI-Nspire bridge busy for {wait_s:g} s.")
+        try:
+            left_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            got = win32event.WaitForSingleObject(self._mutex, left_ms)
             if got not in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED):
                 raise BridgeTimeout(f"Another program kept the TI-Nspire bridge busy for {wait_s:g} s.")
             try:
@@ -519,6 +570,8 @@ class Bridge:
                         log.warning("clipboard restore failed: %s", e)
             finally:
                 win32event.ReleaseMutex(self._mutex)
+        finally:
+            self._lock.release()
 
     def _begin(self) -> None:
         w, self._watcher = self._watcher, None
@@ -667,8 +720,10 @@ class Bridge:
         round trip; with an older nspire_bridge.tns they go one at a time.
         timeout_s is per expression. Definitions made by earlier expressions
         are visible to later ones. If the bridge stops answering, the rest are
-        skipped. Call inside session().
+        skipped and last_timeout holds the timeout message (None otherwise).
+        Call inside session().
         """
+        self.last_timeout = None
         per = _clamp_timeout(timeout_s)
         exprs = list(exprs)
         out: list[dict | None] = [None] * len(exprs)
@@ -703,6 +758,7 @@ class Bridge:
                 out[i] = {"expr": e, "ok": False, "error": dead}
             except Exception as x:
                 out[i] = {"expr": e, "ok": False, "error": str(x)}
+        self.last_timeout = dead
         return out  # type: ignore[return-value]
 
     def _batch_supported(self, timeout_s: float) -> bool:
@@ -737,6 +793,18 @@ class Bridge:
                 else:
                     out[i] = {"expr": exprs[i], "ok": False, "error": self._error_message(text, per)}
         return None
+
+    # -- document settings
+
+    def modes(self, timeout_s: float = 5.0) -> dict | None:
+        """The document's mode settings from getMode(0), e.g. {"angle": "Radian",
+        "auto_or_approx": "Auto", ...}; None if they can't be read. Never raises.
+        Call inside session()."""
+        try:
+            return parse_modes(self.eval_one("getMode(0)", timeout_s))
+        except Exception as e:
+            log.info("couldn't read the mode settings: %s", e)
+            return None
 
     # -- variables
 

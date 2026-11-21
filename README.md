@@ -21,7 +21,7 @@ answer back. Nothing is sent anywhere else.
 - **TI-Nspire CX CAS Student Software** or **Teacher Software** (desktop app).
   The non-CAS edition works for numeric expressions only.
 - [uv](https://docs.astral.sh/uv/) (`winget install astral-sh.uv`). It downloads the right
-  Python (3.11–3.13) and every dependency by itself; you don't need Python installed.
+  Python (3.11–3.14) and every dependency by itself; you don't need Python installed.
 - For the MCP tools: [Claude Code](https://claude.com/claude-code) (CLI, desktop app or IDE),
   or another MCP client.
 
@@ -41,7 +41,8 @@ answer back. Nothing is sent anywhere else.
    | Option | Does |
    | --- | --- |
    | `-InstallUv` | install uv with winget if it's missing |
-   | `-Scope local` / `-Scope project` | register the MCP server for this project only instead of all projects |
+   | `-Scope local -ProjectDir <folder>` | register the MCP server for that one project folder only (just you) instead of all projects |
+   | `-Scope project -ProjectDir <folder>` | same, but written to that folder's `.mcp.json`, which holds this computer's paths, so think twice before committing it |
    | `-NoMcp` | skip the Claude Code registration (hotkey only) |
    | `-NoShortcut` | no desktop shortcut |
    | `-Startup` | also start the hotkey at login |
@@ -73,15 +74,17 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 
 | Tool | Does |
 | --- | --- |
-| `nspire_status()` | ping: `alive`, `api_level`, `cas`, `protocol` (2 = current bridge script, 1 = older `.tns`) |
+| `nspire_status()` | ping: `alive`, `api_level`, `cas`, `protocol` (2 = current bridge script, 1 = older `.tns`), and the document's `modes` (angle, auto or approx, real or complex, …) |
 | `nspire_eval(expr, timeout_s=5)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)` |
 | `nspire_eval_batch(exprs, timeout_s=5)` | several in order: `[{expr, ok, result \| error}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
-| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?}` |
+| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer")` | write a worked solution onto a new TI-Nspire Notes page (see below) |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
-`timeout_s` is limited to 0.5–120 s.
+`timeout_s` is limited to 0.5–120 s. `action` and `page_size` take only the values listed
+below; the tool schemas list them, and every tool says in its MCP annotations whether it
+only reads (`nspire_status`, `nspire_vars`) or can delete (`nspire_clear`).
 
 ### Worked solutions on a Notes page
 
@@ -98,13 +101,18 @@ page (`page_size="handheld"`) if you'll move the document to a calculator.
   typed. What the check changes in the bridge document is undone afterwards: new
   names (`Define f(x)=…`, `f(x):=…`, `h:=3`, `3→h`) are deleted, and variables that
   already existed get their old values back. An existing function that a step
-  redefines can't be read back, so that only produces a warning.
+  redefines can't be read back, so that only produces a warning. A variable is read
+  back by evaluating it, so one stored as an expression of other variables comes back
+  as its current value; that also gets a warning.
 - The new document doesn't have the variables stored in the bridge document. A step
   that uses one (and doesn't define it in an earlier step) gets a warning in the
   result, because the page may show something different from the checked result.
 - It **types into the TI-Nspire window**, about a second per step, and brings it to
-  the front. Don't type or click while it runs. If TI-Nspire loses focus it stops
-  (leaving the page half built) rather than typing anywhere else.
+  the front. Don't type or click while it runs. Focus is checked before every key and
+  every typed character: if TI-Nspire loses focus it stops (leaving the page half
+  built) rather than typing anywhere else.
+- Cancelling the tool call (Esc in Claude Code) stops it at the next key. Cancelled
+  before typing starts, it never touches the TI-Nspire window.
 - The window is found by its program (`TI-Nspire … Student/Teacher Software.exe`),
   never by its title, so a browser tab or editor named "TI-Nspire" is never typed
   into. With several TI-Nspire windows open, the one in front is used. The result
@@ -141,10 +149,18 @@ LaTeX), `--copy none` (leave the clipboard alone), `--hotkey ctrl+alt+f9`,
 ### What the LaTeX solver understands
 
 `$…$`, `\[…\]`, `\frac`, `\sqrt[n]{}`, `\int` (limits, `\,dx`, `\mathrm{d}x`), `\iint`,
-`\sum`, `\prod`, `\lim` (`x\to a`, `a^+`), `\frac{d}{dx}`, `y'`, `y''`, `\frac{dy}{dx}`,
-`\dot y`, matrices (`pmatrix`, `bmatrix`; `vmatrix` = determinant), `cases`/`align`
-systems, several equations separated by `\\`, commas or `;`, `30^\circ`, `|x|`, `n!`,
-`\binom`, Greek letters.
+`\sum`, `\prod`, `\lim` (`x\to a`, `a^+`), `\frac{d}{dx}` and `\frac{d^n}{dx^n}`, mixed
+`\partial`, `y'`, `y''`, `\frac{dy}{dx}`, `\dot y`, evaluation bars
+(`\left.\frac{d}{dx}x^2\right|_{x=2}`, `\Big|_0^1`), matrices (`pmatrix`, `bmatrix`;
+`vmatrix` = determinant; `\det A`), lists `\{1,2,3\}`, `cases`/`align` systems, several
+equations separated by `\\`, commas or `;`, conditions (`\text{for } x>0`, also `where`,
+`when`, `if`, `kun`, `jos`, become `|x>0`), `30^\circ`, `|x|`, `n!`, `\binom`, `\arg`, `\Re`,
+`\Im`, `\operatorname{sgn}`, `a \bmod b`, `:=` (`a:=5` stores, `f(x):=…` defines), Greek letters.
+
+Anything else that starts with a backslash (`\in`, `\implies`, `\forall`…) is an error
+rather than a guess, and so is input the parser can't read to the end: translate those
+to TI-Nspire syntax yourself and use `nspire_eval`. Function-like commands such as
+`\max` or `\Re` need parentheses.
 
 With `action="auto"` (what the hotkey uses):
 
@@ -162,7 +178,10 @@ inverse rref eigenvalues eigenvectors desolve define`.
 
 Conventions: `\log` without a base is base 10 (as on the calculator), `\ln` is
 natural; `e` and `i` are the constants unless used as a sum/integral variable;
-`x(x+1)` is a product (only `f g h F G H` are functions); `1,5` between digits
+`x(x+1)` is a product (`f g h F G H` are functions, and so is any `T(t)=…` whose
+argument appears on the right, which defines `T`; for `x`, `y`, `z`, `t` write
+`x(t):=…`); accents are separate variables (`\bar x` is `xbar`, `x^*` is `xstar`,
+`\hat x` is `xhat`), while `\vec` and `\mathbf` are only styling; `1,5` between digits
 is a decimal comma, also inside `{}` groups such as `\frac{1,5}{2}`, but not inside
 `()`, `[]` or `\{\}`, where commas separate arguments (`f(1,5)`, `\gcd(12,18)`).
 Exact numeric answers also get an `approx`. Variables stored in the open document
@@ -244,14 +263,16 @@ and the LaTeX cases are skipped.
 ### Offline tests (no TI-Nspire needed)
 
 ```powershell
-uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa pytest -q tests
+uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests
 ```
 
 They cover the LaTeX translator and result converter, the Notes-page safety checks,
-and the clipboard transport (the real `bridge.lua` and the older protocol-1 script run
-in [lupa](https://pypi.org/project/lupa/) against a fake clipboard; your clipboard is
-never touched). Without pywin32 or lupa, the tests that need them are skipped.
-GitHub Actions runs them on Ubuntu and Windows (`.github/workflows/tests.yml`).
+the MCP tools (against a fake bridge), and the clipboard transport (the real
+`bridge.lua` and the older protocol-1 script run in [lupa](https://pypi.org/project/lupa/)
+against a fake clipboard; your clipboard is never touched). Without pywin32, lupa or
+mcp, the tests that need them are skipped. GitHub Actions runs them on Ubuntu and
+Windows with the newest dependencies, once more on Windows with the versions pinned in
+`server.py.lock`, and runs `ruff check` (`ruff.toml`); see `.github/workflows/tests.yml`.
 
 ## Troubleshooting
 
@@ -265,13 +286,18 @@ GitHub Actions runs them on Ubuntu and Windows (`.github/workflows/tests.yml`).
 - **`nspire` shows failed in `claude mcp list`:** run the registered command by hand; it
   should sit silently waiting on stdin (Ctrl+C to quit). A connect timeout on the very
   first run means dependencies were still downloading: run `uv sync --script server.py`
-  and restart Claude Code. An import error means the wrong Python; uv must pick 3.11–3.13.
+  and restart Claude Code. An import error means the wrong Python; uv must pick 3.11–3.14.
 - **"clipboard stayed locked":** a clipboard manager or remote-desktop session is holding
   it; retry, or pause that tool.
 - **Hotkey does nothing:** another program owns the key combination. Start `hotkey.py`
   in a terminal to see which keys failed, and pick others with `--hotkey`.
-- **Odd answers:** variables stored in the document are substituted. List them with
-  `nspire_vars` (or ask Claude), and `DelVar` the ones you don't want.
+- **Odd answers:** variables stored in the document are substituted. `nspire_latex`
+  says so in its `warnings`; list them with `nspire_vars` (or ask Claude), and `DelVar`
+  the ones you don't want. Trig answers in degrees, or decimals where you expected
+  exact values, come from the document's settings: `nspire_status` shows its `modes`
+  (change them in TI-Nspire's document settings).
+- **"Another request kept the TI-Nspire bridge busy":** a long request (often a Notes
+  page) was still running; retry when it's done.
 - **`nspire_status` says `protocol: 1`:** you have an older `nspire_bridge.tns` (or a
   copy of it). Everything still works, but batches are slower and late replies are
   cleaned up from the Python side. Open the current `nspire_bridge.tns` from this folder,
@@ -301,6 +327,13 @@ then the reply, then your old contents again:
 
 One request is in flight at a time, across processes (the MCP server and the hotkey
 share a named mutex).
+
+The bridge evaluates any `NSPIRE_IN:` text that reaches the clipboard, whoever put it
+there: another program, or a web page that rewrites what you copy. What it can do
+stays inside the open TI-Nspire document (define or delete variables, start a long
+computation), but close the bridge document when you aren't using it if that matters
+to you. There is no shared secret between the two sides: TI-Nspire's Lua can't read
+files, so there is nowhere private to keep one.
 
 ### Protocol
 
@@ -344,6 +377,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `*.py.lock` | pinned dependencies for each script (`uv lock --script <file>` after changing its header) |
 | `tests/` | offline test suite; `.github/workflows/tests.yml` runs it |
 | `skill/` | the `nspire-cas` agent skill; `skill/build.ps1` packs it into `skill.zip` |
+| `ruff.toml` | lint settings (`uvx ruff check .`; CI runs it) |
 
 ## License
 

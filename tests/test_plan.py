@@ -22,6 +22,12 @@ SELFTEST = [
     (r"y''+y=0,\ y(0)=1,\ y'(0)=0", "auto", "deSolve(y'' + y=0 and y(0)=1 and y'(0)=0,x,y)"),
     (r"|x-1| < 3", "auto", "solve(abs(x - 1)<3,x)"),
     (r"x^3-6x^2+11x-6", "factor", "factor(x^3 - 6*x^2 + 11*x - 6)"),
+    (r"\left.\frac{d}{dx}x^3\right|_{x=2}", "auto", "(derivative(x^3,x)|x=2)"),
+    (r"\frac{d^2}{dx^2}x^4", "auto", "derivative(x^4,x,2)"),
+    (r"\det\begin{pmatrix}1&2\\3&4\end{pmatrix}", "auto", "det([[1,2][3,4]])"),
+    (r"2\cdot\{1,2,3\}", "auto", "2*{1,2,3}"),
+    (r"x^2=2 \text{ for } x>0", "auto", "solve(x^2=2,x)|x>0"),
+    (r"12 \bmod 5", "auto", "mod(12,5)"),
 ]
 
 
@@ -207,6 +213,119 @@ def test_actions():
     assert cmd(r"x+y=3, x-y=1") == "solve(x + y=3 and x - y=1,{x,y})"
     assert cmd(r"\sin x", "taylor", order=5) == "taylor(sin(x),x,5)"
     assert cmd(r"t^2", "diff") == "derivative(t^2,t)"
+
+
+# Inputs that used to become a wrong command without any error.
+WAS_SILENTLY_WRONG = [
+    # evaluation bar: applied after differentiating, not substituted into x^2 first
+    (r"\left.\frac{d}{dx}x^2\right|_{x=2}", "(derivative(x^2,x)|x=2)"),
+    (r"\frac{d}{dx}x^2 \Big|_{x=2}", "(derivative(x^2,x)|x=2)"),
+    (r"x^2 |_{x=3}", "(x^2|x=3)"),
+    (r"\left. \frac{x^3}{3} \right|_0^1", "(x^3/3|x=1) - (x^3/3|x=0)"),
+    (r"\left. x^2 \right|_{x=0}^{2} + 1", "(x^2|x=2) - (x^2|x=0) + 1"),
+    # ... but |x|^2 and \left|x\right|^2 stay absolute values
+    (r"|x|^2", "abs(x)^2"),
+    (r"\left| x \right|^2", "abs(x)^2"),
+    (r"\Big| x \Big|", "abs(x)"),
+    # higher derivatives in operator form
+    (r"\frac{d^2}{dx^2}\sin x", "derivative(sin(x),x,2)"),
+    (r"\frac{d^{3}}{dx^{3}} x^5", "derivative(x^5,x,3)"),
+    (r"\frac{\partial^2}{\partial x^2} x^3 y", "derivative(x^3*y,x,2)"),
+    (r"\frac{\partial^2}{\partial x \partial y} x^2 y", "derivative(derivative(x^2*y,y),x)"),
+    (r"\frac{d}{dx}\frac{d}{dx}\sin x", "derivative(sin(x),x,2)"),
+    # \det takes the matrix (or letter) after it
+    (r"\det\begin{pmatrix}a&b\\c&d\end{pmatrix}", "det([[a,b][c,d]])"),
+    (r"\det A", "det(A)"),
+    (r"\det(A)", "det(A)"),
+    # conditions: TI-Nspire's "with" operator
+    (r"x^2=2 \text{ for } x>0", "solve(x^2=2,x)|x>0"),
+    (r"x^2=2, \text{ where } x>0", "solve(x^2=2,x)|x>0"),
+    (r"x+y=3, x-y=1 \text{ for } x>0, y>0", "solve(x + y=3 and x - y=1,{x,y})|x>0 and y>0"),
+    (r"\sqrt{x^2} \text{ kun } x<0", "√(x^2)|x<0"),
+    # accents make a variable of their own, never the plain letter
+    (r"\bar{x} = x + 1", "solve(xbar=x + 1,x)"),
+    (r"\bar x + \hat y + \tilde z", "xbar + yhat + ztilde"),
+    (r"\overline{z}", "zbar"),
+    (r"\bar{\alpha}", "alphabar"),
+    (r"z \cdot z^{*}", "z*zstar"),
+    (r"z^*", "zstar"),
+    # functions the parser read as variables
+    (r"\arg(1+i)", "angle(1 + 𝑖)"),
+    (r"\Re(z)", "real(z)"),
+    (r"\Im(z) + \Re(z)", "imag(z) + real(z)"),
+    (r"\mathrm{Re}(z)", "real(z)"),
+    (r"\operatorname{sgn}(x)", "sign(x)"),
+    (r"\coth(x)", "coth(x)"),
+    (r"\arcsinh(x)", "arcsinh(x)"),
+    (r"12 \bmod 5", "mod(12,5)"),
+    (r"2^{10} \bmod 7 + 1", "mod(2^10,7) + 1"),
+    (r"x \bmod 3 = 1", "solve(mod(x,3)=1,x)"),
+    # a named function of a variable that appears on the right is a definition
+    (r"T(t) = 20 + 80e^{-0.1t}", "Define T(t)=20 + 80*ℯ^(-0.1*t)"),
+    (r"V(r)=\frac{4}{3}\pi r^3", "Define V(r)=4*π*r^3/3"),
+    (r"x(x+1)=6", "solve(x*(x + 1)=6,x)"),  # still a product
+    # lists
+    (r"\{1,2,3\}", "{1,2,3}"),
+    (r"2\cdot\{1,2,3\}", "2*{1,2,3}"),
+    (r"\{1,5\}", "{1,5}"),
+    (r"\{x\}", "x"),  # one item: just braces
+    # other spellings
+    (r"x \ne 2", "solve(x≠2,x)"),
+    (r"\lvert x \rvert", "abs(x)"),
+    (r"x + 1 : 3", "x + 1/3"),  # ':' divides, as in Finnish schools
+]
+
+
+@pytest.mark.parametrize("latex,want", WAS_SILENTLY_WRONG)
+def test_was_silently_wrong(latex, want):
+    assert cmd(latex) == want
+
+
+def test_assignment():
+    assert cmd(r"x := 5") == "x:=5"
+    assert cmd(r"a \coloneqq 2+3") == "a:=2 + 3"
+    assert cmd(r"f(x) := x^2") == "Define f(x)=x^2"
+    assert cmd(r"x(t) := 3t") == "Define x(t)=3*t"
+    p = plan(r"x := 5")
+    assert p.action == "define" and p.description == "store x"
+    with pytest.raises(LatexError):
+        plan(r"a := 1, b := 2")
+    with pytest.raises(LatexError):
+        plan(r"x+1 := 5")
+    with pytest.raises(LatexError):
+        plan(r"x := 5", "solve")
+
+
+@pytest.mark.parametrize("latex", [
+    r"2x ) + 7",              # the parser stopped at ')' and dropped '+ 7'
+    r"x^2 = 4 ] junk",
+    r"(x+1",
+    r"x \in \mathbb{R}",      # unknown commands: no longer variables named in, implies, ...
+    r"x^2 - 4 = 0 \implies x",
+    r"\forall x",
+    r"\langle x \rangle",
+    r"\cdots",
+    r"\Re z",                 # function-like commands need parentheses
+    r"\mathrm{Re}\, z",
+    r"\operatorname{sign} x",
+    r"\max x",
+    r"\coth x",
+    r"\overline{AB}",         # accent over more than one letter
+    r"x(t) = 3t",             # would turn the variable x into a function
+    r"x^2 \text{ for all } x",  # a condition that isn't a comparison
+    r"x^2 \text{ for }",
+    r"a \equiv b \pmod{5}",
+    r"\bmod 5",
+    r"\frac{d^2}{dx\,dy^2} f",  # orders don't add up
+])
+def test_refused_instead_of_misread(latex):
+    with pytest.raises(LatexError):
+        plan(latex)
+
+
+def test_unknown_command_message_names_it():
+    with pytest.raises(LatexError, match=r"\\implies"):
+        plan(r"a \implies b")
 
 
 def test_errors():

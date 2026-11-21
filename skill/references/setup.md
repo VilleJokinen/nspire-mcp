@@ -35,7 +35,7 @@ contains no code; it only teaches your agent how to use the server.
    "TI-Nspire bridge" shortcut on your desktop. Useful options:
 
    - `-InstallUv`: install uv with winget if it is missing
-   - `-Scope project`: register the server for one project only
+   - `-Scope local -ProjectDir <folder>`: register the server for that one project folder only
    - `-NoShortcut`: no desktop shortcut
    - `-Startup`: start the clipboard hotkey at login
 

@@ -6,9 +6,11 @@ on:
 
 jobs:
   offline:
-    # Everything that runs without TI-Nspire. Linux: the translator and result
-    # converter. Windows adds the Notes-safety tests and the transport tests
-    # (bridge.lua run in lupa against a fake clipboard; the real one is untouched).
+    # Everything that runs without TI-Nspire, with the newest dependency
+    # versions the scripts allow (an early warning before a lock update).
+    # Linux: the translator and result converter. Windows adds the Notes-safety
+    # tests, the transport tests (bridge.lua run in lupa against a fake
+    # clipboard; the real one is untouched) and the MCP server tests.
     strategy:
       fail-fast: false
       matrix:
@@ -19,7 +21,7 @@ jobs:
             python: "3.13"
           - os: windows-latest
             python: "3.13"
-            extra: --with "pywin32>=306" --with lupa
+            extra: --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -30,3 +32,28 @@ jobs:
           uv run --no-project --python ${{ matrix.python }}
           --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" ${{ matrix.extra }}
           pytest -q tests
+
+  locked:
+    # The same tests with the exact versions users run: server.py.lock, which
+    # pins everything the other scripts use too (plus mcp).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: export server.py.lock
+        shell: bash
+        run: uv export --script server.py --no-hashes --quiet -o "$RUNNER_TEMP/locked.txt"
+      - name: pytest
+        shell: bash
+        run: >
+          uv run --no-project --python 3.13 --with-requirements "$RUNNER_TEMP/locked.txt"
+          --with pytest --with lupa
+          pytest -q tests
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: ruff
+        run: uvx ruff@0.17.6 check --output-format github .

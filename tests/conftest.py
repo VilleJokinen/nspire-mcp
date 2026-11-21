@@ -11,10 +11,14 @@ def _missing(module: str) -> bool:
 
 
 # Some tests import nspire_keys / nspire_bridge, which need pywin32 (Windows
-# only); the transport tests also run bridge.lua in lupa. Skip them where those
-# aren't installed, e.g. the Linux CI job.
+# only); the transport tests also run bridge.lua in lupa, and the server tests
+# need the mcp package. Skip them where those aren't installed, e.g. the Linux
+# CI job.
 collect_ignore = []
 if _missing("win32api"):
-    collect_ignore += ["test_notes_safety.py", "test_transport.py"]
-elif _missing("lupa"):
-    collect_ignore.append("test_transport.py")
+    collect_ignore += ["test_notes_safety.py", "test_transport.py", "test_server.py"]
+else:
+    if _missing("lupa"):
+        collect_ignore.append("test_transport.py")
+    if _missing("mcp"):
+        collect_ignore.append("test_server.py")

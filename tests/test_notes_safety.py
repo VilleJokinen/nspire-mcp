@@ -7,6 +7,7 @@ Run from the repo root:  uv run --with pywin32 python -m unittest discover -s te
 import os
 import re
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -250,14 +251,251 @@ class Prepare(unittest.TestCase):
         self.assertEqual(notes._prepare(b, its, 5), [])
         self.assertEqual(b.calls, ["getVarInfo()"])
 
+    def test_symbolic_variable_restored_from_its_evaluated_value_warns(self):
+        # a may have been stored as x+1 while x was undefined; reading it back gave 3.
+        b = FakeBridge({"a": ("EXPR", "3"), "x": ("NUM", "2")})
+        _, warnings = self.check(b, "a:=5")
+        self.assertEqual(b.vars["a"][1], "3")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("restored as 3", warnings[0])
+        self.assertIn("link is lost", warnings[0])
+
+    def test_symbolic_variable_without_other_variables_restores_silently(self):
+        # Nothing else is stored, so nothing was substituted: x+1 reads back as x+1.
+        b = FakeBridge({"a": ("EXPR", "x+1")})
+        _, warnings = self.check(b, "a:=5")
+        self.assertEqual(b.vars["a"][1], "x+1")
+        self.assertEqual(warnings, [])
+
+    def test_symbolic_variable_warns_when_variables_cannot_be_listed(self):
+        b = FakeBridge({"m": ("LIST", "{1,2}")}, can_list=False)
+        _, warnings = self.check(b, "m:=5")
+        self.assertEqual(b.vars["m"][1], "{1,2}")
+        self.assertEqual(len(warnings), 1)
+
+    def test_cancel_between_steps_stops_and_still_cleans_up(self):
+        cancel = threading.Event()
+
+        class Cancelling(FakeBridge):
+            def eval_one(self, expr, timeout_s, raw=False):
+                out = super().eval_one(expr, timeout_s, raw)
+                if expr == "a:=3":
+                    cancel.set()
+                return out
+        b = Cancelling({"k": ("NUM", "9")})
+        its = items("a:=3", "b:=1", "k:=2")
+        with self.assertRaises(notes.NotesAborted) as cm:
+            notes._prepare(b, its, 5, cancel)
+        self.assertIn("Cancelled before anything was typed", str(cm.exception))
+        self.assertNotIn("b:=1", b.calls)
+        self.assertEqual(b.vars, {"k": ("NUM", "9")})  # a:=3 undone
+
+
+# ------------------------------------------------------------ keystroke guard
+
+_VK_NAMES = {v: k for k, v in reversed(list(keys.VK.items()))}  # 0x0D -> "enter", not "return"
+
+
+class KeyRecorder:
+    """Stands in for nspire_keys._send. Each call is recorded as one event: the
+    character for typed text, or the chord ("ctrl+m", "enter") for keys.
+    after(event) runs once the event was "sent", e.g. to move focus away."""
+
+    def __init__(self, after=None):
+        self.events: list[str] = []
+        self.after = after
+
+    def __call__(self, inputs):
+        downs = [i for i in inputs if not i.ki.dwFlags & keys.KEYEVENTF_KEYUP]
+        if all(i.ki.dwFlags & keys.KEYEVENTF_UNICODE for i in downs):
+            ev = "".join(chr(i.ki.wScan) for i in downs)
+        else:
+            ev = "+".join(_VK_NAMES.get(i.ki.wVk, chr(i.ki.wVk).lower()) for i in downs)
+        self.events.append(ev)
+        if self.after:
+            self.after(ev)
+
+
+class _Focus:
+    def __init__(self):
+        self.ok = True
+
+    def guard(self):
+        if not self.ok:
+            raise notes.NotesAborted("focus lost")
+
+
+class KeysGuard(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch("time.sleep")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_type_text_stops_at_the_character_where_focus_was_lost(self):
+        focus = _Focus()
+        rec = KeyRecorder(after=lambda ev: setattr(focus, "ok", ev != "b"))
+        with mock.patch.object(keys, "_send", rec):
+            with self.assertRaises(notes.NotesAborted):
+                keys.type_text("abcd", guard=focus.guard)
+        self.assertEqual(rec.events, ["a", "b"])
+
+    def test_chord_sends_nothing_when_the_guard_refuses(self):
+        focus = _Focus()
+        focus.ok = False
+        rec = KeyRecorder()
+        with mock.patch.object(keys, "_send", rec):
+            with self.assertRaises(notes.NotesAborted):
+                keys.chord("ctrl+m", guard=focus.guard)
+        self.assertEqual(rec.events, [])
+
+    def test_without_a_guard_everything_is_sent(self):
+        rec = KeyRecorder()
+        with mock.patch.object(keys, "_send", rec):
+            keys.type_text("hi")
+            keys.chord("ctrl+m")
+        self.assertEqual(rec.events, ["h", "i", "ctrl+m"])
+
+
+class NotesGuard(unittest.TestCase):
+    """build_notes and its menu helpers with keys, windows, clipboard and focus faked."""
+
+    WIN = win(300, "nspire_bridge - TI-Nspire™ CX CAS Student Software", "SunAwtFrame", 10, NSPIRE_EXE)
+
+    def setUp(self):
+        self.focused = True
+        self.focus_calls = []
+        self.pasted = []
+        patches = [
+            mock.patch("time.sleep"),
+            mock.patch.object(notes, "find_nspire_windows", return_value=[self.WIN]),
+            mock.patch.object(notes, "focus_nspire", side_effect=lambda h: self.focus_calls.append(h) or h),
+            mock.patch.object(notes, "foreground_is", side_effect=lambda h: self.focused),
+            mock.patch.object(notes, "clip_set", side_effect=self.pasted.append),
+            mock.patch.object(notes, "describe_window",
+                              return_value={"hwnd": 300, "title": "Unsaved - TI-Nspire", "process": "x.exe"}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_build(self, steps, after=None, cancel=None, bridge=None, title=None):
+        rec = KeyRecorder(after)
+        with mock.patch.object(keys, "_send", rec), \
+                mock.patch.object(notes, "_new_computer_notes", return_value="Unsaved"):
+            try:
+                return rec, notes.build_notes(bridge or FakeBridge(), steps, title, cancel=cancel), None
+            except notes.NotesAborted as e:
+                return rec, None, e
+
+    def lose_focus_after(self, event):
+        def after(ev):
+            if ev == event:
+                self.focused = False
+        return after
+
+    def test_full_run_sends_the_expected_keys(self):
+        rec, out, err = self.run_build([{"text": "Area:", "math": "1+1"}, {"text": "ok"}], title="T")
+        self.assertIsNone(err)
+        self.assertEqual(rec.events, ["T", "enter", "A", "r", "e", "a", ":", " ", "ctrl+m", "ctrl+v", "enter",
+                                      "backspace", "o", "k", "enter"])
+        self.assertEqual(self.pasted, ["1+1"])
+        self.assertEqual(out["steps"][0]["result"], "ok")
+
+    def test_focus_lost_mid_line_stops_at_that_character(self):
+        rec, _, err = self.run_build([{"text": "abc", "math": "1+1"}], after=self.lose_focus_after("b"))
+        self.assertIn("stopped being the active window", str(err))
+        self.assertEqual(rec.events, ["a", "b"])
+        self.assertEqual(self.pasted, [])
+
+    def test_focus_lost_after_the_text_sends_no_ctrl_m(self):
+        # Ctrl+M is Enter in a terminal: it must never reach another program.
+        rec, _, err = self.run_build([{"text": "ab", "math": "1+1"}], after=self.lose_focus_after(" "))
+        self.assertIsNotNone(err)
+        self.assertEqual(rec.events, ["a", "b", " "])
+
+    def test_focus_lost_before_paste_keeps_the_clipboard(self):
+        rec, _, err = self.run_build([{"math": "1+1"}], after=self.lose_focus_after("ctrl+m"))
+        self.assertIsNotNone(err)
+        self.assertEqual(rec.events, ["ctrl+m"])
+        self.assertEqual(self.pasted, [])
+
+    def test_cancel_mid_typing_stops_at_once(self):
+        cancel = threading.Event()
+        rec, _, err = self.run_build([{"text": "abc", "math": "1+1"}], cancel=cancel,
+                                     after=lambda ev: ev == "b" and cancel.set())
+        self.assertIn("Cancelled", str(err))
+        self.assertIn("partly built", str(err))
+        self.assertEqual(rec.events, ["a", "b"])
+
+    def test_cancel_before_typing_never_touches_tinspire(self):
+        cancel = threading.Event()
+        cancel.set()
+        b = FakeBridge()
+        rec, _, err = self.run_build([{"text": "x", "math": "a:=1"}], cancel=cancel, bridge=b)
+        self.assertIn("Cancelled before anything was typed", str(err))
+        self.assertEqual(rec.events, [])
+        self.assertEqual(self.focus_calls, [])
+        self.assertEqual(b.calls, [])
+
+    def test_cancel_after_checking_still_never_focuses(self):
+        cancel = threading.Event()
+
+        class Cancelling(FakeBridge):
+            def eval_one(self, expr, timeout_s, raw=False):
+                out = super().eval_one(expr, timeout_s, raw)
+                if expr == "a:=1":
+                    cancel.set()
+                return out
+        b = Cancelling()
+        rec, _, err = self.run_build([{"math": "a:=1"}], cancel=cancel, bridge=b)
+        self.assertIn("Cancelled before anything was typed", str(err))
+        self.assertEqual(rec.events, [])
+        self.assertEqual(self.focus_calls, [])
+        self.assertEqual(b.vars, {})  # the check's a:=1 was undone
+
+    def menu_run(self, after=None):
+        rec = KeyRecorder(after)
+        with mock.patch.object(keys, "_send", rec), \
+                mock.patch.object(notes, "_settled_menu_area", return_value=b"\0" * 6000), \
+                mock.patch.object(notes, "menu_area", return_value=b"\1" * 6000):
+            try:
+                notes._menu(notes._Guard(300), 4, 3, "Insert > Notes")
+                return rec, None
+            except notes.NotesAborted as e:
+                return rec, e
+
+    def test_menu_keys_all_go_through_the_guard(self):
+        rec, err = self.menu_run()
+        self.assertIsNone(err)
+        self.assertEqual(rec.events, ["alt", "right", "right", "right", "down", "down", "down", "enter"])
+
+    def test_menu_stops_when_focus_is_lost(self):
+        rec, err = self.menu_run(after=self.lose_focus_after("alt"))
+        self.assertIsNotNone(err)
+        self.assertEqual(rec.events, ["alt"])
+
+    def test_handheld_menu_key_needs_focus(self):
+        rec = KeyRecorder(self.lose_focus_after("ctrl+n"))
+        titles = iter(["Doc1 - TI-Nspire", "Doc2 - TI-Nspire"])
+        with mock.patch.object(keys, "_send", rec), \
+                mock.patch.object(notes, "window_title", side_effect=lambda h: next(titles)), \
+                mock.patch.object(notes, "process_windows", return_value=set()), \
+                mock.patch.object(notes, "wait_for_popup", return_value=True):
+            with self.assertRaises(notes.NotesAborted):
+                notes._new_handheld_notes(notes._Guard(300))
+        self.assertEqual(rec.events, ["ctrl+n"])
+
 
 class ArgumentChecks(unittest.TestCase):
     def test_options(self):
         notes.check_options(None, "computer", 10)
         notes.check_options("Title", "handheld", 2.5)
+        notes.check_options(None, "computer", 0.5)  # the bridge's own limits
+        notes.check_options(None, "computer", 120)
         for args in ((None, "tablet", 10), ("a\nb", "computer", 10), (5, "computer", 10),
                      (None, "computer", 0), (None, "computer", -1), (None, "computer", True),
-                     (None, "computer", "10"), (None, "computer", 1e9)):
+                     (None, "computer", "10"), (None, "computer", 1e9), (None, "computer", 0.49),
+                     (None, "computer", 120.5), (None, "computer", 600), (None, "computer", float("nan"))):
             with self.assertRaises(ValueError, msg=str(args)):
                 notes.check_options(*args)
 

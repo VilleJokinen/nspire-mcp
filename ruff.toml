@@ -1,0 +1,8 @@
+# Lint settings for `ruff check` (CI runs it; see .github/workflows/tests.yml).
+# A ruff.toml rather than pyproject.toml, so uv doesn't treat this folder as a project.
+target-version = "py311"
+line-length = 120
+
+[lint]
+# Ruff's defaults (syntax errors, pyflakes, the clear-cut pycodestyle checks).
+select = ["E4", "E7", "E9", "F"]
