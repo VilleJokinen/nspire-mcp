@@ -79,6 +79,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_eval_batch(exprs, timeout_s=5)` | several in order: `[{expr, ok, result \| error}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer")` | write a worked solution onto a new TI-Nspire Notes page (see below) |
+| `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200, timeout_s=20)` | graph up to 8 functions: a PNG image plus a summary (y range, gaps, asymptotes, `warnings`). The CAS computes every point with `seq(approx(f),x,…)`; matplotlib only draws them. Undefined or non-real points are gaps, and lines aren't drawn across asymptotes. Stores nothing |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
@@ -256,18 +257,18 @@ uv run --script selftest.py
 ```
 
 Pings, then checks `2+2`, `factor`, `solve`, `∫`, `cSolve`, a deliberate syntax error,
-and a set of LaTeX problems (integral, limit, sum, system, determinant, ODEs, decimal
-comma…). On the non-CAS edition the symbolic cases pass if they return a clean error,
+`nspire_plot`'s sampling (values, a non-real gap, `undef` at 0), and a set of LaTeX
+problems (integral, limit, sum, system, determinant, ODEs, decimal comma…). On the non-CAS edition the symbolic cases pass if they return a clean error,
 and the LaTeX cases are skipped.
 
 ### Offline tests (no TI-Nspire needed)
 
 ```powershell
-uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests
+uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" --with matplotlib pytest -q tests
 ```
 
 They cover the LaTeX translator and result converter, the Notes-page safety checks,
-the MCP tools (against a fake bridge), and the clipboard transport (the real
+plot sampling and drawing, the MCP tools (against a fake bridge), and the clipboard transport (the real
 `bridge.lua` and the older protocol-1 script run in [lupa](https://pypi.org/project/lupa/)
 against a fake clipboard; your clipboard is never touched). Without pywin32, lupa or
 mcp, the tests that need them are skipped. GitHub Actions runs them on Ubuntu and
@@ -368,6 +369,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_chars.py` | TI-Nspire's private-use characters (no pywin32, so the translator runs anywhere) |
 | `nspire_latex.py` | LaTeX → TI-Nspire syntax → result → LaTeX (SymPy) |
 | `nspire_notes.py` | builds a Notes page of text and math boxes |
+| `nspire_plot.py` | samples functions on the CAS and draws them (`nspire_plot`) |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |
 | `hotkey.py` | clipboard hotkey and popup |
