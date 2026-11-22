@@ -8,6 +8,10 @@ Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
 LaTeX cases need the CAS and are skipped without it. Variables stored in the
 open document (e.g. x:=3) can change answers; DelVar them if a case fails oddly.
+It also reads the mode settings, stores and deletes brgselftest (a variable of its
+own), and switches the angle and Auto/Approximate modes for one evaluation each to
+check that setMode works through the bridge (nspire_eval's angle / exact_mode), then
+checks they were put back.
 """
 import sys
 from pathlib import Path
@@ -72,6 +76,57 @@ class Report:
         print(f"{'PASS' if ok else 'FAIL'}  {name:<42} {detail}")
 
 
+SELFTEST_VAR = "brgselftest"  # created and deleted here; an odd name so it can't be the user's
+
+
+def _names() -> set[str]:
+    return {v["name"].lower() for v in bridge.list_vars(values=False)}
+
+
+def document_checks(report: Report, cas: bool) -> None:
+    """Mode settings, a variable round trip, and the per-call mode override (setMode
+    through math.evalStr, which nspire_eval's angle/exact_mode rely on). Inside the session."""
+    modes = bridge.modes()
+    report(modes is not None, "modes (getMode(0))", repr(modes))
+
+    name = SELFTEST_VAR
+    if name in _names():
+        report(False, "variables round trip", f"{name} is already stored: DelVar {name}, then run again")
+    else:
+        try:
+            try:
+                bridge.eval_one(f"{name}:=5", 5)
+                listed = [v for v in bridge.list_vars() if v["name"].lower() == name]
+            finally:
+                bridge.eval_one(f"DelVar {name}", 5)
+            gone = name not in _names()
+            ok = len(listed) == 1 and listed[0]["type"].upper() == "NUM" and listed[0].get("value") == "5" and gone
+            report(ok, "variables round trip", f"listed {listed}, deleted again: {gone}")
+        except ValueError as e:
+            report(False, "variables round trip", str(e))
+
+    if modes is None or "angle" not in modes:
+        report(False, "setMode override", "skipped: the mode settings couldn't be read")
+        return
+    # Switch to the other angle mode for one evaluation, then check it was put back.
+    to_degree = modes["angle"] != "Degree"
+    expr = "sin(30)" if to_degree else "sin(π/6)"
+    try:
+        with bridge.temp_modes({2: 2 if to_degree else 1}) as warnings:
+            got = bridge.eval_one(expr, 5)
+        with bridge.temp_modes({5: 2}) as warnings2:  # Approximate
+            third = bridge.eval_one("1/3", 5)
+    except ValueError as e:
+        report(False, "setMode override", str(e))
+        return
+    after = bridge.modes()
+    want = ("1/2",) if cas else ("0.5", "1/2")
+    report(norm(got) in want, f"setMode override: {expr} in {'Degree' if to_degree else 'Radian'}", repr(got))
+    report(third.startswith("0.333"), "setMode override: 1/3 in Approximate", repr(third))
+    report(after == modes and not warnings and not warnings2, "setMode override: modes put back",
+           f"{after}" + "".join(f"; {w}" for w in warnings + warnings2))
+
+
 def cas_checks(report: Report, plans: list) -> list | None:
     """Everything that needs the bridge; runs inside bridge.session().
 
@@ -100,6 +155,12 @@ def cas_checks(report: Report, plans: list) -> list | None:
         else:
             ok = got is not None and norm(got) == norm(want)
             report(ok, expr, repr(got) if err is None else err)
+
+    try:
+        document_checks(report, cas)
+    except BridgeTimeout as e:
+        report(False, "document checks", str(e))
+        return None
 
     runs: list = []
     if not cas:
