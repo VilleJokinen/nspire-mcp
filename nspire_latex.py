@@ -137,7 +137,7 @@ def _tokens(s: str) -> list[tuple[int, int, str]]:
 def _operand_start(s: str, pos: int, stops: set[str]) -> int:
     """Start of the operand that ends at pos: back to a stop token or an unmatched bracket."""
     depth = 0
-    for a, b, t in reversed([tk for tk in _tokens(s) if tk[1] <= pos]):
+    for _a, b, t in reversed([tk for tk in _tokens(s) if tk[1] <= pos]):
         if t in _CLOSE:
             depth += 1
         elif t in _OPEN:
@@ -152,7 +152,7 @@ def _operand_start(s: str, pos: int, stops: set[str]) -> int:
 def _operand_end(s: str, pos: int, stops: set[str]) -> int:
     """End of the operand that starts at pos (a leading sign belongs to it)."""
     depth, first = 0, True
-    for a, b, t in [tk for tk in _tokens(s) if tk[0] >= pos]:
+    for a, _b, t in [tk for tk in _tokens(s) if tk[0] >= pos]:
         if t.isspace():
             continue
         if first and t in "+-":
@@ -394,18 +394,6 @@ class _Pre:
         what = f"{a}^*" if cmd == "^*" else f"\\{cmd}{{{a}}}"
         raise LatexError(f"{what} isn't supported (only over a single letter); write it in TI-Nspire syntax "
                          "and use nspire_eval.")
-
-    def _name(self, arg: str) -> str:
-        a = arg.strip()
-        if a in ("d",):
-            return " d"
-        if a in ("e", "i"):
-            return f" {a} "
-        if len(a) == 1:
-            return a
-        if a in _KNOWN_CMDS:
-            return f"\\{a} "
-        return self.ph("name", a)
 
     # -- evaluation bars: \left. f \right|_{x=a}
 

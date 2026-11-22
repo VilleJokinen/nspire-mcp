@@ -263,7 +263,7 @@ and the LaTeX cases are skipped.
 ### Offline tests (no TI-Nspire needed)
 
 ```powershell
-uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests
+uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2" pytest -q tests
 ```
 
 They cover the LaTeX translator and result converter, the Notes-page safety checks,
@@ -272,7 +272,8 @@ the MCP tools (against a fake bridge), and the clipboard transport (the real
 against a fake clipboard; your clipboard is never touched). Without pywin32, lupa or
 mcp, the tests that need them are skipped. GitHub Actions runs them on Ubuntu and
 Windows with the newest dependencies, once more on Windows with the versions pinned in
-`server.py.lock`, and runs `ruff check` (`ruff.toml`); see `.github/workflows/tests.yml`.
+`server.py.lock`, and runs `ruff check` (`ruff.toml`) and pyright (`pyrightconfig.json`); see
+`.github/workflows/tests.yml`.
 
 ## Troubleshooting
 
@@ -378,6 +379,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `tests/` | offline test suite; `.github/workflows/tests.yml` runs it |
 | `skill/` | the `nspire-cas` agent skill; `skill/build.ps1` packs it into `skill.zip` |
 | `ruff.toml` | lint settings (`uvx ruff check .`; CI runs it) |
+| `pyrightconfig.json` | type-checking settings (CI runs pyright; command in `AGENTS.md`) |
 
 ## License
 

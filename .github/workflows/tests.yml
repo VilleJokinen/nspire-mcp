@@ -21,7 +21,7 @@ jobs:
             python: "3.13"
           - os: windows-latest
             python: "3.13"
-            extra: --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2"
+            extra: --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -57,3 +57,11 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: ruff
         run: uvx ruff@0.17.6 check --output-format github .
+      - name: pyright
+        # Settings in pyrightconfig.json. Installs server.py.lock (which pins what the
+        # other scripts use too) so pyright sees the dependencies' types. pywin32 has
+        # no Linux wheels; pyright's bundled stubs cover it on any OS.
+        run: |
+          uv export --script server.py --no-hashes --quiet --no-emit-package pywin32 -o "$RUNNER_TEMP/locked.txt"
+          uv run --no-project --python 3.13 --with-requirements "$RUNNER_TEMP/locked.txt" \
+            --with pytest --with lupa --with "pyright[nodejs]==1.1.414" pyright

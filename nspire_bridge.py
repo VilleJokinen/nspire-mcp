@@ -319,7 +319,7 @@ def _check_expr(expr: str) -> None:
 
 
 def _esc(s: str) -> str:
-    return re.sub(r"[%;\r\n]", lambda m: "%%%02X" % ord(m.group()), s)
+    return re.sub(r"[%;\r\n]", lambda m: f"%{ord(m.group()):02X}", s)
 
 
 def _unesc(s: str) -> str:
