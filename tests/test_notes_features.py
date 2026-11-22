@@ -19,9 +19,10 @@ pytest.importorskip("win32api")  # nspire_keys needs pywin32
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_notes_safety import FakeBridge, KeyRecorder, NotesGuard  # noqa: E402
+
 import nspire_keys as keys  # noqa: E402
 import nspire_notes as notes  # noqa: E402
-from test_notes_safety import FakeBridge, KeyRecorder, NotesGuard  # noqa: E402
 
 WIN = NotesGuard.WIN
 HWND, DIALOG, BOX, PROMPT = WIN.hwnd, 900, 901, 950

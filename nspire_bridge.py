@@ -10,6 +10,7 @@ The platform-specific parts are in nspire_clip_win.py and nspire_clip_mac.py.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import sys
@@ -42,7 +43,6 @@ class BridgeTimeout(Exception):
 # The CAS's private-use characters live in nspire_chars (no pywin32 there, so
 # the LaTeX translator imports on any platform). Re-exported for callers.
 from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable, to_cas_chars  # noqa: E402,F401
-
 
 # ---------------------------------------------------------------- clipboard
 
@@ -230,7 +230,7 @@ def parse_modes(text: str) -> dict | None:
     if not nums or len(nums) % 2:
         return None
     out: dict = {}
-    for mode, setting in zip(nums[::2], nums[1::2]):
+    for mode, setting in zip(nums[::2], nums[1::2], strict=True):
         key, names = MODES.get(mode, (f"mode_{mode}", {}))
         out[key] = names.get(setting, setting)
     return out
@@ -249,7 +249,7 @@ def parse_var_info(text: str) -> list[list[str]]:
             if ch == '"':
                 quoted = False
             else:
-                cell += ch
+                cell += ch  # pyright: ignore[reportOperatorIssue]
         elif ch == '"':
             quoted = True
             cell = cell or ""
@@ -318,7 +318,7 @@ class _LateReplyWatcher(threading.Thread):
         rid = _reply_id(text)
         if rid in self.pending:
             del self.pending[rid]  # answered: no further reply will come for it
-            if self._put_back(text):
+            if self._put_back(text):  # pyright: ignore[reportArgumentType]
                 return _seq()
         elif not is_bridge_traffic(text) and seq != _ours_seq:
             # The user copied something: that is what to put back now.
@@ -411,7 +411,7 @@ class Bridge:
         self._batch_checked = False
         snap = clip_snapshot()
         text = snap.text()
-        self._pending.pop(_reply_id(text), None)
+        self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
         if is_bridge_traffic(text):
             # A late reply to a request that timed out, or traffic left by a
             # process that died mid-request: not the user's. Use what this
@@ -427,7 +427,7 @@ class Bridge:
         text = clip_get()
         ours = _seq() == _ours_seq or is_bridge_traffic(text)
         if ours:
-            self._pending.pop(_reply_id(text), None)
+            self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
             clip_restore(saved)
         if self._pending:
             # A timed-out request may still be answered by an old bridge.lua.
@@ -448,7 +448,7 @@ class Bridge:
         snap = clip_snapshot()
         text = snap.text()
         if is_bridge_traffic(text):
-            self._pending.pop(_reply_id(text), None)
+            self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
         else:
             self._saved = snap
         self._seen_seq = cur
@@ -492,7 +492,7 @@ class Bridge:
                 # A late reply to an earlier request that timed out replaced
                 # ours (an old bridge.lua writes whatever it finishes). The
                 # script is free again: ask again.
-                self._pending.pop(_reply_id(clip), None)
+                self._pending.pop(_reply_id(clip), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
             else:
                 # The user copied something meanwhile. Keep it to put back at
                 # the end, then ask again.
@@ -537,10 +537,8 @@ class Bridge:
     def _error_message(self, body: str, timeout_s: float) -> str:
         msg = f"TI-Nspire error: {body}"
         if self.cas is None:
-            try:
+            with contextlib.suppress(Exception):
                 self.ping(timeout_s)
-            except Exception:
-                pass
         if self.cas is False:
             msg += (" (this is the non-CAS edition: symbolic input like solve/factor/∫ with free"
                     " variables isn't supported; use numeric expressions)")
@@ -629,7 +627,7 @@ class Bridge:
                 log.warning("not a batch reply (%r); evaluating one at a time", body[:80])
                 self.protocol = 1
                 return None
-            for i, (item_ok, text) in zip(chunk, results):
+            for i, (item_ok, text) in zip(chunk, results, strict=True):
                 if item_ok:
                     out[i] = {"expr": exprs[i], "ok": True, "result": text if raw else readable(text)}
                 else:
@@ -708,7 +706,7 @@ class Bridge:
             })
         if values:
             idx = [k for k, v in enumerate(out) if v["type"].upper() in VALUE_TYPES]
-            for k, res in zip(idx, self.eval_batch([out[k]["name"] for k in idx], timeout_s)):
+            for k, res in zip(idx, self.eval_batch([out[k]["name"] for k in idx], timeout_s), strict=True):
                 if res["ok"]:
                     v = res["result"]
                     out[k]["value"] = v if len(v) <= VALUE_MAX_CHARS else v[:VALUE_MAX_CHARS] + "…"
@@ -731,6 +729,6 @@ class Bridge:
             return {"deleted": [], "errors": []}
         results = self.eval_batch([f"DelVar {n}" for n in names], timeout_s)
         return {
-            "deleted": [n for n, r in zip(names, results) if r["ok"]],
-            "errors": [{"name": n, "error": r["error"]} for n, r in zip(names, results) if not r["ok"]],
+            "deleted": [n for n, r in zip(names, results, strict=True) if r["ok"]],
+            "errors": [{"name": n, "error": r["error"]} for n, r in zip(names, results, strict=True) if not r["ok"]],
         }

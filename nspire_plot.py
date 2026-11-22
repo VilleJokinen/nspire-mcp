@@ -204,7 +204,7 @@ def _split(f: int, i0: int, i1: int) -> list[tuple[int, int, int]]:
     m = i1 - i0
     parts = min(SPLIT, m)
     bounds = [i0 + m * k // parts for k in range(parts + 1)]
-    return [(f, a, b) for a, b in zip(bounds, bounds[1:])]
+    return [(f, a, b) for a, b in zip(bounds, bounds[1:], strict=False)]
 
 
 @dataclass
@@ -242,7 +242,7 @@ def sample(bridge, spec: PlotSpec, timeout_s: float) -> Sampled:
                                     f"fewer functions per call)")
             timed_out = True
         nxt: list[tuple[int, int, int]] = []
-        for (f, i0, i1), r in zip(todo, res):
+        for (f, i0, i1), r in zip(todo, res, strict=True):
             func = spec.funcs[f]
             if r["ok"]:
                 try:
@@ -382,7 +382,7 @@ def summary(spec: PlotSpec, got: Sampled, warnings: list[str] | None = None) -> 
     lines = [f"Plotted {len(spec.funcs)} function{'s' if len(spec.funcs) > 1 else ''} for {var} from "
              f"{_g(g.x_min)} to {_g(g.x_max)}: {g.n} points each, every value computed by the TI-Nspire CAS "
              f"(the image is drawn from those values)."]
-    for k, (func, ys, errs) in enumerate(zip(spec.funcs, got.ys, got.errors), 1):
+    for k, (func, ys, errs) in enumerate(zip(spec.funcs, got.ys, got.errors, strict=True), 1):
         head = func.label if func.label == func.command else f"{func.label}  (TI-Nspire: {func.command})"
         vals = [v for v in ys if v is not None]
         if not vals:
@@ -445,10 +445,10 @@ def render_png(spec: PlotSpec, got: Sampled) -> bytes:
     if g.x_min < 0 < g.x_max:
         ax.axvline(0, color=AXIS, linewidth=1, zorder=1)
 
-    for k, (func, ys) in enumerate(zip(spec.funcs, got.ys)):
+    for k, (func, ys) in enumerate(zip(spec.funcs, got.ys, strict=True)):
         cut = set(breaks(ys, lo, hi))
         px, py = [], []
-        for i, (x, y) in enumerate(zip(xs, ys)):
+        for i, (x, y) in enumerate(zip(xs, ys, strict=True)):
             px.append(x)
             py.append(nan if y is None else y)
             if i in cut:  # NaN breaks the line

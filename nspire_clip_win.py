@@ -207,7 +207,7 @@ def _read_all() -> ClipSnapshot:
             continue
         total += len(data)
         have_dib = have_dib or f in (_CF_DIB, _CF_DIBV5)
-        snap.items.append((f, bytes(data)))
+        snap.items.append((f, bytes(data)))  # pyright: ignore[reportArgumentType]
     if snap.skipped:
         log.debug("clipboard snapshot skipped formats %s", snap.skipped)
     return snap
@@ -258,12 +258,12 @@ class ProcessLock:
     """
 
     def __init__(self, name: str) -> None:
-        self._mutex = win32event.CreateMutex(None, False, name)
+        self._mutex = win32event.CreateMutex(None, False, name)  # pyright: ignore[reportArgumentType]
 
     def acquire(self, timeout_s: float) -> bool:
         """Wait at most timeout_s; True if this thread now holds the lock."""
-        got = win32event.WaitForSingleObject(self._mutex, max(0, int(timeout_s * 1000)))
+        got = win32event.WaitForSingleObject(self._mutex, max(0, int(timeout_s * 1000)))  # pyright: ignore[reportArgumentType]
         return got in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED)
 
     def release(self) -> None:
-        win32event.ReleaseMutex(self._mutex)
+        win32event.ReleaseMutex(self._mutex)  # pyright: ignore[reportArgumentType]

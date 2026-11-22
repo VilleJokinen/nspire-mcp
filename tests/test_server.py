@@ -26,8 +26,9 @@ sys.path.insert(0, str(REPO))
 import nspire_bridge as nb  # noqa: E402
 
 nb.MUTEX_NAME = f"Local\\nspire_mcp_bridge_offline_test_{os.getpid()}"  # not the real bridge's, nor other runs'
-import server  # noqa: E402
 from mcp import types as mt  # noqa: E402
+
+import server  # noqa: E402
 
 
 class FakeBridge:

@@ -136,7 +136,7 @@ def test_tan_is_broken_at_each_asymptote():
     assert clipped  # the spikes next to the asymptotes don't set the y range
     cuts = [s.grid.x(i) + s.grid.step / 2 for i in pl.breaks(ys, lo, hi)]
     want = [-3 * math.pi / 2, -math.pi / 2, math.pi / 2, 3 * math.pi / 2]
-    assert len(cuts) == 4 and all(abs(c - w) < s.grid.step for c, w in zip(cuts, want))
+    assert len(cuts) == 4 and all(abs(c - w) < s.grid.step for c, w in zip(cuts, want, strict=True))
 
 
 def test_reciprocal_is_broken_at_zero():

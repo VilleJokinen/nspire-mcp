@@ -98,7 +98,7 @@ def plot_check(report: "Report") -> None:
         report(False, "nspire_plot sampling", f"{type(e).__name__}: {e}")
         return
     bad = []
-    for f, ys, w in zip(funcs, got.ys, want):
+    for f, ys, w in zip(funcs, got.ys, want, strict=True):
         for i, y in enumerate(ys):
             x = spec.grid.x(i)
             e = w(x)

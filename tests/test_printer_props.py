@@ -16,9 +16,10 @@ import pytest
 
 sp = pytest.importorskip("sympy")
 
+from sympy.parsing.sympy_parser import parse_expr, standard_transformations  # noqa: E402
+
 from nspire_chars import NS_E, NS_I  # noqa: E402
 from nspire_latex import to_nspire  # noqa: E402
-from sympy.parsing.sympy_parser import parse_expr, standard_transformations  # noqa: E402
 
 X, Y, Z = sp.symbols("x y z")
 SYMS = (X, Y, Z)

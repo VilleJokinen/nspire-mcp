@@ -35,9 +35,16 @@ from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, T
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
-from nspire_bridge import (VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_override_refusal,  # noqa: E402
-                           mode_setting, parse_var_info, readable)
-
+from nspire_bridge import (  # noqa: E402
+    VALUE_MAX_CHARS,
+    VALUE_TYPES,
+    Bridge,
+    BridgeTimeout,
+    mode_override_refusal,
+    mode_setting,
+    parse_var_info,
+    readable,
+)
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
 log = logging.getLogger("nspire")
@@ -508,7 +515,7 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
             with_value = [name for name, typ in used if typ in VALUE_TYPES]
             values: dict[str, str] = {}
             if with_value:
-                for name, r in zip(with_value, bridge.eval_batch(with_value, t)):
+                for name, r in zip(with_value, bridge.eval_batch(with_value, t), strict=True):
                     if r["ok"]:
                         values[name] = _short(r["result"])
             for name, typ in used:
