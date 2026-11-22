@@ -77,7 +77,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_eval` (expr, timeout_s=5) | One expression in TI-Nspire syntax. Your default tool. |
 | `nspire_eval_batch(exprs, timeout_s=5)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
-| `nspire_notes(steps, title, page_size="computer")` | The user wants the worked solution written into TI-Nspire itself. |
+| `nspire_notes(steps, title, page_size="computer", graphs, save_as)` | The user wants the worked solution written into TI-Nspire itself. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
 
@@ -177,9 +177,22 @@ result may differ) and anything validation couldn't restore; pass them on.
 
 TI-Nspire is found by its program, never by window title, and `window` in the
 result says which window was used. If TI-Nspire loses focus it stops, leaving
-a half-built page, rather than typing anywhere else. The new document is
-unsaved; tell the user to save it if they want to keep it. Use
+a half-built page, rather than typing anywhere else. Use
 `page_size="handheld"` if they will move the document to a physical calculator.
+
+Optional extras:
+
+- `graphs=["x^2", "2*x"]` adds a Graphs page after the Notes page with those
+  functions of x (TI-Nspire syntax, or LaTeX between `$...$`; a leading `y=` or
+  `f(x)=` is dropped; no equations or inequalities). They are checked on the
+  bridge first, like the steps.
+- `save_as="C:\\Users\\...\\name.tns"` saves the new document. Only pass a path
+  the user gave or agreed to; the folder must exist, and an existing file is
+  refused unless the user said to replace it (`overwrite=true`). Check
+  `save.saved` in the result: when it is false, `save.message` says why and the
+  Save dialog may still be open in TI-Nspire for the user to finish. Without
+  `save_as` the document is unsaved; tell the user to save it if they want to
+  keep it.
 
 ## Pitfalls
 

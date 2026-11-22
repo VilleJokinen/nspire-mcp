@@ -291,3 +291,94 @@ def window_title(hwnd: int) -> str:
     if not win32gui.IsWindow(hwnd):
         raise RuntimeError("The TI-Nspire window was closed.")
     return win32gui.GetWindowText(hwnd)
+
+
+# ------------------------------------------------------------ the Save dialog
+#
+# Saving goes through a file dialog. A standard Windows one ("#32770") is made of
+# real Windows controls, so it can be checked from outside: which control has the
+# keyboard focus, and what the file name box holds before Enter is pressed. A
+# dialog drawn by Java can't be checked that way, so nothing is typed into it.
+
+FILE_DIALOG_CLASS = "#32770"
+_NOT_FILE_NAME = {"Address Band Root", "SearchEditBoxWrapperClass"}  # the address bar and search box hold these
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", wt.LONG), ("top", wt.LONG), ("right", wt.LONG), ("bottom", wt.LONG)]
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("flags", wt.DWORD), ("hwndActive", wt.HWND), ("hwndFocus", wt.HWND),
+                ("hwndCapture", wt.HWND), ("hwndMenuOwner", wt.HWND), ("hwndMoveSize", wt.HWND),
+                ("hwndCaret", wt.HWND), ("rcCaret", _RECT)]
+
+
+user32.GetGUIThreadInfo.argtypes = [wt.DWORD, ctypes.POINTER(_GUITHREADINFO)]
+user32.GetGUIThreadInfo.restype = wt.BOOL
+user32.SendMessageTimeoutW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM, wt.UINT, wt.UINT,
+                                       ctypes.POINTER(ULONG_PTR)]
+user32.SendMessageTimeoutW.restype = wt.LPARAM
+WM_GETTEXT, WM_GETTEXTLENGTH = 0x000D, 0x000E
+SMTO_ABORTIFHUNG = 0x0002
+
+
+def foreground_window() -> int:
+    return win32gui.GetForegroundWindow() or 0
+
+
+def window_class(hwnd: int) -> str:
+    try:
+        return win32gui.GetClassName(hwnd)
+    except Exception:  # closed meanwhile
+        return ""
+
+
+def window_open(hwnd: int) -> bool:
+    """True while hwnd exists and is visible (a dialog that closed is neither)."""
+    return bool(win32gui.IsWindow(hwnd)) and bool(win32gui.IsWindowVisible(hwnd))
+
+
+def new_dialogs(hwnd: int, before: set[int]) -> list[int]:
+    """Dialog windows of hwnd's process that weren't in `before` (not menus, tooltips or
+    the file name box's suggestion list, which are top-level windows too)."""
+    return sorted(h for h in process_windows(hwnd) - before
+                  if window_class(h) in (FILE_DIALOG_CLASS, "SunAwtDialog"))
+
+
+def focused_control(hwnd: int) -> int:
+    """The control that has the keyboard focus in hwnd's thread, or 0."""
+    info = _GUITHREADINFO(cbSize=ctypes.sizeof(_GUITHREADINFO))
+    thread = win32process.GetWindowThreadProcessId(hwnd)[0]
+    if not thread or not user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return 0
+    return info.hwndFocus or 0
+
+
+def control_text(hwnd: int, timeout_ms: int = 500) -> str | None:
+    """Text of a standard control in any process (WM_GETTEXT), or None if it doesn't answer."""
+    res = ULONG_PTR()
+    if not user32.SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG, timeout_ms,
+                                      ctypes.byref(res)):
+        return None
+    buf = ctypes.create_unicode_buffer(res.value + 1)
+    if not user32.SendMessageTimeoutW(hwnd, WM_GETTEXT, len(buf), ctypes.addressof(buf), SMTO_ABORTIFHUNG,
+                                      timeout_ms, ctypes.byref(res)):
+        return None
+    return buf.value
+
+
+def is_file_name_box(dialog: int, ctl: int) -> bool:
+    """True if ctl is a text box inside the standard file dialog `dialog`, and not its
+    address bar or search box. In a Save dialog that's the file name box, which has the
+    focus when the dialog opens."""
+    if not ctl or window_class(dialog) != FILE_DIALOG_CLASS or window_class(ctl) != "Edit":
+        return False
+    if not win32gui.IsChild(dialog, ctl):
+        return False
+    h = win32gui.GetParent(ctl)
+    while h and h != dialog:
+        if window_class(h) in _NOT_FILE_NAME:
+            return False
+        h = win32gui.GetParent(h)
+    return True

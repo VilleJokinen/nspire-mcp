@@ -77,6 +77,14 @@ Translate the problem to TI-Nspire syntax yourself and use `nspire_eval`.
 - Wrong page type or wrong kind of document: the menus of the user's
   TI-Nspire version differ from version 6.x, which the tool assumes. Try
   `page_size="handheld"`, which uses a different route.
+- Graphs page missing or a function on the wrong page: the Insert menu of the
+  user's version differs (Insert > Page is assumed to be the 2nd item and Insert >
+  Graphs the 4th). Leave out `graphs` and tell the user.
+- `save.saved` is false: `save.message` says which check failed. The Save dialog
+  may still be open in TI-Nspire; the user finishes or cancels it there. When
+  TI-Nspire asks whether to replace a file, that question is always left to the
+  user. If the message says the dialog isn't a standard Windows file dialog, this
+  TI-Nspire version can't be saved automatically: leave out `save_as`.
 - "TI-Nspire window not found" although a window says TI-Nspire: the tool only
   types into the TI-Nspire CX (CAS) Student or Teacher Software program, never a
   browser tab or editor with that title. The error names the programs it

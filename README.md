@@ -97,6 +97,24 @@ so you can edit any step and the page recalculates.
 The page is computer size (fills the window) by default. Ask for a handheld-size
 page (`page_size="handheld"`) if you'll move the document to a calculator.
 
+Two optional extras:
+
+- **A Graphs page** after the Notes page: `graphs=["x^2", "2*x"]` (TI-Nspire syntax,
+  or LaTeX between dollar signs such as `"$\frac{1}{x}$"`; a leading `y=` or `f(x)=`
+  is dropped). Each function is checked on the bridge first, like the math steps,
+  and is typed into the Graphs entry line as f1, f2, ...
+- **Saving** the new document: `save_as="C:\Users\you\Documents\area.tns"`. The
+  folder must exist and the name must end in `.tns`; an existing file is refused
+  unless `overwrite=true`. It presses Ctrl+S and types the path only into a standard
+  Windows Save dialog whose file name box has the focus, checks that the box holds
+  exactly that path before pressing Enter, and reports `save.saved: true` only once
+  the dialog has closed and the file is on disk. If any of that can't be checked
+  (TI-Nspire shows its own kind of dialog, asks whether to replace the file, or shows
+  an error), it stops, leaves the dialog open for you and says so in `save.message`.
+
+While it runs the tool reports progress (checking each step, opening the page,
+typing each step, each graph, saving), which Claude Code shows as it goes.
+
 - Every math step is first checked through the bridge; if one fails, nothing is
   typed. What the check changes in the bridge document is undone afterwards: new
   names (`Define f(x)=…`, `f(x):=…`, `h:=3`, `3→h`) are deleted, and variables that
@@ -116,15 +134,20 @@ page (`page_size="handheld"`) if you'll move the document to a calculator.
 - The window is found by its program (`TI-Nspire … Student/Teacher Software.exe`),
   never by its title, so a browser tab or editor named "TI-Nspire" is never typed
   into. With several TI-Nspire windows open, the one in front is used. The result
-  says which window it used: `{document, window, steps, warnings, note}`.
-- The bridge document stays open on its page; the new document is unsaved.
+  says which window it used: `{document, window, steps, warnings, note}`, plus
+  `graphs` and `save: {path, saved, message}` when asked for.
+- The bridge document stays open on its page; the new document is unsaved unless
+  `save_as` saved it.
 - It navigates TI-Nspire's menus by position, not by name, so it works in any UI
   language, but it assumes the layout of CX CAS Student/Teacher Software 6.x:
   "Add Notes" is item 6 of the add-page menu (`NOTES_MENU_KEY` in
   `nspire_notes.py`), New computer document is the 2nd File menu item, and Notes
-  is the 8th item of the Insert menu (the 4th menu). If a page comes out as the
-  wrong app, or the wrong kind of document opens, your version's menus differ;
-  `page_size="handheld"` uses Ctrl+N and the add-page menu instead.
+  is the 8th item of the Insert menu (the 4th menu). The Graphs page uses Insert >
+  Page (2nd item), then Insert > Graphs (4th item); on handheld documents "Add
+  Graphs" is item 2 of the add-page menu. If a page comes out as the wrong app, or
+  the wrong kind of document opens, your version's menus differ (the positions are
+  constants at the top of `nspire_notes.py`); `page_size="handheld"` uses Ctrl+N
+  and the add-page menu instead.
 
 ### Clipboard hotkey
 

@@ -140,6 +140,20 @@ hotkey.
   `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
   throughout. Validation undoes what it changes in the bridge document and warns
   about steps that read variables the new document won't have.
+  Menu positions are constants at the top of `nspire_notes.py` (`INSERT_MENU`,
+  `INSERT_PAGE_ITEM`, `GRAPHS_MENU_KEY`, ...). `graphs=[...]` adds a Graphs page
+  (Insert > Page, then Insert > Graphs; handheld: Insert > Page and `2` in the
+  add-page menu), pastes each function into the entry line and presses Enter, with
+  Ctrl+G to show the entry line again before f2, f3, ... Each function is checked on
+  the bridge as `Define mcpgraphchk(x)=...`, which the undo deletes.
+  `save_as=` saves with Ctrl+S, but only types into a standard Windows file dialog
+  (`#32770`) whose focused control is its file name box (`is_file_name_box`), reads the
+  box back (`control_text`) before Enter, and reports success only once the dialog
+  closed and the file appeared or changed on disk. Anything else (a Java dialog, a
+  replace-file question, an error) stops with the dialog left for the user.
+  `build_notes(..., progress=cb)` calls `cb(done, total, message)` from the worker
+  thread; server.py forwards it with `ctx.report_progress` through
+  `asyncio.run_coroutine_threadsafe` and drops it once the call is cancelled.
 - Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests`
   (CI runs them on Ubuntu and Windows, again on Windows with the versions pinned in
   `server.py.lock`, and runs `ruff check` with `ruff.toml`; tests needing pywin32,

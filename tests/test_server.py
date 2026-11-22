@@ -262,7 +262,7 @@ def fake_notes_module(monkeypatch, build_notes):
 def test_notes_steps_reach_build_notes_as_dicts(monkeypatch):
     got = {}
 
-    def build_notes(bridge, steps, title, page_size, timeout_s, cancel=None):
+    def build_notes(bridge, steps, title, page_size, timeout_s, cancel=None, **kw):
         got.update(steps=steps, page_size=page_size, cancel=cancel)
         return {"document": "Document 2", "steps": [], "warnings": [], "note": ""}
     fake_notes_module(monkeypatch, build_notes)
@@ -278,7 +278,7 @@ def test_notes_steps_reach_build_notes_as_dicts(monkeypatch):
 def test_notes_cancel_sets_event(monkeypatch):
     started, seen = threading.Event(), {}
 
-    def build_notes(bridge, steps, title, page_size, timeout_s, cancel=None):
+    def build_notes(bridge, steps, title, page_size, timeout_s, cancel=None, **kw):
         started.set()
         seen["stopped"] = cancel.wait(10)  # a real build_notes checks this between keystrokes
         return {}
