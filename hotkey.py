@@ -286,6 +286,7 @@ def mathtext_source(latex: str | None) -> str | None:
     if not latex or not latex.strip() or "$" in latex or "\\begin" in latex or "\n" in latex:
         return None  # matrices (\begin{matrix}) aren't in mathtext
     s = latex.replace(r"\left|", "|").replace(r"\right|", "|")  # mathtext's \left| is drawn badly
+    s = s.replace(r"\nolimits", "").replace(r"\limits", "")  # unevaluated ∫ results; mathtext has no \limits
     return "$" + _display_fracs(s) + "$"
 
 

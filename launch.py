@@ -14,6 +14,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+if sys.platform != "win32":
+    sys.exit("launch.py (the desktop shortcut) works on Windows only. On macOS, open nspire_bridge.tns "
+             "in TI-Nspire yourself; see README.md.")
 
 os.startfile(os.path.join(HERE, "nspire_bridge.tns"))  # opens in TI-Nspire (file association)
 

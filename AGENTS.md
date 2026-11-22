@@ -18,10 +18,14 @@ bridge document open in TI-Nspire, `selftest.py` passing, and (unless the user
 declines) the desktop shortcut that opens the document and starts the clipboard
 hotkey.
 
-1. **Check the platform.** This only works on Windows with the TI-Nspire CX (CAS)
+1. **Check the platform.** This needs Windows or macOS with the TI-Nspire CX (CAS)
    Student or Teacher Software installed. If either is missing, stop and tell the
    user; don't try to install TI-Nspire yourself (it's licensed software from
-   education.ti.com).
+   education.ti.com). On **macOS**, `setup.ps1`, the shortcut, the hotkey and
+   `nspire_notes` don't exist or don't work: follow README.md, "macOS" (install uv,
+   `uv sync --script server.py`, `claude mcp add` by hand, open the `.tns`, run
+   `selftest.py`) instead of steps 3 and 6's hotkey part, and tell the user the macOS
+   support hasn't been tested on a real Mac yet. Linux isn't supported (no TI-Nspire).
 2. **Get the code** if you aren't already in the repo: `git clone <url>` into a
    folder the user will keep. The MCP registration and shortcut point at this
    folder, so don't use a temp directory.
@@ -92,8 +96,13 @@ hotkey.
 - `nspire_bridge.py`: clipboard transport (`Bridge.session`, `Bridge.eval_one`,
   `Bridge.eval_batch`, `Bridge.list_vars`, `Bridge.clear_vars`, `Bridge.modes`).
   `timeout_s` is clamped to 0.5–120 s here. `Bridge.session(work, wait_s)` waits at
-  most `wait_s` for both its thread lock and the cross-process mutex, then raises
-  `BridgeTimeout`. `Bridge.modes()` reads `getMode(0)` and never raises (None on
+  most `wait_s` for both its thread lock and the cross-process lock, then raises
+  `BridgeTimeout`. The platform primitives (clipboard text, change counter, full
+  snapshot and restore, keeping traffic out of history, the cross-process lock) are in
+  `nspire_clip_win.py` (pywin32, named mutex) and `nspire_clip_mac.py` (NSPasteboard via
+  pyobjc imported lazily, nspasteboard.org marker types, `flock` lock file), chosen by
+  `sys.platform` and reached as `nspire_bridge._clip`; both expose the same names.
+  Everything else (protocol, batching, late replies) is shared. `Bridge.modes()` reads `getMode(0)` and never raises (None on
   failure); the setting numbers in `MODES` come from TI's Reference Guide and haven't
   all been checked against the real CAS (the angle mode is the most certain).
   `with bridge.temp_modes({2: 2}) as warnings:` (inside a session) sets modes with
@@ -184,10 +193,12 @@ hotkey.
   thread; server.py forwards it with `ctx.report_progress` through
   `asyncio.run_coroutine_threadsafe` and drops it once the call is cancelled.
 - Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2" --with matplotlib pytest -q tests`
-  (CI runs them on Ubuntu and Windows, again on Windows with the versions pinned in
+  (CI runs them on Ubuntu, macOS and Windows, again on Windows with the versions pinned in
   `server.py.lock`, and runs `ruff check` with `ruff.toml` and pyright with
-  `pyrightconfig.json`; tests needing pywin32, lupa or mcp are skipped without them).
-  Lint locally with `uvx ruff check .` and type-check with
+  `pyrightconfig.json`; tests needing pywin32, lupa or mcp are skipped without them; leave
+  out `--with "pywin32>=306"` off Windows). The transport tests swap `nspire_bridge._clip`
+  for a fake backend, and `tests/test_clip_mac.py` tests the macOS backend against a fake
+  NSPasteboard. Lint locally with `uvx ruff check .` and type-check with
   `uv run --no-project --with-requirements server.py --with pytest --with lupa --with "pyright[nodejs]==1.1.414" pyright`
   (expect 0 errors; the warnings are known SymPy/pywin32 typing gaps). When you change the translator, add the expected command to
   `tests/test_plan.py`, and a case to `LATEX_CASES` in `selftest.py` when the

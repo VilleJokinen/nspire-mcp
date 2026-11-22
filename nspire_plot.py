@@ -320,8 +320,10 @@ def breaks(ys: list[float | None], lo: float, hi: float) -> list[int]:
     n = len(ys)
 
     def d(k: int) -> float | None:
-        if 0 <= k < n - 1 and ys[k] is not None and ys[k + 1] is not None:
-            return ys[k + 1] - ys[k]
+        if 0 <= k < n - 1:
+            a, b = ys[k], ys[k + 1]
+            if a is not None and b is not None:
+                return b - a
         return None
 
     span = hi - lo

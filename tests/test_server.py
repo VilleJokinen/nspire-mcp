@@ -412,7 +412,7 @@ class CasBridge(FakeBridge):
                 return True, '"NONE"'
             return True, "[" + "".join(f'[{n},"{t}","none",0]' for n, (t, _) in self.vars.items()) + "]"
         if m := re.fullmatch(r"getType\((\w+)\)", expr):
-            return True, '"%s"' % self.vars.get(m.group(1).lower(), ("NONE", None))[0]
+            return True, f'"{self.vars.get(m.group(1).lower(), ("NONE", None))[0]}"'
         if m := re.fullmatch(r"getMode\((\d+)\)", expr):
             return True, str(self.modes.get(int(m.group(1)), 1))
         if m := re.fullmatch(r"setMode\((\d+),(\d+)\)", expr):
@@ -533,7 +533,8 @@ def test_mode_override_refused(monkeypatch):
     r = call("nspire_eval", {"expr": "sin(30)", "angle": "degree"})
     assert r.isError and "didn't change the mode setting with setMode" in r.content[0].text
     assert "sin(30)" not in fake.calls
-    with pytest.raises(Exception):
+    from mcp.server.fastmcp.exceptions import ToolError
+    with pytest.raises(ToolError, match="angle"):
         call_args = {"expr": "1", "angle": "turns"}
         run(server.mcp.call_tool("nspire_eval", call_args))
 

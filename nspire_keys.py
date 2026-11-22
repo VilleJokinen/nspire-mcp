@@ -329,7 +329,7 @@ def foreground_window() -> int:
 
 def window_class(hwnd: int) -> str:
     try:
-        return win32gui.GetClassName(hwnd)
+        return win32gui.GetClassName(hwnd) or ""
     except Exception:  # closed meanwhile
         return ""
 

@@ -1,11 +1,18 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["mcp>=1.30,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*", "matplotlib>=3.8"]
+# dependencies = [
+#     "mcp>=1.30,<2",
+#     "pywin32>=306; sys_platform == 'win32'",
+#     "pyobjc-framework-Cocoa>=10.3; sys_platform == 'darwin'",
+#     "sympy>=1.13",
+#     "antlr4-python3-runtime==4.11.*",
+#     "matplotlib>=3.8",
+# ]
 # ///
 """MCP server: evaluate expressions in the TI-Nspire CX (CAS) desktop app.
 
 Talks to bridge.lua (running on a page of nspire_bridge.tns) through the
-Windows clipboard. Run with:  uv run --script server.py
+clipboard (Windows or macOS). Run with:  uv run --script server.py
 """
 from __future__ import annotations
 
@@ -24,7 +31,7 @@ from typing import Annotated, Any, Literal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
-from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations  # noqa: E402
+from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, ToolAnnotations  # noqa: E402
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
@@ -36,10 +43,10 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(mes
 log = logging.getLogger("nspire")
 
 INSTRUCTIONS = """\
-Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used as an exact CAS.
+Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used as an exact CAS.
 - TI-Nspire must be open with nspire_bridge.tns on its bridge page ("NSPIRE BRIDGE tick N"). If a call
   times out, ask the user to check that; nspire_status pings the bridge.
-- Requests travel through the Windows clipboard: each call briefly replaces it and puts it back.
+- Requests travel through the clipboard: each call briefly replaces it and puts it back.
 - Variables and functions stored in the open document (a:=5, Define f(x)=...) persist and are
   substituted into every answer. If an answer looks oddly specific, check nspire_vars.
 - For scratch work (checking a step, trying a definition, testing values) pass isolated=True to
@@ -49,7 +56,7 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used
 - angle ("radian"/"degree"/"gradian") and exact_mode ("auto"/"exact"/"approx") on nspire_eval and
   nspire_latex override the document's mode for that one call; it's put back afterwards.
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
-- nspire_notes types into the TI-Nspire window: use it only when the user wants a Notes page, and
+- nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary.
@@ -248,6 +255,7 @@ def isolated_names(bridge, notes_mod, cmds: list[str], timeout_s: float):
     if not any(iso.names):
         yield iso
         return
+    assert notes_mod is not None  # names are only found with it
     t = min(float(timeout_s), 5.0)
     existing = notes_mod._bridge_vars(bridge, t)  # None: couldn't list them, so ask getType name by name
     for name in dict.fromkeys(n for names in iso.names for n in names):
@@ -258,7 +266,7 @@ def isolated_names(bridge, notes_mod, cmds: list[str], timeout_s: float):
         others = existing is None or any(k != key for k in existing)
         kind = {"FUNC": "a function", "PRGM": "a program"}.get(typ.upper())
         sv = None if kind else notes_mod._snapshot(bridge, name, typ, t, others)
-        if kind or (typ.upper() != "NONE" and sv.value is None):
+        if kind or (typ.upper() != "NONE" and sv is not None and sv.value is None):
             what = kind or f"a variable ({typ}) whose value couldn't be read"
             raise ValueError(f"isolated=True: {name} is {what} stored in the document, which can't be saved and "
                              f"put back, so this call would change it for good. Use another name, or ask the "
@@ -281,7 +289,7 @@ def isolated_names(bridge, notes_mod, cmds: list[str], timeout_s: float):
 def _eval_result(result: str, warnings: list[str]) -> CallToolResult:
     """nspire_eval's reply: the result as the only text block, as before isolated existed,
     plus a second block when there are warnings. structuredContent is EvalResult."""
-    content = [TextContent(type="text", text=result)]
+    content: list[ContentBlock] = [TextContent(type="text", text=result)]
     structured: dict = {"result": result}
     if warnings:
         content.append(TextContent(type="text", text="Warnings: " + " ".join(warnings)))
@@ -358,9 +366,10 @@ async def nspire_eval(expr: str, timeout_s: float = 5,
     settings = _mode_settings(angle, exact_mode)
 
     def work():
-        with isolated_names(bridge, nm, [expr], timeout_s) as iso:
-            with bridge.temp_modes(settings, timeout_s) as mode_warnings:
-                result = bridge.eval_one(expr, timeout_s)
+        # isolation outside the mode change: values are saved and restored in the document's own modes
+        with isolated_names(bridge, nm, [expr], timeout_s) as iso, \
+                bridge.temp_modes(settings, timeout_s) as mode_warnings:
+            result = bridge.eval_one(expr, timeout_s)
         return result, mode_warnings + iso.all_warnings()
     log.info("eval %r%s", expr, " (isolated)" if isolated else "")
     result, warnings = await asyncio.to_thread(bridge.session, work)

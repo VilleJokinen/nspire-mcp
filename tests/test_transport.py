@@ -1,11 +1,11 @@
 """Offline transport tests: nspire_bridge.py against bridge.lua run in lupa,
-with a fake clipboard. Never touches the real Windows clipboard.
+with a fake clipboard backend. Never touches the real clipboard.
 
     uv run --no-project --with pywin32 --with lupa --with pytest python -m pytest tests/test_transport.py -q
 
 Each bridge test runs against the current bridge.lua and the protocol-1 script
 from before batch support (tests/fixtures/bridge_protocol1.lua, or OLD_LUA).
-Skipped by tests/conftest.py where pywin32 or lupa is missing.
+Runs on any OS (pywin32 only on Windows); skipped by tests/conftest.py where lupa is missing.
 """
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ import re
 import sys
 import threading
 import time
+import types
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -58,28 +60,39 @@ class FakeClipboard:
 clip = FakeClipboard()
 
 
+@dataclass
+class Snap:
+    """The fake backend's ClipSnapshot: (format, bytes) pairs, as on Windows."""
+    items: list = field(default_factory=list)
+
+    def text(self):
+        for fmt, data in self.items:
+            if fmt == CF_TEXT:
+                return data.decode("utf-16-le").split("\0", 1)[0]
+        return None
+
+
 def _write_text(text, transient):
-    clip.set_text(text, excluded=transient)
-    seq = clip.seq
-    if transient:
-        nb._ours_seq = seq
-    return seq
+    with clip.lock:
+        clip.set_text(text, excluded=transient)
+        return clip.seq
 
 
 def _snapshot():
     with clip.lock:
-        return nb.ClipSnapshot(items=list(clip.formats.items()))
+        return Snap(items=list(clip.formats.items()))
 
 
 def _restore(snap):
     clip._set(dict(snap.items) if snap else {}, excluded=bool(snap and snap.items))
 
 
-nb.clip_get = clip.text
-nb._write_text = _write_text
-nb.clip_snapshot = _snapshot
-nb.clip_restore = _restore
-nb._seq = lambda: clip.seq
+# A fake clipboard backend in place of nspire_clip_win / nspire_clip_mac, so
+# these tests run on any OS. The cross-process lock stays the real one (a named
+# mutex on Windows, a file lock elsewhere).
+nb._clip = types.SimpleNamespace(clip_get=clip.text, write_text=_write_text, seq=lambda: clip.seq,
+                                 clip_snapshot=_snapshot, clip_restore=_restore, ClipSnapshot=Snap,
+                                 ProcessLock=nb._clip.ProcessLock)
 
 
 class FakeNspire:

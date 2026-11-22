@@ -8,9 +8,11 @@ jobs:
   offline:
     # Everything that runs without TI-Nspire, with the newest dependency
     # versions the scripts allow (an early warning before a lock update).
-    # Linux: the translator and result converter. Windows adds the Notes-safety
-    # tests, the transport tests (bridge.lua run in lupa against a fake
-    # clipboard; the real one is untouched) and the MCP server tests.
+    # Linux 3.11: the translator and result converter. Linux 3.13 and macOS add
+    # the transport tests (bridge.lua run in lupa against a fake clipboard; the
+    # real one is untouched), the macOS backend against a fake pasteboard and the
+    # MCP server tests; macOS also round-trips through its real pasteboard
+    # (NSPIRE_REAL_PASTEBOARD). Windows adds the Notes-safety tests.
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +21,10 @@ jobs:
             python: "3.11"
           - os: ubuntu-latest
             python: "3.13"
+            extra: --with lupa --with "mcp>=1.30,<2"
+          - os: macos-latest
+            python: "3.13"
+            extra: --with "pyobjc-framework-Cocoa>=10.3" --with lupa --with "mcp>=1.30,<2"
           - os: windows-latest
             python: "3.13"
             extra: --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2"
@@ -28,6 +34,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: pytest
         shell: bash
+        env:
+          NSPIRE_REAL_PASTEBOARD: "1"
         run: >
           uv run --no-project --python ${{ matrix.python }}
           --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with matplotlib ${{ matrix.extra }}

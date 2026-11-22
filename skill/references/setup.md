@@ -6,8 +6,10 @@ contains no code; it only teaches your agent how to use the server.
 
 ## Requirements
 
-- **Windows 10 or 11.** The server talks to TI-Nspire through the Windows
-  clipboard; macOS and Linux are not supported.
+- **Windows 10 or 11**, or **macOS** (new and not yet tested on a real Mac; no
+  Notes pages or hotkey there, and setup is by hand: see the server's README,
+  "macOS"). The server talks to TI-Nspire through the clipboard; Linux is not
+  supported.
 - **TI-Nspire CX CAS Student Software or Teacher Software** (the desktop
   app). This is commercial software from Texas Instruments, licensed
   separately; you must obtain and license it yourself from

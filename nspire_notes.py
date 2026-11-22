@@ -19,16 +19,25 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from nspire_bridge import TIMEOUT_MAX_S, TIMEOUT_MIN_S, Bridge, clip_set, readable, to_cas_chars
-from nspire_keys import (FILE_DIALOG_CLASS, chord, control_text, describe_window, find_nspire_windows,
-                         focus_nspire, focused_control, foreground_is, foreground_window, is_file_name_box,
-                         menu_area, menu_changed, new_dialogs, process_windows, type_text, wait_for_popup,
-                         window_class, window_open, window_title)
+
+# Typing needs Windows (SendInput); scan_names and the step checks work anywhere
+# (server.py's nspire_latex warnings use scan_names on macOS too).
+if sys.platform == "win32":
+    from nspire_keys import (FILE_DIALOG_CLASS, chord, control_text, describe_window, find_nspire_windows,
+                             focus_nspire, focused_control, foreground_is, foreground_window, is_file_name_box,
+                             menu_area, menu_changed, new_dialogs, process_windows, type_text, wait_for_popup,
+                             window_class, window_open, window_title)
+    UNSUPPORTED = None
+else:
+    UNSUPPORTED = ("nspire_notes works on Windows only: it types into the TI-Nspire window with Windows "
+                   "keystrokes. Show the steps with nspire_eval or nspire_latex instead.")
 
 log = logging.getLogger("nspire")
 
@@ -713,6 +722,8 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     existing file only with overwrite. progress(done, total, message) is called from
     this thread before each check, page, step, function and the save.
     """
+    if UNSUPPORTED:
+        raise RuntimeError(UNSUPPORTED)
     check_options(title, page_size, timeout_s)
     items = plan_steps(steps)
     graph_items = plan_graphs(graphs)

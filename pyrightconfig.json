@@ -19,7 +19,8 @@
       "reportGeneralTypeIssues": "warning",
       "reportIndexIssue": "warning",
       "reportOperatorIssue": "warning",
-      "reportReturnType": "warning"
+      "reportReturnType": "warning",
+      "reportOptionalSubscript": "warning"
     },
     // pywin32's stubs: PyHANDLE where int is declared, no None for security attributes,
     // str | bytes / str | None results; plus Optional values pyright can't narrow.
@@ -30,6 +31,17 @@
       "reportCallIssue": "warning",
       "reportOperatorIssue": "warning"
     },
+    // The same pywin32 stub gaps in the clipboard code moved out of nspire_bridge.py.
+    {
+      "root": "nspire_clip_win.py",
+      "extraPaths": ["."],
+      "reportArgumentType": "warning",
+      "reportCallIssue": "warning",
+      "reportOperatorIssue": "warning"
+    },
+    // The macOS backend's fcntl.flock isn't in the Windows stubs pyright checks against
+    // (pythonPlatform Darwin would instead flag pyobjc, which CI doesn't install on Linux).
+    {"root": "nspire_clip_mac.py", "extraPaths": ["."], "reportAttributeAccessIssue": "warning"},
     {"root": "hotkey.py", "extraPaths": ["."], "reportArgumentType": "warning"},
     {"root": "nspire_keys.py", "extraPaths": ["."], "reportArgumentType": "warning"},
     // Tests hand in fakes for Bridge, set attributes on lupa's Lua tables and modules,
@@ -41,7 +53,9 @@
       "reportAttributeAccessIssue": "none",
       "reportOperatorIssue": "none",
       "reportOptionalMemberAccess": "none",
-      "reportOptionalSubscript": "none"
+      "reportOptionalSubscript": "none",
+      "reportOptionalIterable": "none",
+      "reportIndexIssue": "none"
     },
     {"root": "."}
   ]

@@ -220,7 +220,7 @@ def test_render_result_latex_cases():
     r = hk.MathRenderer(dpi=96, max_width=10_000)
     for _, latex in CASES:
         png = r.render(latex)
-        if r"\begin{matrix}" in latex:
+        if r"\begin{" in latex:  # matrices and cases (piecewise) aren't in mathtext
             assert png is None
         else:
             assert png is not None, latex
