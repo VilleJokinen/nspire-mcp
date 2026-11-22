@@ -13,6 +13,7 @@ the math, the CAS does all of it. 0.1+0.2 is sent as written, not as
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import re
 from dataclasses import dataclass, field
@@ -344,9 +345,8 @@ class _Pre:
             parts = _split_top(r, (";",))
             for p in parts:
                 comma = _split_top(p, (",",))
-                if len(comma) > 1 and all(_RELATION.search(c) for c in comma):
-                    pieces.extend(comma)
-                elif len(comma) > 1 and not any(_RELATION.search(c) for c in comma):
+                if len(comma) > 1 and (all(_RELATION.search(c) for c in comma)
+                                       or not any(_RELATION.search(c) for c in comma)):
                     pieces.extend(comma)
                 else:
                     pieces.append(p)
@@ -768,13 +768,13 @@ class _Pre:
                     s = s[:m.start()] + " " + m.group(1) + " " + s[m.end():]
             atoms = list(atom.finditer(s))
             pairs = []
-            for x, y in zip(atoms, atoms[1:]):
+            for x, y in zip(atoms, atoms[1:], strict=False):
                 om = op_re.fullmatch(s, x.end(), y.start())
                 if om and self._vec_shape(x.group()) and self._vec_shape(y.group()):
                     pairs.append((x, om.group(1), y))
             if not pairs:
                 return s
-            for p, q in zip(pairs, pairs[1:]):
+            for p, q in zip(pairs, pairs[1:], strict=False):
                 if p[2].start() == q[0].start():
                     raise LatexError("Put parentheses around one of the vector products, e.g. "
                                      "\\vec{u}\\cdot(\\vec{v}\\times\\vec{w}): which one comes first changes the answer.")
@@ -927,10 +927,8 @@ def _parse_one(src: str) -> sp.Basic:
     if not _antlr_imported:
         # Import the parser with evaluation on: importing it builds
         # sympy.physics.units, which fails inside evaluate(False).
-        try:
+        with contextlib.suppress(Exception):  # parse_latex below reports what's missing
             importlib.import_module("sympy.parsing.latex._parse_latex_antlr")
-        except Exception:
-            pass  # parse_latex below reports what's missing
         _antlr_imported = True
     try:
         # evaluate(False) keeps what the parser builds as written: x=x stays an
@@ -1029,7 +1027,7 @@ def _rename(e: sp.Basic, names: dict[str, str]) -> sp.Basic:
         if not node.args:
             return node
         new = [go(a) for a in node.args]
-        if all(a is b for a, b in zip(new, node.args)):
+        if all(a is b for a, b in zip(new, node.args, strict=True)):
             return node
         with sp.evaluate(False):
             return node.func(*new)
@@ -1472,7 +1470,7 @@ class NspirePrinter(StrPrinter):
 
     def _print_Subs(self, e):
         expr, vs, pts = e.args
-        cond = " and ".join(f"{self._print(v)}={self._print(p)}" for v, p in zip(vs, pts))
+        cond = " and ".join(f"{self._print(v)}={self._print(p)}" for v, p in zip(vs, pts, strict=True))
         return f"({self._print(expr)}|{cond})"
 
     def _print_Limit(self, e):
@@ -1864,7 +1862,7 @@ def _atom_latex(s: str, ld: dict) -> str:
         return r"\left\{" + ", ".join(_part_latex(i, ld) for i in items) + r"\right\}"
     parts, ops = _split_rel(s)
     out = _expr_latex(parts[0], ld)
-    for op, side in zip(ops, parts[1:]):
+    for op, side in zip(ops, parts[1:], strict=True):
         out += f" {_REL_TEX[op]} " + _expr_latex(side, ld)
     return out
 

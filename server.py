@@ -485,7 +485,7 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
             with_value = [name for name, typ in used if typ in VALUE_TYPES]
             values: dict[str, str] = {}
             if with_value:
-                for name, r in zip(with_value, bridge.eval_batch(with_value, t)):
+                for name, r in zip(with_value, bridge.eval_batch(with_value, t), strict=True):
                     if r["ok"]:
                         values[name] = _short(r["result"])
             for name, typ in used:

@@ -16,6 +16,7 @@ and that the run wasn't cancelled, so it stops instead of typing into another pr
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -289,10 +290,8 @@ def _snapshot(bridge: Bridge, name: str, old_type: str, timeout_s: float, others
     Without them nothing can be substituted, so the value read back is exactly what was stored."""
     value = None
     if old_type not in ("NONE", "FUNC", "PRGM"):  # a function's body can't be read back by evaluating it
-        try:
+        with contextlib.suppress(ValueError):
             value = bridge.eval_one(name, timeout_s, raw=True)
-        except ValueError:
-            pass
     evaluated = value is not None and old_type.upper() in _SYMBOLIC_TYPES and others_stored
     return _Saved(name, old_type, value, evaluated)
 

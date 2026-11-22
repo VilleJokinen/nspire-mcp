@@ -218,7 +218,7 @@ def parse_modes(text: str) -> dict | None:
     if not nums or len(nums) % 2:
         return None
     out: dict = {}
-    for mode, setting in zip(nums[::2], nums[1::2]):
+    for mode, setting in zip(nums[::2], nums[1::2], strict=True):
         key, names = MODES.get(mode, (f"mode_{mode}", {}))
         out[key] = names.get(setting, setting)
     return out
@@ -525,10 +525,8 @@ class Bridge:
     def _error_message(self, body: str, timeout_s: float) -> str:
         msg = f"TI-Nspire error: {body}"
         if self.cas is None:
-            try:
+            with contextlib.suppress(Exception):
                 self.ping(timeout_s)
-            except Exception:
-                pass
         if self.cas is False:
             msg += (" (this is the non-CAS edition: symbolic input like solve/factor/∫ with free"
                     " variables isn't supported; use numeric expressions)")
@@ -617,7 +615,7 @@ class Bridge:
                 log.warning("not a batch reply (%r); evaluating one at a time", body[:80])
                 self.protocol = 1
                 return None
-            for i, (item_ok, text) in zip(chunk, results):
+            for i, (item_ok, text) in zip(chunk, results, strict=True):
                 if item_ok:
                     out[i] = {"expr": exprs[i], "ok": True, "result": text if raw else readable(text)}
                 else:
@@ -717,7 +715,7 @@ class Bridge:
             return []
         try:
             failed = [(m, s, problem) for (m, s), (_, _, problem)
-                      in zip(changed, self._apply_modes(dict(changed), timeout_s)) if problem]
+                      in zip(changed, self._apply_modes(dict(changed), timeout_s), strict=True) if problem]
         except Exception as e:
             failed = [(m, s, str(e)) for m, s in changed]
         for m, s, problem in failed:
@@ -747,7 +745,7 @@ class Bridge:
             })
         if values:
             idx = [k for k, v in enumerate(out) if v["type"].upper() in VALUE_TYPES]
-            for k, res in zip(idx, self.eval_batch([out[k]["name"] for k in idx], timeout_s)):
+            for k, res in zip(idx, self.eval_batch([out[k]["name"] for k in idx], timeout_s), strict=True):
                 if res["ok"]:
                     v = res["result"]
                     out[k]["value"] = v if len(v) <= VALUE_MAX_CHARS else v[:VALUE_MAX_CHARS] + "…"
@@ -770,6 +768,6 @@ class Bridge:
             return {"deleted": [], "errors": []}
         results = self.eval_batch([f"DelVar {n}" for n in names], timeout_s)
         return {
-            "deleted": [n for n, r in zip(names, results) if r["ok"]],
-            "errors": [{"name": n, "error": r["error"]} for n, r in zip(names, results) if not r["ok"]],
+            "deleted": [n for n, r in zip(names, results, strict=True) if r["ok"]],
+            "errors": [{"name": n, "error": r["error"]} for n, r in zip(names, results, strict=True) if not r["ok"]],
         }

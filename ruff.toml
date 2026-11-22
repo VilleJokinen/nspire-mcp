@@ -5,15 +5,8 @@ line-length = 120
 
 [lint]
 # Ruff's defaults (syntax errors, pyflakes, the clear-cut pycodestyle checks),
-# plus bugbear (B), pyupgrade (UP) and flake8-simplify (SIM).
-select = ["E4", "E7", "E9", "F", "B", "UP", "SIM"]
-# Not fixed yet (would touch nspire_bridge/nspire_latex/server/nspire_notes/hotkey
-# in many places): revisit once the parallel branches editing them have merged.
-ignore = [
-    "B905",    # zip() without strict=: each of the 8 calls needs its own strict=True/False decision
-    "SIM105",  # try/except/pass -> contextlib.suppress (5 sites, several lines each)
-    "SIM114",  # combine if arms with `or` (1 site in nspire_latex)
-]
+# plus bugbear (B), pyupgrade (UP), flake8-simplify (SIM) and import sorting (I).
+select = ["E4", "E7", "E9", "F", "B", "UP", "SIM", "I"]
 
 [lint.per-file-ignores]
 # Console-less start (--gui-script) points stdout/stderr at os.devnull for the
