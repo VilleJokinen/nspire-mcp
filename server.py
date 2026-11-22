@@ -243,6 +243,9 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     (30^\\circ), |x|, n!, \\binom, \\arg, \\Re, \\Im, sgn, a \\bmod b, := (a:=5 stores, f(x):=... defines).
     Any other backslash command, or input that can't be read to the end, is an error, not a guess.
     Accents are separate names (\\bar x -> xbar, x^* -> xstar); T(t)=... with t on the right defines T.
+    Subscripts of letters/digits are names (x_{n1} -> xn1; x_{n+1} is refused); \\vec{u}\\cdot\\vec{v} ->
+    dotP(u,v), \\times -> crossP (also row/column matrices); units after a number (5\\,\\mathrm{m},
+    9.81\\,\\mathrm{m/s^2}) -> 5*_m, 9.81*_m/_s^2. \\Gamma(5) and other Greek calls are refused.
     \\log without a base is base 10 and \\ln is natural; e and i are the constants unless they
     are summation/integration variables. "1,5" between digits is a decimal comma, also inside
     {} groups such as \\frac{1,5}{2}, but not inside (), [] or \\{\\} (f(1,5), \\gcd(12,18), lists).

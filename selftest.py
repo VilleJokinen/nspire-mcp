@@ -55,6 +55,11 @@ LATEX_CASES = [
     (r"2\cdot\{1,2,3\}", "auto", "{2,4,6}"),
     (r"x^2=2 \text{ for } x>0", "auto", "x=√(2)"),
     (r"12 \bmod 5", "auto", "2"),
+    # dot and cross products (dotP, crossP), and units (TI-Nspire's _km, _m, _kg, _gm)
+    (r"\begin{pmatrix}1\\2\\3\end{pmatrix}\cdot\begin{pmatrix}4\\5\\6\end{pmatrix}", "auto", "32"),
+    (r"\begin{pmatrix}1&0&0\end{pmatrix}\times\begin{pmatrix}0&1&0\end{pmatrix}", "auto", "[0,0,1]"),
+    (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000"),
+    (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4"),
 ]
 
 

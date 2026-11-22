@@ -37,6 +37,15 @@ class TiList(sp.Function):
     """A TI-Nspire list {a,b,...} (from \\{a,b\\}); never evaluated."""
 
 
+class TiVec(sp.Function):
+    """A vector name written \\vec{u}: printed as plain u, but dotP/crossP know it is a vector."""
+    nargs = 1
+
+
+class TiUnit(sp.Symbol):
+    """A TI-Nspire unit such as _m (from 5\\,\\mathrm{m}); not a variable to solve for."""
+
+
 # ================================================================ preprocess
 
 _PH = "Omega"  # placeholder symbols are \Omega_{9NN}; restored after parsing
@@ -47,9 +56,25 @@ _UNICODE = {"−": "-", "·": r"\cdot ", "×": r"\times ", "÷": r"\div ", "≤"
             "≠": r"\neq ", "π": r"\pi ", "∞": r"\infty ", "√": r"\sqrt", "°": r"^{\circ}",
             "θ": r"\theta ", "α": r"\alpha ", "β": r"\beta ", "λ": r"\lambda ", "ω": r"\omega "}
 # Pure styling, unwrapped. Accents that make a different variable (\bar x, \hat x,
-# \tilde x) are not here: they become names of their own (xbar, xhat, xtilde).
-_STYLE_WRAPPERS = ["mathbf", "boldsymbol", "mathit", "mathsf", "mathtt", "vec", "underline",
+# \tilde x) are not here: they become names of their own (xbar, xhat, xtilde). \vec
+# isn't either: \vec{u}\cdot\vec{v} is dotP(u,v), not u*v (see _Pre._vectors).
+_STYLE_WRAPPERS = ["mathbf", "boldsymbol", "mathit", "mathsf", "mathtt", "underline",
                    "mathbb", "mathcal", "bm"]
+# Units written \mathrm{...} or \text{...} right after a number, and their TI-Nspire
+# names (TI-Nspire guide, Appendix A "Conversion Categories and Units"; gram is _gm,
+# hour _hr, liter _l). Any other name in that position is refused, not read as a variable.
+_UNITS = {
+    "m": "_m", "cm": "_cm", "mm": "_mm", "km": "_km", "dm": "_dm", "nm": "_nm",
+    "s": "_s", "ms": "_ms", "ns": "_ns", "min": "_min", "h": "_hr", "hr": "_hr", "yr": "_yr",
+    "kg": "_kg", "g": "_gm", "mg": "_mg",
+    "l": "_l", "L": "_l", "ml": "_ml", "mL": "_ml",
+    "N": "_N", "J": "_J", "kJ": "_kJ", "eV": "_eV", "cal": "_cal", "kcal": "_kcal", "kWh": "_kWh",
+    "W": "_W", "kW": "_kW",
+    "Pa": "_Pa", "kPa": "_kPa", "bar": "_bar", "mbar": "_mbar", "atm": "_atm",
+    "K": "_K",
+}
+_UNIT_WRAPPERS = r"\\(?:mathrm|text|textrm|textnormal|mbox)\s*\{"
+_TEXT_WORDS = {"and", "ja", "or", "tai"}  # \text{...} connectives handled by _Pre._text
 _ACCENTS = {"bar": "bar", "overline": "bar", "hat": "hat", "widehat": "hat", "tilde": "tilde",
             "widetilde": "tilde"}
 _MATRIX_ENVS = "pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|smallmatrix"
@@ -246,6 +271,7 @@ class _Pre:
         self.ode_indep: str | None = None
         self.constraints: list[str] = []  # LaTeX of the conditions after \text{for ...}
         self.assign = False                # the input used :=
+        self.subnames: dict[str, str] = {}  # Omega_{8NN} -> subscripted name such as x_n1
 
     def ph(self, kind: str, payload) -> str:
         key = f"9{len(self.placeholders):02d}"
@@ -287,8 +313,10 @@ class _Pre:
         if r"\pm" in s or r"\mp" in s:
             raise LatexError("± isn't supported; write the two cases separately or ask to solve the equation.")
         s = self._accents(s)
+        s = self._vectors(s)
         for w in _STYLE_WRAPPERS:
             s = _unwrap_cmd(s, w, lambda a: "{" + a + "}")
+        s = self._units(s)  # before \text and \mathrm are unwrapped
         for t in ("text", "textrm", "textit", "textbf", "textnormal", "mbox"):
             s = _unwrap_cmd(s, t, self._text)
         s = _unwrap_cmd(s, r"mathrm", self._name)
@@ -299,9 +327,14 @@ class _Pre:
         s = re.sub(r"\\lg\b", r"\\log_{10}", s)
         s = re.sub(r"\\log\b(?!\s*_)", r"\\log_{10}", s)
         s = self._derivatives(s)
+        s = self._subscripts(s)  # before decimal commas: x_{1,2} is refused, not x_{1.2}
+        # A script without braces is one character, as LaTeX renders it: \sum_{k=1}^5 2k has
+        # the upper limit 5 (the parser would read ^52), x^12 is x^1*2
+        s = re.sub(r"([\^_])\s*(\d)", r"\1{\2}", s)
         s = _decimal_commas(s)  # before matrices, so cells such as 1,5 are converted too
         s = self._det(s)
         s = self._matrices(s)
+        s = self._vector_ops(s)
         s = self._lists(s)
         s = self._bmod(s)
         s = self._eval_bars(s)
@@ -536,18 +569,6 @@ class _Pre:
             s = s[:start] + self.ph("name", "mod") + f"({a},{b})" + s[end:]
         return s
 
-    def _name(self, arg: str) -> str:
-        a = arg.strip()
-        if a in ("d",):
-            return " d"
-        if a in ("e", "i"):
-            return f" {a} "
-        if len(a) == 1:
-            return a
-        if a in _KNOWN_CMDS:
-            return f"\\{a} "
-        return self.ph("name", a)
-
     def _derivatives(self, s: str) -> str:
         # \frac{d^n y}{d x^n} / \frac{dy}{dx}  ->  y'' (record x)
         pat = re.compile(r"\\frac\s*\{\s*d\s*(?:\^\s*\{?\s*(\d)\s*\}?)?\s*([A-Za-z])\s*\}"
@@ -604,6 +625,286 @@ class _Pre:
             rest = (s[:m.start()] + s[m.end():]).replace(r"\{", "").replace(r"\}", "").strip()
             return [r for r in rows if r.strip()] + ([rest] if rest else [])
         return [r for r in re.split(r"\\\\", s) if r.strip()]
+
+    # -- subscripts: x_1, x_{n1}, \alpha_{ij}
+
+    def _subscripts(self, s: str) -> str:
+        """A subscripted variable becomes a name of its own (x_{n1} -> xn1).
+
+        Only letters and digits can be in a subscript: TI-Nspire names hold nothing
+        else, so x_{n+1} and x_{n-1} would both lose the sign and collide with x_{n1}.
+        The parser would also read the subscript as an expression (x_{1,2} -> x_{1.2},
+        x_{ba} -> x_{ab}), so each name is replaced by a placeholder here and
+        restored after parsing. Subscripts of \\int, \\sum, \\lim, \\log ... stay.
+        """
+        toks = _tokens(s)
+        edits: list[tuple[int, int, str]] = []
+        k = 0
+        while k < len(toks):
+            if toks[k][2] != "_":
+                k += 1
+                continue
+            j = k - 1
+            while j >= 0 and toks[j][2].isspace():
+                j -= 1
+            base, start = self._sub_base(toks, j) if j >= 0 else (None, 0)
+            if base is None:
+                k += 1
+                continue
+            sub, raw, k = self._sub_body(s, toks, k + 1)
+            if base == "Omega" and re.fullmatch(r"9\d+", raw.strip()) and f"Omega_{{{raw.strip()}}}" in self.placeholders:
+                continue  # one of our own placeholders
+            key = f"8{len(self.subnames):02d}"
+            self.subnames[f"{_PH}_{{{key}}}"] = f"{base}_{sub}"
+            edits.append((start, toks[k - 1][1], rf" \{_PH}_{{{key}}} "))
+        for a, b, rep in sorted(edits, reverse=True):
+            s = s[:a] + rep + s[b:]
+        return s
+
+    @staticmethod
+    def _sub_base(toks, j: int) -> tuple[str | None, int]:
+        """The variable a subscript belongs to: a letter, a Greek letter, or {x} left by \\mathbf{x}."""
+        t = toks[j][2]
+        if re.fullmatch(r"[A-Za-z]", t):
+            return t, toks[j][0]
+        if t.startswith("\\") and t[1:] in _GREEK_CMDS:
+            return t[1:], toks[j][0]
+        if t == "}":
+            inner = [tk for tk in toks[:j] if not tk[2].isspace()]
+            if len(inner) >= 2 and inner[-2][2] == "{":
+                prev = inner[-3][2] if len(inner) >= 3 else ""
+                if prev in ("^", "_") or (prev.startswith("\\") and len(prev) > 2):
+                    return None, 0  # an exponent, or a command's argument (\frac{a}{x}_1)
+                b = inner[-1][2]
+                if re.fullmatch(r"[A-Za-z]", b):
+                    return b, inner[-2][0]
+                if b.startswith("\\") and b[1:] in _GREEK_CMDS:
+                    return b[1:], inner[-2][0]
+        return None, 0
+
+    @staticmethod
+    def _sub_body(s: str, toks, k: int) -> tuple[str, str, int]:
+        """Read the subscript starting at token k: (name part, as written, next token index)."""
+        while k < len(toks) and toks[k][2].isspace():
+            k += 1
+        if k >= len(toks):
+            raise LatexError("A subscript _ has nothing after it.")
+        if toks[k][2] == "{":
+            depth, m = 0, k
+            while m < len(toks):
+                depth += {"{": 1, "}": -1}.get(toks[m][2], 0)
+                if depth == 0:
+                    break
+                m += 1
+            if m >= len(toks):
+                raise LatexError("Unbalanced braces in the LaTeX.")
+            body, nxt = toks[k + 1:m], m + 1
+            raw = s[toks[k][1]:toks[m][0]]
+        else:
+            body, nxt = [toks[k]], k + 1
+            raw = toks[k][2]
+        parts = []
+        for _, _, t in body:
+            if t.isspace():
+                continue
+            if re.fullmatch(r"[A-Za-z0-9]", t):
+                parts.append(t)
+            elif t.startswith("\\") and t[1:] in _GREEK_CMDS:
+                parts.append(t[1:])
+            else:
+                what = ("a comma" if t == "," else f"'{t}'")
+                raise LatexError(
+                    f"The subscript _{{{raw.strip()}}} has {what} in it. Only letters and digits work in a "
+                    "subscript (x_1, x_{n1}, a_{ij}), because a TI-Nspire name can hold nothing else: "
+                    "x_{n+1} would become xn1. Rename it (x_{n1}), or write the problem in TI-Nspire "
+                    "syntax, e.g. with a function x(n+1), and use nspire_eval.")
+        if not parts:
+            raise LatexError("A subscript _{} is empty.")
+        return "".join(parts), raw, nxt
+
+    # -- vectors: \vec{u}\cdot\vec{v} -> dotP(u,v), \times -> crossP
+
+    def _vectors(self, s: str) -> str:
+        r"""\vec{u} (or \vec u) -> a vector name, printed as u."""
+        pat = re.compile(r"\\vec(?![A-Za-z])\s*")
+        while (m := pat.search(s)):
+            j = m.end()
+            if j < len(s) and s[j] == "{":
+                end = _match_brace(s, j)
+                arg, nxt = s[j + 1:end].strip(), end + 1
+            else:
+                t = re.compile(r"\\[A-Za-z]+|[A-Za-z]").match(s, j)
+                arg, nxt = (t.group(), t.end()) if t else ("", j)
+            g = re.fullmatch(r"\\([A-Za-z]+)", arg)
+            if re.fullmatch(r"[A-Za-z]", arg):
+                name = arg
+            elif g and g.group(1) in _GREEK_CMDS and g.group(1) != "pi":
+                name = g.group(1)
+            else:
+                raise LatexError(f"\\vec{{{arg}}} isn't supported (only over one letter, e.g. \\vec{{u}}); write it "
+                                 "in TI-Nspire syntax and use nspire_eval.")
+            s = s[:m.start()] + self.ph("vec", name) + s[nxt:]
+        return s
+
+    def _vec_shape(self, tex: str):
+        """('sym', None) for \\vec{u} or a cross product of those, ('row'|'col', n) for a
+        1×n or n×1 matrix, None for anything that isn't a vector."""
+        kind, payload = self.placeholders.get(tex.strip()[1:], (None, None))
+        if kind == "vec":
+            return ("sym", None)
+        if kind == "matrix":
+            rows, cols = len(payload), len(payload[0])
+            if rows == 1 and cols >= 2:
+                return ("row", cols)
+            if cols == 1 and rows >= 2:
+                return ("col", rows)
+        if kind == "vecop" and payload[0] == "cross":
+            return payload[3]
+        return None
+
+    def _vector_ops(self, s: str) -> str:
+        """u \\cdot v and u \\times v between two vectors (\\vec names or row/column matrices)
+        -> dotP / crossP. The parser would read both as u*v."""
+        atom = re.compile(r"\\" + _PH + r"_\{9\d+\}")
+        op_re = re.compile(r"\s*(\\cdot|\\times)(?![A-Za-z])\s*")
+        while True:
+            # (u \times v) \cdot w: drop parentheses around a lone vector next to a vector operator
+            for m in reversed(list(re.finditer(r"\(\s*(" + atom.pattern + r")\s*\)", s))):
+                if not self._vec_shape(m.group(1)):
+                    continue
+                before, after = s[:m.start()].rstrip(), s[m.end():]
+                op_before = re.search(r"\\(cdot|times)$", before) is not None
+                op_after = op_re.match(after) is not None
+                called = re.search(r"[A-Za-z0-9}\])'!]$", before) is not None
+                if op_before or (op_after and not called):
+                    s = s[:m.start()] + " " + m.group(1) + " " + s[m.end():]
+            atoms = list(atom.finditer(s))
+            pairs = []
+            for x, y in zip(atoms, atoms[1:]):
+                om = op_re.fullmatch(s, x.end(), y.start())
+                if om and self._vec_shape(x.group()) and self._vec_shape(y.group()):
+                    pairs.append((x, om.group(1), y))
+            if not pairs:
+                return s
+            for p, q in zip(pairs, pairs[1:]):
+                if p[2].start() == q[0].start():
+                    raise LatexError("Put parentheses around one of the vector products, e.g. "
+                                     "\\vec{u}\\cdot(\\vec{v}\\times\\vec{w}): which one comes first changes the answer.")
+            for x, op, y in reversed(pairs):
+                if re.match(r"\s*[\^_'!]", s[y.end():]) or re.search(r"[\^_]\s*$", s[:x.start()]):
+                    raise LatexError("A vector in a dot or cross product has an exponent or index attached; put "
+                                     "parentheses around what you mean, or use nspire_eval with dotP/crossP.")
+                kind = "dot" if op == r"\cdot" else "cross"
+                shape = self._vec_pair(kind, self._vec_shape(x.group()), self._vec_shape(y.group()))
+                rep = self.ph("vecop", (kind, x.group(), y.group(), shape))
+                s = s[:x.start()] + rep + s[y.end():]
+
+    @staticmethod
+    def _vec_pair(kind: str, a, b):
+        """Check the shapes of a dot/cross product's vectors; the shape of a cross product."""
+        known = [v for v in (a, b) if v[0] != "sym"]
+        if len(known) == 2:
+            if known[0][0] != known[1][0]:
+                raise LatexError("A dot or cross product needs two row vectors or two column vectors; one of these "
+                                 "is a row and the other a column.")
+            if known[0][1] != known[1][1]:
+                raise LatexError(f"The vectors have different lengths ({known[0][1]} and {known[1][1]}).")
+        if kind == "cross" and any(v[1] not in (2, 3) for v in known):
+            raise LatexError("A cross product needs vectors of length 2 or 3.")
+        return known[0] if known else ("sym", None)
+
+    # -- units: 5\,\mathrm{m} -> 5*_m
+
+    def _units(self, s: str) -> str:
+        r"""\mathrm{...} or \text{...} right after a number (or after such a unit) is a unit.
+
+        Without this, 5\,\mathrm{m} + 3\,\mathrm{cm} would be 5*m + 3*cm (variables) and
+        5\text{ m} just 5. The units in _UNITS become TI-Nspire units; any other name
+        there is refused. \mathrm{d}x, \mathrm{e}, \mathrm{i} and the condition words
+        of \text{for ...} aren't units.
+        """
+        if re.search(r"\^\s*\{?\s*\\circ\s*\}?\s*(?:" + _UNIT_WRAPPERS + r"\s*[CF]\s*\}|[CF](?![A-Za-z]))", s):
+            raise LatexError("Temperatures (°C, °F) aren't supported by the LaTeX translator; write them in TI-Nspire "
+                             "syntax (_°C, tmpCnv) and use nspire_eval.")
+        pat = re.compile(_UNIT_WRAPPERS)
+        ends: set[int] = set()
+        i = 0
+        while (m := pat.search(s, i)):
+            end = _match_brace(s, m.end() - 1)
+            content, before, after = s[m.end():end].strip(), s[:m.start()], s[end + 1:]
+            words = content.lower().split()
+            called = content in _KNOWN_CMDS and re.match(r"\s*\(", after)  # 2\,\mathrm{min}(a,b)
+            if (not content or content in ("d", "e", "i") or words[0] in _CONDITION_WORDS | _TEXT_WORDS
+                    or content in (",", "&") or called or not self._unit_place(before, ends)):
+                i = end + 1
+                continue
+            unit = self._unit_tex(content)
+            op_before = re.search(r"(?:/|\*|\\cdot|\\times)\s*$", before) is not None
+            rep = ("" if op_before else r" \cdot ") + "{" + unit + "}"
+            s = before + rep + after
+            i = len(before) + len(rep)
+            ends.add(i)
+        return s
+
+    @staticmethod
+    def _unit_place(before: str, ends: set[int]) -> bool:
+        """Is this spot right after a number, or after a unit (5\\,\\mathrm{m}/\\mathrm{s})?"""
+        b = before.rstrip()
+        if re.search(r"\d\.?$", b) or re.search(r"\{\s*-?\d+(?:[.,]\d+)?\s*\}$", b):
+            return True
+        b = re.sub(r"(?:/|\*|\\cdot|\\times)$", "", b).rstrip()
+        b = re.sub(r"\^\s*(?:\{[^{}]*\}|-?\d|[A-Za-z])$", "", b).rstrip()
+        return len(b) in ends
+
+    def _unit_tex(self, content: str) -> str:
+        """m/s^2, kg\\cdot m, km/h ... -> LaTeX over unit placeholders."""
+        tok = re.compile(r"\s+|\\(?:cdot|times)(?![A-Za-z])|[/*()]|\^\s*(?:\{\s*-?\d+\s*\}|\d)|[A-Za-z]+|\S")
+        out: list[str] = []
+        last_unit = False
+        for m in tok.finditer(content):
+            t = m.group()
+            if t.isspace():
+                continue
+            if re.fullmatch(r"[A-Za-z]+", t):
+                if t not in _UNITS:
+                    raise LatexError(
+                        f"'{t}' after a number isn't a unit the LaTeX translator knows (it knows "
+                        f"{', '.join(sorted(_UNITS, key=str.lower))}). Write units in TI-Nspire syntax (5_m) and use "
+                        "nspire_eval, or put \\cdot between the number and a variable.")
+                if last_unit:
+                    out.append(r"\cdot")
+                out.append(self.ph("unit", _UNITS[t]).strip())
+                last_unit = True
+            elif t.startswith("^"):
+                if not last_unit:
+                    raise LatexError(f"Couldn't read the unit {content!r}.")
+                out[-1] = "{" + out[-1] + "}^{" + re.sub(r"[\^{}\s]", "", t) + "}"
+            elif t in ("(", ")"):
+                if t == "(" and last_unit:
+                    out.append(r"\cdot")
+                out.append(t)
+                last_unit = t == ")"
+            elif t in ("/", "*", r"\cdot", r"\times"):
+                out.append("/" if t == "/" else r"\cdot")
+                last_unit = False
+            else:
+                raise LatexError(f"Couldn't read the unit {content!r}; write it in TI-Nspire syntax and use nspire_eval.")
+        if not out or not last_unit:
+            raise LatexError(f"Couldn't read the unit {content!r}.")
+        body = " ".join(out)
+        return body if len(out) == 1 else f"({body})"
+
+    def _name(self, arg: str) -> str:
+        a = arg.strip()
+        if a in ("d",):
+            return " d"
+        if a in ("e", "i"):
+            return f" {a} "
+        if len(a) == 1:
+            return a
+        if a in _KNOWN_CMDS:
+            return f"\\{a} "
+        return self.ph("name", a)
 
 
 # ================================================================ parse
@@ -726,23 +1027,73 @@ def _ode_indep(raw, dep: str, all_syms: set[str]) -> str:
     return "t" if dep == "x" else "x"  # x' = 3 is x(t), never deSolve(...,x,x)
 
 
+def _rename(e: sp.Basic, names: dict[str, str]) -> sp.Basic:
+    """Put the subscripted names back in place of their placeholders (see _Pre._subscripts)."""
+    if not names:
+        return e
+
+    def go(node):
+        if isinstance(node, sp.Symbol):
+            return sp.Symbol(names[node.name]) if node.name in names else node
+        if isinstance(node, AppliedUndef):
+            n = node.func.__name__
+            return sp.Function(names.get(n, n))(*[go(a) for a in node.args])
+        if not node.args:
+            return node
+        new = [go(a) for a in node.args]
+        if all(a is b for a, b in zip(new, node.args)):
+            return node
+        with sp.evaluate(False):
+            return node.func(*new)
+    return go(e)
+
+
+def _is_symvec(e) -> bool:
+    """A vector the CAS can't see is one: \\vec{u}, a cross product, or a sum or multiple of those."""
+    if isinstance(e, TiVec):
+        return True
+    if isinstance(e, AppliedUndef) and e.func.__name__ == "crossP":
+        return True
+    if isinstance(e, (sp.Add, sp.Mul)):
+        return any(_is_symvec(a) for a in e.args)
+    return False
+
+
+def _plain_names(e, out: set[str], vecs: set[str]) -> None:
+    """Names of plain variables (out) and of \\vec names (vecs) in e."""
+    if isinstance(e, TiVec):
+        vecs.add(_clean_name(str(e.args[0])))
+        return
+    if isinstance(e, sp.Symbol) and not isinstance(e, TiUnit):
+        out.add(_clean_name(e.name))
+    for a in getattr(e, "args", ()):
+        if isinstance(a, sp.Basic):
+            _plain_names(a, out, vecs)
+
+
 def parse(latex: str) -> Parsed:
     pre = _Pre()
     pieces = pre.run(latex)
     if not pieces:
         raise LatexError("The LaTeX is empty.")
-    raw = [_parse_one(p) for p in pieces]
-    raw_conds = [_parse_one(c) for c in pre.constraints]
+
+    def parse1(src: str) -> sp.Basic:
+        return _rename(_parse_one(src), pre.subnames)
+
+    raw = [parse1(p) for p in pieces]
+    raw_conds = [parse1(c) for c in pre.constraints]
 
     # placeholders with LaTeX inside: parse it (cleaned up by walk() below)
     ph_values: dict[str, tuple[str, object]] = {}
     for name, (kind, payload) in pre.placeholders.items():
         if kind in ("matrix", "det"):
-            ph_values[name] = (kind, sp.ImmutableMatrix([[_parse_one(c) for c in row] for row in payload]))
+            ph_values[name] = (kind, sp.ImmutableMatrix([[parse1(c) for c in row] for row in payload]))
         elif kind == "evalat":
-            ph_values[name] = (kind, tuple(None if x is None else _parse_one(x) for x in payload))
+            ph_values[name] = (kind, tuple(None if x is None else parse1(x) for x in payload))
         elif kind == "list":
-            ph_values[name] = (kind, [_parse_one(x) for x in payload])
+            ph_values[name] = (kind, [parse1(x) for x in payload])
+        elif kind == "vecop":
+            ph_values[name] = (kind, (payload[0], parse1(payload[1]), parse1(payload[2])))
 
     # T(t) = 20+80e^{-0.1t} defines T: only f g h F G H are functions otherwise, so
     # T(t) would be the product T*t. A name on the left called with bare variables
@@ -785,10 +1136,17 @@ def parse(latex: str) -> Parsed:
                         return _eval_at(*v)
                     if kind == "list":
                         return TiList(*[fix(x) for x in v], evaluate=False)
+                    if kind == "vecop":
+                        op, a, b = v
+                        return sp.Function("dotP" if op == "dot" else "crossP")(walk(a), walk(b))
                     m = v.applyfunc(walk)
                     return sp.Function("det")(m) if kind == "det" else m
                 if n in pre.placeholders:
-                    name = pre.placeholders[n][1]
+                    kind, name = pre.placeholders[n]
+                    if kind == "vec":
+                        return TiVec(sp.Symbol(name))
+                    if kind == "unit":
+                        return TiUnit(name)
                     if name.lower() in _FUNC_WORDS:
                         raise LatexError(f"Write {name} with its argument in parentheses, e.g. {name}(x).")
                     return sp.Symbol(name)
@@ -814,14 +1172,27 @@ def parse(latex: str) -> Parsed:
                     return d if a.is_Symbol else sp.Subs(d, v, a)
                 is_func = (n in _FUNC_NAMES or re.fullmatch(r"[A-Za-z]'+", n) or n == ode_dep
                            or n in _FUNCLIKE or n in fn_heads)
+                base = n.split("_")[0]
+                if not is_func and base in _GREEK_CMDS and base != "pi":
+                    # \Gamma(5), \Phi(x): a function to the reader, a product to the parser
+                    g = _clean_name(n)
+                    raise LatexError(f"{g}(...) could be the function {g} or the product {g}·(...). For the "
+                                     f"product write \\{n}\\cdot(...); to call a function (defined in the document "
+                                     f"or built in, such as gamma), write it in TI-Nspire syntax and use nspire_eval.")
                 if not is_func and len(args) == 1 and n not in ("e",):
-                    # x(x+1) is a product, not a call
-                    sym = {"e": sp.E, "i": sp.I}.get(n, sp.Symbol(n))
-                    return _mul([sym, args[0]])
+                    # x(x+1) is a product, not a call; \pi(r+1) is π*(r+1)
+                    return _mul([walk(sp.Symbol(n)), args[0]])
                 return sp.Function(n)(*args)
             if not node.args:
                 return node
             new = [walk(a) for a in node.args]
+            if node.func is sp.Mul and sum(_is_symvec(a) for a in _flatten(sp.Mul, new)) >= 2:
+                raise LatexError("Two vectors are multiplied here without \\cdot or \\times between them. Write "
+                                 "\\vec{u}\\cdot\\vec{v} (dot product) or \\vec{u}\\times\\vec{v} (cross product), "
+                                 "with parentheses around anything longer than one vector.")
+            if node.func is sp.Pow and _is_symvec(new[0]):
+                raise LatexError("A power of a vector isn't defined; write \\vec{u}\\cdot\\vec{u} for the dot "
+                                 "product with itself.")
             if node.func in (sp.Add, sp.Mul, sp.Pow):
                 # Rebuilt unevaluated: the CAS does the arithmetic, not SymPy
                 # (0.1+0.2, 1/3+0.5, e^(i*pi) and √(8) reach it as written)
@@ -866,6 +1237,14 @@ def parse(latex: str) -> Parsed:
 
     exprs = [fix(e) for e in raw]
     conds = [fix(c) for c in raw_conds]
+    plain: set[str] = set()
+    vecs: set[str] = set()
+    for e in exprs + conds:
+        _plain_names(e, plain, vecs)
+    if vecs & plain:
+        n = sorted(vecs & plain)[0]
+        raise LatexError(f"Both \\vec{{{n}}} and plain {n} appear, and TI-Nspire would read them as the same "
+                         f"variable {n}. Rename one of them.")
     indep = pre.ode_indep
     if ode_dep and not indep:
         indep = _ode_indep(raw, ode_dep, all_syms)
@@ -1097,6 +1476,12 @@ class NspirePrinter(StrPrinter):
     def _print_TiList(self, e):
         return "{" + ",".join(self._print(a) for a in e.args) + "}"
 
+    def _print_TiVec(self, e):
+        return self._print(e.args[0])
+
+    def _print_TiUnit(self, e):
+        return e.name
+
     def _print_Subs(self, e):
         expr, vs, pts = e.args
         cond = " and ".join(f"{self._print(v)}={self._print(p)}" for v, p in zip(vs, pts))
@@ -1180,7 +1565,7 @@ def _free_names(exprs) -> list[str]:
     names = set()
     for e in exprs:
         bound = _bound_symbols(e)
-        names |= {_clean_name(s.name) for s in e.free_symbols if s.name not in bound}
+        names |= {_clean_name(s.name) for s in e.free_symbols if s.name not in bound and not isinstance(s, TiUnit)}
         names -= {"e", "i", "pi"}
     names = {n for n in names if "'" not in n}
     return sorted(names, key=lambda n: (_VAR_PREF.index(n) if n in _VAR_PREF else 99, n))
@@ -1282,10 +1667,32 @@ def _root(x, n, **kw):
     return sp.Pow(x, k, evaluate=False)  # shown as \sqrt[n]{x}
 
 
+# Unevaluated calculus the CAS hands back, as SymPy's unevaluated classes: they
+# only print (\int, \sum, \frac{d}{dx}, \lim); nothing calls doit().
+def _integral(f, x, a=None, b=None):
+    return sp.Integral(f, x if a is None and b is None else (x, a, b))
+
+
+def _derivative(f, x, n=1):
+    return sp.Derivative(f, (x, n))
+
+
+def _limit(f, x, a, d=None):
+    side = "+-" if d is None else ("+" if float(d) > 0 else "-")  # TI: positive = from the right
+    return sp.Limit(f, x, a, side)
+
+
+def _sum(f, k, a, b):
+    return sp.Sum(f, (k, a, b))
+
+
+def _product(f, k, a, b):
+    return sp.Product(f, (k, a, b))
+
+
 # Functions the CAS prints, as SymPy classes that only display them (parsing
-# runs with evaluation off). Any other called name, such as limit or
-# derivative in an unevaluated result, becomes an undefined function and is
-# shown, not recomputed.
+# runs with evaluation off). Any other called name becomes an undefined
+# function and is shown as written, not recomputed.
 _OUT_FN = {"sin": sp.sin, "cos": sp.cos, "tan": sp.tan, "cot": sp.cot, "sec": sp.sec, "csc": sp.csc,
            "sinh": sp.sinh, "cosh": sp.cosh, "tanh": sp.tanh, "coth": sp.coth, "sech": sp.sech,
            "csch": sp.csch, "arcsin": sp.asin, "arccos": sp.acos, "arctan": sp.atan, "arccot": sp.acot,
@@ -1293,7 +1700,8 @@ _OUT_FN = {"sin": sp.sin, "cos": sp.cos, "tan": sp.tan, "cot": sp.cot, "sec": sp
            "arctanh": sp.atanh, "ln": sp.log, "log": _log, "exp": sp.exp, "sqrt": sp.sqrt, "root": _root,
            "abs": sp.Abs, "floor": sp.floor, "ceiling": sp.ceiling, "sign": sp.sign, "nCr": sp.binomial,
            "real": sp.re, "imag": sp.im, "conj": sp.conjugate, "max": sp.Max, "min": sp.Min,
-           "factorial": sp.factorial, "Matrix": sp.ImmutableMatrix}
+           "factorial": sp.factorial, "Matrix": sp.ImmutableMatrix, "derivative": _derivative, "limit": _limit,
+           "nsIntegral": _integral, "nsSum": _sum, "nsProduct": _product}
 _OUT_CONST = {"E": sp.E, "I": sp.I, "pi": sp.pi, "oo": sp.oo}
 # What parse_expr's generated code may call. No builtins: parse_expr evals.
 _PARSE_GLOBALS = {"__builtins__": {}, "Symbol": sp.Symbol, "Function": sp.Function, "Integer": sp.Integer,
@@ -1315,8 +1723,14 @@ def _norm_result(text: str) -> str:
     t = t.replace("≤", "<=").replace("≥", ">=").replace("≠", "!=")
     for g, r in [("θ", "theta"), ("α", "alpha"), ("β", "beta"), ("λ", "lamda"), ("ω", "omega")]:
         t = t.replace(g, r)
-    t = re.sub(r"\[\[(.*?)\]\]", lambda m: "Matrix([[" + m.group(1).replace("][", "],[") + "]])", t)
-    return t
+    # ∫( Σ( Π( as the CAS writes unevaluated ones; a bare ∫ stays and is refused later
+    t = t.replace("∫(", "nsIntegral(").replace("Σ(", "nsSum(").replace("Π(", "nsProduct(")
+
+    def matrix(m):
+        if m.group(1) is not None:  # [[1,2][3,4]], [[1][2]]
+            return "Matrix([" + m.group(1).replace("][", "],[") + "])"
+        return "Matrix([[" + m.group(2) + "]])"  # a row vector [1,2,3] is a 1×n matrix
+    return re.sub(r"\[(\[.*?\])\]|\[([^\[\]]*)\]", matrix, t)
 
 
 def _split_rel(s: str) -> tuple[list[str], list[str]]:
@@ -1395,6 +1809,11 @@ class _ResultLatex(LatexPrinter):
         neg, s = self._signed(expr)
         return ("- " if neg else "") + s
 
+    def _print_Symbol(self, expr, style="plain"):
+        if expr.name.startswith("_"):  # a TI-Nspire unit: _m -> \mathrm{m}
+            return r"\mathrm{" + expr.name[1:] + "}"
+        return super()._print_Symbol(expr, style)
+
 
 def _expr_latex(s: str, ld: dict) -> str:
     with sp.evaluate(False):
@@ -1403,11 +1822,58 @@ def _expr_latex(s: str, ld: dict) -> str:
     return _ResultLatex().doprint(e)
 
 
+_PW_NAME = "nspirepiecewise"  # stands in for a piecewise(...) while the rest is converted
+
+
+def _piecewise_out(s: str, ld: dict) -> tuple[str, dict[str, str]]:
+    """Replace each piecewise(...) in s by a name; return s and {name: its cases LaTeX}.
+
+    The CAS's text form is assumed to be piecewise(expr1,cond1,expr2,cond2,...), with a
+    last expr without a condition meaning "otherwise" (the TI-Nspire Reference Guide's
+    piecewise(Expr1[, Cond1[, Expr2[, Cond2[, ...]]]])). The conditions are relations,
+    chains such as 0<x<1, and "and"/"or" of those, so they are converted like answers
+    are, not by SymPy's parser (which can't read x>0 and x<1).
+    """
+    subs: dict[str, str] = {}
+    while (m := re.search(r"(?<![A-Za-z0-9_])piecewise\(", s)):
+        depth, end = 0, None
+        for j in range(m.end() - 1, len(s)):
+            depth += {"(": 1, ")": -1}.get(s[j], 0)
+            if depth == 0:
+                end = j
+                break
+        if end is None:
+            raise ValueError("unbalanced piecewise")
+        args = _split_top(s[m.end():end], (",",))
+        if not args:
+            raise ValueError("empty piecewise")
+        rows = [f"{_part_latex(args[k], ld)} & {_cond_latex(args[k + 1], ld)}" for k in range(0, len(args) - 1, 2)]
+        if len(args) % 2:
+            rows.append(f"{_part_latex(args[-1], ld)} & \\text{{otherwise}}")
+        name = _PW_NAME + _id_letters(len(subs))
+        subs[name] = r"\begin{cases} " + r" \\ ".join(rows) + r" \end{cases}"
+        s = s[:m.start()] + f" {name} " + s[end + 1:]
+    return s, subs
+
+
+def _cond_latex(s: str, ld: dict) -> str:
+    return r" \text{ or } ".join(r" \text{ and } ".join(_part_latex(c, ld) for c in _split_top(alt, (" and ",)))
+                                 for alt in _split_top(s, (" or ",)))
+
+
+def _part_latex(s: str, ld: dict) -> str:
+    s, subs = _piecewise_out(s, ld)
+    out = _atom_latex(s, ld)
+    for name, tex in subs.items():
+        out = re.sub(r"(?<![A-Za-z])" + name + r"(?![A-Za-z])", lambda _m, t=tex: t, out)
+    return out
+
+
 def _atom_latex(s: str, ld: dict) -> str:
     s = s.strip()
     if s.startswith("{") and s.endswith("}"):
         items = _split_top(s[1:-1], (",",))
-        return r"\left\{" + ", ".join(_atom_latex(i, ld) for i in items) + r"\right\}"
+        return r"\left\{" + ", ".join(_part_latex(i, ld) for i in items) + r"\right\}"
     parts, ops = _split_rel(s)
     out = _expr_latex(parts[0], ld)
     for op, side in zip(ops, parts[1:]):
@@ -1425,12 +1891,12 @@ def result_to_latex(text: str) -> str | None:
         return r"\text{true (holds for all values)}"
     if low == "undef":
         return r"\text{undefined}"
-    if not t or low == "done" or "piecewise(" in t:
+    if not t or low == "done":
         return None
     try:
         norm = _norm_result(t)
         if _UNSAFE.search(norm) or any(ord(c) > 127 and not c.isalpha() for c in norm):
-            return None  # e.g. an unevaluated ∫(...) the CAS hands back
+            return None  # e.g. a symbol the conversion doesn't know
         ld: dict = {}
         for m in re.finditer(r"[A-Za-z_][A-Za-z_0-9]*", norm):
             n = m.group()
@@ -1443,7 +1909,7 @@ def result_to_latex(text: str) -> str | None:
                 ld[n] = _OUT_CONST.get(n) or sp.Symbol(n)
         alts = []
         for alt in _split_top(norm, (" or ",)):
-            alts.append(r",\quad ".join(_atom_latex(a, ld) for a in _split_top(alt, (" and ",))))
+            alts.append(r",\quad ".join(_part_latex(a, ld) for a in _split_top(alt, (" and ",))))
         return r" \quad\text{or}\quad ".join(alts)
     except Exception:
         return None

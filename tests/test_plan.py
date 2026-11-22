@@ -28,6 +28,11 @@ SELFTEST = [
     (r"2\cdot\{1,2,3\}", "auto", "2*{1,2,3}"),
     (r"x^2=2 \text{ for } x>0", "auto", "solve(x^2=2,x)|x>0"),
     (r"12 \bmod 5", "auto", "mod(12,5)"),
+    (r"\begin{pmatrix}1\\2\\3\end{pmatrix}\cdot\begin{pmatrix}4\\5\\6\end{pmatrix}", "auto",
+     "dotP([[1][2][3]],[[4][5][6]])"),
+    (r"\begin{pmatrix}1&0&0\end{pmatrix}\times\begin{pmatrix}0&1&0\end{pmatrix}", "auto", "crossP([[1,0,0]],[[0,1,0]])"),
+    (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "_km/_m"),
+    (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "2*_kg/(500*_gm)"),
 ]
 
 
@@ -337,3 +342,164 @@ def test_errors():
         plan(r"\frac{1}{")
     with pytest.raises(LatexError):
         plan(r"\begin{pmatrix}1&2\end{pmatrix}+1")  # matrix + scalar
+
+
+# Subscripted names: letters and digits only, each written subscript its own name.
+SUBSCRIPTS = [
+    (r"a_1", "a1"),
+    (r"x_{12}", "x12"),
+    (r"x_{n1}", "xn1"),
+    (r"x_n", "xn"),
+    (r"x_{ab}", "xab"),
+    (r"x_{ba}", "xba"),          # not reordered to xab by the parser
+    (r"\alpha_1", "α1"),
+    (r"\alpha_{12}", "α12"),
+    (r"x_{\alpha}", "xalpha"),
+    (r"\mathbf{x}_1", "x1"),
+    (r"x_12", "x1*2"),           # as LaTeX renders it: x₁2
+    (r"x_1^2", "x1^2"),
+    (r"a_1(x+1)", "a1*(x + 1)"),  # a product, like x(x+1)
+    (r"a_1 + a_2 = 3", "solve(a1 + a2=3,a1)"),
+    # subscripts of \int, \sum, \lim, \log and evaluation bars are limits, not names
+    (r"\int_0^1 x\,dx", "∫(x,x,0,1)"),
+    (r"\log_2 8", "log(8,2)"),
+    (r"\left.x^2\right|_{x=1,5}", "(x^2|x=1.5)"),
+]
+
+
+@pytest.mark.parametrize("latex,want", SUBSCRIPTS)
+def test_subscripts(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"x_{n+1} - x_{n-1}", r"'\+'"),  # was xn1 - xn11, and x_{n+1} collided with x_{n1}
+    (r"x_{n-1}", "'-'"),
+    (r"x_{1,2}", "a comma"),           # was x120000000000000 (decimal comma 1.2, then cleaned)
+    (r"x_{2k}^2 + x_{k/2}", "'/'"),
+    (r"a_{\infty}", r"'\\infty'"),
+    (r"x_{}", "empty"),
+])
+def test_subscripts_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)
+
+
+# A script without braces is one character, as LaTeX renders it.
+SCRIPTS = [
+    (r"\sum_{k=1}^5 2k", "Σ(2*k,k,1,5)"),     # was Σ(k,k,1,52)
+    (r"\int_0^1 2\,dx", "∫(2,x,0,1)"),        # was ∫(1,x,0,12)
+    (r"x^12", "x^1*2"),
+    (r"x^{12}", "x^12"),
+    (r"10^8", "10^8"),
+]
+
+
+@pytest.mark.parametrize("latex,want", SCRIPTS)
+def test_one_character_scripts(latex, want):
+    assert cmd(latex) == want
+
+
+def test_greek_letter_calls():
+    # \Gamma(5) was Γ*5 and \Phi(x) Φ*x: a function to the reader, a product to the parser
+    for latex in (r"\Gamma(5)", r"\Phi(x)", r"\phi(x)", r"\phi_1(x)", r"\zeta(2)", r"\Gamma(x,2)",
+                  r"\alpha (x+1)", r"\alpha\left(x+1\right)"):
+        with pytest.raises(LatexError, match=r"\\cdot"):
+            plan(latex)
+    assert cmd(r"\phi(x)=x^2") == "Define φ(x)=x^2"   # a definition still works
+    assert cmd(r"\psi(t) := 3t") == "Define ψ(t)=3*t"
+    assert cmd(r"\alpha\cdot(x+1)") == "α*(x + 1)"
+    assert cmd(r"\Gamma x") == "Γ*x"
+    assert cmd(r"2\pi(r+1)") == "2*π*(r + 1)"           # π is a constant: a product (was pi*(r + 1))
+
+
+VECTORS = [
+    (r"\vec{u}\cdot\vec{v}", "dotP(u,v)"),       # was u*v
+    (r"\vec{u}\times\vec{v}", "crossP(u,v)"),    # was u*v
+    (r"\vec u\cdot\vec v", "dotP(u,v)"),
+    (r"\vec{\omega}\times\vec{r}", "crossP(ω,r)"),
+    (r"\begin{pmatrix}1\\2\end{pmatrix}\cdot\begin{pmatrix}3\\4\end{pmatrix}", "dotP([[1][2]],[[3][4]])"),
+    (r"\begin{pmatrix}1\\2\\3\end{pmatrix}\times\begin{pmatrix}3\\4\\5\end{pmatrix}",
+     "crossP([[1][2][3]],[[3][4][5]])"),
+    (r"\begin{pmatrix}1&2&3\end{pmatrix}\cdot\begin{pmatrix}4&5&6\end{pmatrix}", "dotP([[1,2,3]],[[4,5,6]])"),
+    (r"\vec{u}\cdot\begin{pmatrix}1\\2\end{pmatrix}", "dotP(u,[[1][2]])"),
+    (r"\vec{u}\cdot(\vec{v}\times\vec{w})", "dotP(u,crossP(v,w))"),
+    (r"(\vec{u}\times\vec{v})\cdot\vec{w}", "dotP(crossP(u,v),w)"),
+    (r"2\vec{u}\cdot\vec{v}", "2*dotP(u,v)"),
+    (r"-\vec{u}\cdot\vec{v} + 1", "-dotP(u,v) + 1"),
+    (r"2\vec{u}+\vec{v}", "2*u + v"),
+    (r"\lambda\vec{u}", "λ*u"),
+    (r"\frac{\vec{u}}{2}", "u/2"),
+    # a matrix times a vector stays a matrix product
+    (r"\begin{pmatrix}1&2\\3&4\end{pmatrix}\cdot\begin{pmatrix}3\\4\end{pmatrix}", "[[1,2][3,4]]*[[3][4]]"),
+    (r"\begin{pmatrix}1&2\\3&4\end{pmatrix}\begin{pmatrix}5\\6\end{pmatrix}", "[[1,2][3,4]]*[[5][6]]"),
+]
+
+
+@pytest.mark.parametrize("latex,want", VECTORS)
+def test_vectors(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"\vec{u}\cdot\vec{v}\times\vec{w}", "parentheses"),   # which product first changes the answer
+    (r"\vec{u}\cdot 2\vec{v}", r"\\cdot or \\times"),
+    (r"\vec{u}\vec{v}", r"\\cdot or \\times"),
+    (r"\vec{u}\cdot(\vec{v}+\vec{w})", r"\\cdot or \\times"),
+    (r"\vec{u}^2", "power"),
+    (r"\vec{u}\cdot\vec{v}^2", "exponent"),
+    (r"\vec{v}\cdot\vec{v}=v^2", "same variable"),
+    (r"\vec{AB}", "one letter"),
+    (r"\begin{pmatrix}1&2\end{pmatrix}\cdot\begin{pmatrix}3\\4\end{pmatrix}", "row"),
+    (r"\begin{pmatrix}1\\2\end{pmatrix}\cdot\begin{pmatrix}3\\4\\5\end{pmatrix}", "different lengths"),
+    (r"\begin{pmatrix}1\\2\\3\\4\end{pmatrix}\times\begin{pmatrix}3\\4\\5\\6\end{pmatrix}", "length 2 or 3"),
+])
+def test_vectors_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)
+
+
+UNITS = [
+    (r"5\,\mathrm{m} + 3\,\mathrm{cm}", "5*_m + 3*_cm"),   # was 5*m + 3*cm
+    (r"5\mathrm{m}", "5*_m"),
+    (r"5\text{ m}", "5*_m"),                               # was 5: the text was dropped
+    (r"5\,\text{kg}\cdot 9.81\,\mathrm{m}", "5*_kg*9.81*_m"),
+    (r"9.81\,\mathrm{m/s^2}", "9.81*_m/_s^2"),
+    (r"9,81\,\mathrm{m}/\mathrm{s}^2", "9.81*_m/_s^2"),
+    (r"3\cdot10^8\,\mathrm{m/s}", "3*10^8*_m/_s"),
+    (r"100\,\mathrm{km/h}", "100*_km/_hr"),
+    (r"2\,\mathrm{kg\cdot m^2}", "2*_kg*_m^2"),
+    (r"5\,\mathrm{m}\,\mathrm{s}^{-1}", "5*_m/_s"),
+    (r"5\,\mathrm{m}\,(1+2)", "5*_m*(1 + 2)"),
+    (r"\frac{300\,\mathrm{cm}}{1\,\mathrm{m}}", "300*_cm/_m"),
+    (r"5\,\mathrm{g}", "5*_gm"),
+    (r"2\,\mathrm{l}", "2*_l"),
+    (r"5\,\mathrm{min}", "5*_min"),
+    (r"x = 5\,\mathrm{m}", "solve(x=5*_m,x)"),   # the unit isn't a variable to solve for
+    # not units
+    (r"2\,\mathrm{min}(a,b)", "2*min(a,b)"),
+    (r"\int x\,\mathrm{d}x", "∫(x,x)"),
+    (r"\int_0^1 2\,\mathrm{d}x", "∫(2,x,0,1)"),
+    (r"2\mathrm{e}^x", "2*ℯ^(x)"),
+    (r"3+2\mathrm{i}", "3 + 2*𝑖"),
+    (r"x^2=2 \text{ for } x>0", "solve(x^2=2,x)|x>0"),
+    (r"\mathrm{m}\cdot a", "m*a"),   # not after a number: a variable
+]
+
+
+@pytest.mark.parametrize("latex,want", UNITS)
+def test_units(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"5\text{ apples}", "'apples'"),
+    (r"5\,\mathrm{V}", "'V'"),
+    (r"5\,\mathrm{m}/\mathrm{foo}", "'foo'"),
+    (r"25^\circ\mathrm{C}", "Temperatures"),
+    (r"25°C", "Temperatures"),
+    (r"5\,\mathrm{m/}", "unit"),
+])
+def test_units_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)

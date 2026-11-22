@@ -14,9 +14,21 @@ CASES = [
     ("a−(b−c)", r"a - \left(b - c\right)"),
     ("−(x+1)/2", r"- \frac{x + 1}{2}"),
     ("√(8)", r"\sqrt{8}"),
-    # unevaluated CAS calls are shown, not recomputed
-    ("limit(sin(1/x),x,0)", r"\operatorname{limit}{\left(\sin{\left(\frac{1}{x} \right)},x,0 \right)}"),
-    ("derivative(f(x),x)", r"\operatorname{derivative}{\left(f{\left(x \right)},x \right)}"),
+    # unevaluated CAS calls are shown as math, not recomputed
+    ("limit(sin(1/x),x,0)", r"\lim_{x \to 0} \sin{\left(\frac{1}{x} \right)}"),
+    ("limit(1/x,x,0,1)", r"\lim_{x \to 0^+}\left(\frac{1}{x}\right)"),
+    ("limit(1/x,x,0,-1)", r"\lim_{x \to 0^-}\left(\frac{1}{x}\right)"),
+    ("limit(f(x),x,∞)", r"\lim_{x \to \infty} f{\left(x \right)}"),
+    ("derivative(f(x),x)", r"\frac{d}{d x} f{\left(x \right)}"),
+    ("derivative(f(x),x,2)", r"\frac{d^{2}}{d x^{2}} f{\left(x \right)}"),
+    ("∫(x,x)", r"\int x\, dx"),
+    ("∫(x^2,x,0,1)", r"\int\limits_{0}^{1} x^{2}\, dx"),
+    ("Σ(1/k^2,k,1,∞)", r"\sum_{k=1}^{\infty} \frac{1}{k^{2}}"),
+    ("Π(k,k,1,n)", r"\prod_{k=1}^{n} k"),
+    # piecewise(expr1,cond1,expr2,cond2,...[,otherwise])
+    ("piecewise(x,x>0,−x,x≤0)", r"\begin{cases} x & x > 0 \\ - x & x \leq 0 \end{cases}"),
+    ("piecewise(1,0<x and x<1,0)", r"\begin{cases} 1 & 0 < x \text{ and } x < 1 \\ 0 & \text{otherwise} \end{cases}"),
+    ("y=2*piecewise(x,x>0,0)", r"y = 2 \begin{cases} x & x > 0 \\ 0 & \text{otherwise} \end{cases}"),
     ("nCr(n,2)", r"{\binom{n}{2}}"),
     ("max(1,5)", r"\max\left(1, 5\right)"),
     # plain results
@@ -44,6 +56,13 @@ CASES = [
     ("5!", "5!"),
     ("{1,2,3}", r"\left\{1, 2, 3\right\}"),
     ("[[1,2][3,4]]", r"\left[\begin{matrix}1 & 2\\3 & 4\end{matrix}\right]"),
+    ("[[1][2]]", r"\left[\begin{matrix}1\\2\end{matrix}\right]"),
+    ("[1,2,3]", r"\left[\begin{matrix}1 & 2 & 3\end{matrix}\right]"),  # a row vector is a 1×n matrix
+    ("{[1,2],[3,4]}",
+     r"\left\{\left[\begin{matrix}1 & 2\end{matrix}\right], \left[\begin{matrix}3 & 4\end{matrix}\right]\right\}"),
+    # units
+    ("5.03*_m", r"5.03 \mathrm{m}"),
+    ("10*_m/_s^2", r"\frac{10 \mathrm{m}}{\mathrm{s}^{2}}"),
     ("1.41421356237", "1.41421356237"),
     # TI-Nspire's private-use characters
     (f"1.23{NS_EXP}−5", r"1.23 \cdot 10^{-5}"),
@@ -63,7 +82,7 @@ def test_result_to_latex(text, want):
     assert result_to_latex(text) == want
 
 
-@pytest.mark.parametrize("text", ["", "Done", "piecewise(x,x>0,-x,x<=0)", "∫(x,x)"])
+@pytest.mark.parametrize("text", ["", "Done", "∫", "x∫y", "piecewise(", "piecewise()", "piecewise(x,x>0"])
 def test_not_converted(text):
     assert result_to_latex(text) is None
 
