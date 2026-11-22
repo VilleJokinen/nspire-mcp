@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = ["pywin32>=306; sys_platform == 'win32'", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """Global hotkey: copy LaTeX, press the hotkey, get the TI-Nspire answer.
 
@@ -16,6 +16,12 @@ in the bottom-right corner; click the popup to close it.
 Needs TI-Nspire open on the bridge page, like the MCP server.
 """
 from __future__ import annotations
+
+import sys
+
+if sys.platform != "win32":  # before the Windows-only imports below
+    sys.exit("hotkey.py works on Windows only (Windows global hotkeys). On macOS, use the MCP server "
+             "(server.py) and selftest.py; see README.md.")
 
 import argparse
 import ctypes

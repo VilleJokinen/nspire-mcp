@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = ["pywin32>=306; sys_platform == 'win32'", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
 """Open nspire_bridge.tns in TI-Nspire and start the LaTeX hotkey.
 
@@ -13,6 +13,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+if sys.platform != "win32":
+    sys.exit("launch.py (the desktop shortcut) works on Windows only. On macOS, open nspire_bridge.tns "
+             "in TI-Nspire yourself; see README.md.")
 
 os.startfile(os.path.join(HERE, "nspire_bridge.tns"))  # opens in TI-Nspire (file association)
 

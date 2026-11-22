@@ -1,6 +1,11 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = [
+#     "pywin32>=306; sys_platform == 'win32'",
+#     "pyobjc-framework-Cocoa>=10.3; sys_platform == 'darwin'",
+#     "sympy>=1.13",
+#     "antlr4-python3-runtime==4.11.*",
+# ]
 # ///
 """Check the bridge and the LaTeX translator end to end:  uv run --script selftest.py
 

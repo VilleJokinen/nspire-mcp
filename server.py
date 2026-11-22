@@ -1,11 +1,17 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["mcp>=1.30,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = [
+#     "mcp>=1.30,<2",
+#     "pywin32>=306; sys_platform == 'win32'",
+#     "pyobjc-framework-Cocoa>=10.3; sys_platform == 'darwin'",
+#     "sympy>=1.13",
+#     "antlr4-python3-runtime==4.11.*",
+# ]
 # ///
 """MCP server: evaluate expressions in the TI-Nspire CX (CAS) desktop app.
 
 Talks to bridge.lua (running on a page of nspire_bridge.tns) through the
-Windows clipboard. Run with:  uv run --script server.py
+clipboard (Windows or macOS). Run with:  uv run --script server.py
 """
 from __future__ import annotations
 
@@ -33,14 +39,14 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(mes
 log = logging.getLogger("nspire")
 
 INSTRUCTIONS = """\
-Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used as an exact CAS.
+Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used as an exact CAS.
 - TI-Nspire must be open with nspire_bridge.tns on its bridge page ("NSPIRE BRIDGE tick N"). If a call
   times out, ask the user to check that; nspire_status pings the bridge.
-- Requests travel through the Windows clipboard: each call briefly replaces it and puts it back.
+- Requests travel through the clipboard: each call briefly replaces it and puts it back.
 - Variables and functions stored in the open document (a:=5, Define f(x)=...) persist and are
   substituted into every answer. If an answer looks oddly specific, check nspire_vars.
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
-- nspire_notes types into the TI-Nspire window: use it only when the user wants a Notes page, and
+- nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
 - Report results as the CAS gives them; explain the steps yourself."""
 

@@ -15,13 +15,22 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
 
 from nspire_bridge import TIMEOUT_MAX_S, TIMEOUT_MIN_S, Bridge, clip_set, readable, to_cas_chars
-from nspire_keys import (chord, describe_window, find_nspire_windows, focus_nspire, foreground_is, menu_area,
-                         menu_changed, process_windows, type_text, wait_for_popup, window_title)
+
+# Typing needs Windows (SendInput); scan_names and the step checks work anywhere
+# (server.py's nspire_latex warnings use scan_names on macOS too).
+if sys.platform == "win32":
+    from nspire_keys import (chord, describe_window, find_nspire_windows, focus_nspire, foreground_is, menu_area,
+                             menu_changed, process_windows, type_text, wait_for_popup, window_title)
+    UNSUPPORTED = None
+else:
+    UNSUPPORTED = ("nspire_notes works on Windows only: it types into the TI-Nspire window with Windows "
+                   "keystrokes. Show the steps with nspire_eval or nspire_latex instead.")
 
 log = logging.getLogger("nspire")
 
@@ -392,6 +401,8 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     Every key goes through a guard that stops (NotesAborted) if TI-Nspire isn't the
     foreground window or cancel is set; set cancel from another thread to stop a run.
     """
+    if UNSUPPORTED:
+        raise RuntimeError(UNSUPPORTED)
     check_options(title, page_size, timeout_s)
     items = plan_steps(steps)
 

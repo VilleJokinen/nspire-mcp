@@ -1,26 +1,21 @@
 """Clipboard transport to bridge.lua running in the TI-Nspire desktop app.
 
-Shared by server.py (MCP) and hotkey.py. A named Windows mutex serialises
-requests across processes, so both can run at once.
+Shared by server.py (MCP) and hotkey.py. A cross-process lock (a named mutex
+on Windows, a file lock on macOS) serialises requests, so both can run at once.
 
 Each Bridge.session() saves every format on the user's clipboard that can be
 copied as bytes, and puts it back at the end if the clipboard still holds the
 bridge's traffic. Traffic is kept out of clipboard history and cloud sync.
+The platform-specific parts are in nspire_clip_win.py and nspire_clip_mac.py.
 """
 from __future__ import annotations
 
-import ctypes
 import logging
 import re
+import sys
 import threading
 import time
 import uuid
-from ctypes import wintypes
-from dataclasses import dataclass, field
-
-import pywintypes
-import win32clipboard as wcb
-import win32event
 
 log = logging.getLogger("nspire")
 
@@ -38,7 +33,6 @@ BATCH_MAX_ITEMS = 25
 BATCH_MAX_CHARS = 4000
 MAX_REPOSTS = 5              # times one request is posted again after something overwrote it
 LATE_WINDOW_S = 120.0        # how long to watch for a reply to a request that timed out
-SNAPSHOT_MAX_BYTES = 128 * 2**20
 
 
 class BridgeTimeout(Exception):
@@ -52,101 +46,33 @@ from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable, to_cas_chars 
 
 # ---------------------------------------------------------------- clipboard
 
-def _with_clipboard(fn, retries: int = 40):
-    """Open the clipboard, run fn, close it. Retries while another app holds it."""
-    for _ in range(retries):
-        try:
-            wcb.OpenClipboard()
-        except pywintypes.error:
-            time.sleep(0.025)
-            continue
-        try:
-            return fn()
-        finally:
-            wcb.CloseClipboard()
-    raise RuntimeError("Windows clipboard stayed locked by another program; try again.")
+# The platform primitives (clipboard access, change counter, snapshots, the
+# cross-process lock) live in a backend module; everything else in this file is
+# the same on every platform. The tests swap _clip for a fake.
+if sys.platform == "win32":
+    import nspire_clip_win as _clip
+else:  # macOS. Elsewhere it imports, but the first clipboard call says it isn't supported.
+    import nspire_clip_mac as _clip
+
+ClipSnapshot = _clip.ClipSnapshot
+
+_tls = threading.local()      # .in_session: this thread is inside Bridge.session()
+_ours_seq: int | None = None  # clipboard change count when it last held this process's traffic
 
 
 def clip_get() -> str | None:
-    def read():
-        if not wcb.IsClipboardFormatAvailable(wcb.CF_UNICODETEXT):
-            return None
-        return wcb.GetClipboardData(wcb.CF_UNICODETEXT)
-    return _with_clipboard(read)
-
-
-# Registered formats that keep the current clipboard out of Win+V history and
-# cloud clipboard sync when set to DWORD 0. (Not ExcludeClipboardContentFrom-
-# MonitorProcessing: TI-Nspire watches the clipboard and must see requests.)
-_CF_HISTORY = wcb.RegisterClipboardFormat("CanIncludeInClipboardHistory")
-_CF_CLOUD = wcb.RegisterClipboardFormat("CanUploadToCloudClipboard")
-_DWORD_0 = b"\0\0\0\0"
-
-_tls = threading.local()      # .in_session: this thread is inside Bridge.session()
-_ours_seq: int | None = None  # clipboard sequence number when it last held this process's traffic
-
-
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-_kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-_kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-_kernel32.GlobalLock.restype = wintypes.LPVOID
-_kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-_kernel32.GlobalUnlock.restype = wintypes.BOOL
-_kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
-_kernel32.GlobalFree.restype = wintypes.HGLOBAL
-_GMEM_MOVEABLE = 0x0002
+    return _clip.clip_get()
 
 
 def _seq() -> int:
-    return wcb.GetClipboardSequenceNumber()
-
-
-def _set_data(fmt: int, data: bytes) -> None:
-    """SetClipboardData with memory allocated here, exactly len(data) bytes.
-
-    Never hand pywin32 a str or bytes: its str conversion fails on some short
-    strings such as "11" (error 6, invalid handle) and corrupts the heap, so
-    the next write crashes Python; and it adds a byte to text formats, which
-    would grow the user's clipboard on every restore. Clipboard must be open.
-    """
-    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, max(len(data), 1))
-    if not h:
-        raise ctypes.WinError(ctypes.get_last_error())
-    p = _kernel32.GlobalLock(h)
-    if not p:
-        _kernel32.GlobalFree(h)
-        raise ctypes.WinError(ctypes.get_last_error())
-    ctypes.memmove(p, data, len(data))
-    _kernel32.GlobalUnlock(h)
-    try:
-        wcb.SetClipboardData(fmt, h)  # an int is passed through as the handle; the clipboard owns it now
-    except Exception:
-        _kernel32.GlobalFree(h)
-        raise
-
-
-def _keep_out_of_history() -> None:
-    """Mark what is on the clipboard as not for history or cloud sync. Clipboard must be open."""
-    for fmt in (_CF_HISTORY, _CF_CLOUD):
-        try:
-            _set_data(fmt, _DWORD_0)
-        except Exception as e:
-            log.debug("could not set clipboard format %d: %s", fmt, e)
+    """The clipboard's change counter: reading it doesn't open the clipboard."""
+    return _clip.seq()
 
 
 def _write_text(text: str, transient: bool) -> int:
-    """Replace the clipboard with text. Returns the clipboard sequence number after the write."""
+    """Replace the clipboard with text. Returns the clipboard change count after the write."""
     global _ours_seq
-    data = (text + "\0").encode("utf-16-le", errors="surrogatepass")
-
-    def write():
-        wcb.EmptyClipboard()
-        _set_data(wcb.CF_UNICODETEXT, data)
-        if transient:
-            _keep_out_of_history()
-    _with_clipboard(write)
-    seq = _seq()
+    seq = _clip.write_text(text, transient)
     if transient:
         _ours_seq = seq
     return seq
@@ -172,131 +98,14 @@ def _reply_id(text: str | None) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------- snapshots
-
-# Formats whose data is a GDI object or an owner-private handle rather than
-# memory, so it can't be copied as bytes. Windows rebuilds bitmaps and palettes
-# from CF_DIB/CF_DIBV5 and old-style metafiles from CF_ENHMETAFILE, which are kept.
-_CF_DIB, _CF_ENHMETAFILE, _CF_DIBV5 = 8, 14, 17
-_HANDLE_FORMATS = {
-    2,     # CF_BITMAP
-    3,     # CF_METAFILEPICT
-    9,     # CF_PALETTE
-    0x80,  # CF_OWNERDISPLAY
-    0x82,  # CF_DSPBITMAP
-    0x83,  # CF_DSPMETAFILEPICT
-    0x8E,  # CF_DSPENHMETAFILE
-}
-# OLE's links back to the program that copied. They go stale once that program
-# no longer owns the clipboard; without them OLE reads the ordinary formats.
-_OLE_LINK_FORMATS = {"DataObject", "Ole Private Data"}
-
-_gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-_gdi32.GetEnhMetaFileBits.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p]
-_gdi32.GetEnhMetaFileBits.restype = wintypes.UINT
-_gdi32.SetEnhMetaFileBits.argtypes = [wintypes.UINT, ctypes.c_char_p]
-_gdi32.SetEnhMetaFileBits.restype = wintypes.HANDLE
-_gdi32.DeleteEnhMetaFile.argtypes = [wintypes.HANDLE]
-_gdi32.DeleteEnhMetaFile.restype = wintypes.BOOL
-
-
-@dataclass
-class ClipSnapshot:
-    """A copy of the clipboard: (format, bytes) pairs, CF_ENHMETAFILE as metafile bits."""
-    items: list[tuple[int, bytes]] = field(default_factory=list)
-    skipped: list[int] = field(default_factory=list)
-
-    def text(self) -> str | None:
-        for fmt, data in self.items:
-            if fmt == wcb.CF_UNICODETEXT:
-                return data.decode("utf-16-le", errors="replace").split("\0", 1)[0]
-        return None
-
-
-def _format_name(fmt: int) -> str | None:
-    if fmt < 0xC000:  # only registered formats have names
-        return None
-    try:
-        return wcb.GetClipboardFormatName(fmt)
-    except pywintypes.error:
-        return None
-
-
-def _emf_bits(handle: int) -> bytes:
-    n = _gdi32.GetEnhMetaFileBits(handle, 0, None)
-    buf = ctypes.create_string_buffer(n)
-    if not n or _gdi32.GetEnhMetaFileBits(handle, n, buf) != n:
-        raise ctypes.WinError(ctypes.get_last_error())
-    return buf.raw
-
-
-def _read_all() -> ClipSnapshot:
-    """Copy every format that can be copied as bytes. Clipboard must be open."""
-    fmts, f = [], 0
-    while True:
-        f = wcb.EnumClipboardFormats(f)
-        if not f:
-            break
-        fmts.append(f)
-    snap, total, have_dib = ClipSnapshot(), 0, False
-    for f in fmts:
-        if f in _HANDLE_FORMATS or 0x200 <= f <= 0x3FF or _format_name(f) in _OLE_LINK_FORMATS:
-            snap.skipped.append(f)
-            continue
-        if f in (_CF_DIB, _CF_DIBV5) and have_dib:
-            continue  # Windows makes either one from the other: keep one copy of the image
-        try:
-            # This asks the program that copied to render formats it offered
-            # without data yet ("delayed rendering").
-            h = wcb.GetClipboardDataHandle(f)
-            data = _emf_bits(h) if f == _CF_ENHMETAFILE else wcb.GetGlobalMemory(h)
-        except Exception:  # rendering failed, stream-only OLE data, ...
-            snap.skipped.append(f)
-            continue
-        if total + len(data) > SNAPSHOT_MAX_BYTES:
-            snap.skipped.append(f)
-            continue
-        total += len(data)
-        have_dib = have_dib or f in (_CF_DIB, _CF_DIBV5)
-        snap.items.append((f, bytes(data)))
-    if snap.skipped:
-        log.debug("clipboard snapshot skipped formats %s", snap.skipped)
-    return snap
-
-
-def _write_all(snap: ClipSnapshot | None) -> None:
-    """Replace the clipboard with snap; empty it if snap is None. Clipboard must be open."""
-    wcb.EmptyClipboard()
-    items = [(f, d) for f, d in (snap.items if snap else []) if f not in (_CF_HISTORY, _CF_CLOUD)]
-    if not items:
-        return
-    for f, data in items:
-        try:
-            if f == _CF_ENHMETAFILE:
-                h = _gdi32.SetEnhMetaFileBits(len(data), data)
-                if not h:
-                    raise ctypes.WinError(ctypes.get_last_error())
-                try:
-                    wcb.SetClipboardData(f, h)  # the clipboard owns h from here
-                except Exception:
-                    _gdi32.DeleteEnhMetaFile(h)
-                    raise
-            else:
-                _set_data(f, data)
-        except Exception as e:
-            log.warning("could not restore clipboard format %d: %s", f, e)
-    # The copy went into history when the user made it; don't add it twice.
-    _keep_out_of_history()
-
-
 def clip_snapshot() -> ClipSnapshot:
     """Copy everything on the clipboard that can be copied as bytes."""
-    return _with_clipboard(_read_all)
+    return _clip.clip_snapshot()
 
 
 def clip_restore(snap: ClipSnapshot | None) -> None:
     """Put a snapshot back (kept out of clipboard history). None empties the clipboard."""
-    _with_clipboard(lambda: _write_all(snap))
+    _clip.clip_restore(snap)
 
 
 # ---------------------------------------------------------------- protocol helpers
@@ -506,8 +315,7 @@ class _LateReplyWatcher(threading.Thread):
         if not b._lock.acquire(blocking=False):
             return False
         try:
-            got = win32event.WaitForSingleObject(b._mutex, 0)
-            if got not in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED):
+            if not b._mutex.acquire(0):
                 return False
             try:
                 if clip_get() != late_reply:
@@ -516,7 +324,7 @@ class _LateReplyWatcher(threading.Thread):
                 log.info("put the clipboard back over a late bridge reply")
                 return True
             finally:
-                win32event.ReleaseMutex(b._mutex)
+                b._mutex.release()
         finally:
             b._lock.release()
 
@@ -526,7 +334,7 @@ class _LateReplyWatcher(threading.Thread):
 class Bridge:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._mutex = win32event.CreateMutex(None, False, MUTEX_NAME)
+        self._mutex = _clip.ProcessLock(MUTEX_NAME)
         self.cas: bool | None = None
         self.protocol: int | None = None  # bridge.lua protocol from the last ping
         self._saved: ClipSnapshot | None = None  # the user's clipboard, during a session
@@ -553,9 +361,7 @@ class Bridge:
         if not self._lock.acquire(timeout=max(wait_s, 0)):
             raise BridgeTimeout(f"Another request kept the TI-Nspire bridge busy for {wait_s:g} s.")
         try:
-            left_ms = max(0, int((deadline - time.monotonic()) * 1000))
-            got = win32event.WaitForSingleObject(self._mutex, left_ms)
-            if got not in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED):
+            if not self._mutex.acquire(deadline - time.monotonic()):
                 raise BridgeTimeout(f"Another program kept the TI-Nspire bridge busy for {wait_s:g} s.")
             try:
                 self._begin()
@@ -569,7 +375,7 @@ class Bridge:
                     except Exception as e:  # never mask the real result
                         log.warning("clipboard restore failed: %s", e)
             finally:
-                win32event.ReleaseMutex(self._mutex)
+                self._mutex.release()
         finally:
             self._lock.release()
 
