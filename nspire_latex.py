@@ -110,6 +110,7 @@ _RELATION = re.compile(r"(?<![<>!\\])=|<|>|\\leq?\b|\\geq?\b|\\neq\b|\\ne\b|\\le
 _WITH = r"\nspireWith"        # a condition follows
 _EVBAR = r"\nspireEvBar"      # an evaluation bar, + id letters
 _EVFROM = r"\nspireEvFrom"    # where the \left. of that bar was, + the same id
+_NORM = r"\nspireNorm"        # a norm bar, + L (\lVert), R (\rVert) or B (\| and \Vert)
 _GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε",
           "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "θ", "iota": "ι", "kappa": "κ",
           "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "rho": "ρ", "sigma": "σ", "tau": "τ",
@@ -298,6 +299,9 @@ class _Pre:
         s = re.sub(r"\\left\s*\.|\\right\s*\.", " ", s)
         s = re.sub(r"\\(left|right)\b\s*", "", s)  # keep the delimiter that follows
         s = s.replace(r"\lbrace", r"\{").replace(r"\rbrace", r"\}").replace(r"\lbrack", "[").replace(r"\rbrack", "]")
+        s = re.sub(r"\\lVert(?![A-Za-z])", lambda _m: f" {_NORM}L ", s)
+        s = re.sub(r"\\rVert(?![A-Za-z])", lambda _m: f" {_NORM}R ", s)
+        s = re.sub(r"(?<!\\)\\(?:\||Vert(?![A-Za-z]))", lambda _m: f" {_NORM}B ", s)
         s = re.sub(r"\\[lr]?vert(?![A-Za-z])", "|", s)
         s = re.sub(r"\\q?quad\b", " ", s)
         s = re.sub(r"\\(?:thin|med|thick|negthin|negmed|negthick)space(?![A-Za-z])", " ", s)
@@ -337,6 +341,7 @@ class _Pre:
         s = self._det(s)
         s = self._matrices(s)
         s = self._vector_ops(s)
+        s = self._norms(s)
         s = self._lists(s)
         s = self._bmod(s)
         s = self._eval_bars(s)
@@ -375,13 +380,16 @@ class _Pre:
         words = w.split()
         if w in ("and", "ja", ",", "&"):
             return r" \\ "
-        if not words or w.startswith("and"):
+        if not words:
             return " "
         if words[0] in ("or", "tai"):
             raise LatexError("'or' between equations isn't supported; send each case separately.")
         if words[0] in _CONDITION_WORDS:
             return f" {_WITH} "
-        return " "
+        if re.fullmatch(r"[\s.;:!?]*", w):
+            return " "
+        raise LatexError(f"\\text{{{arg.strip()}}} is text the LaTeX translator would drop. Leave it out, put a "
+                         "unit right after a number (5\\text{ m}), or write a condition as \\text{for } x>0.")
 
     def _split_conditions(self, pieces: list[str]) -> list[str]:
         """Everything after the first \\text{for/where/...} is a condition, not an equation."""
@@ -713,8 +721,59 @@ class _Pre:
 
     # -- vectors: \vec{u}\cdot\vec{v} -> dotP(u,v), \times -> crossP
 
+    @staticmethod
+    def _cmd_arg(s: str, j: int) -> tuple[str, int]:
+        """The argument of a command whose name ended at j: {...} or one token. (arg, end)."""
+        if j < len(s) and s[j] == "{":
+            end = _match_brace(s, j)
+            return s[j + 1:end].strip(), end + 1
+        t = re.compile(r"\\[A-Za-z]+|[A-Za-z]").match(s, j)
+        return (t.group(), t.end()) if t else ("", j)
+
+    @staticmethod
+    def _vec_name(arg: str) -> str | None:
+        g = re.fullmatch(r"\\([A-Za-z]+)", arg)
+        if re.fullmatch(r"[A-Za-z]", arg):
+            return arg
+        if g and g.group(1) in _GREEK_CMDS and g.group(1) != "pi":
+            return g.group(1)
+        return None
+
+    def _bold_vectors(self, s: str) -> str:
+        r"""\mathbf{u}\cdot\mathbf{v}: a bold letter next to \cdot or \times is a vector, like \vec.
+
+        Every \mathbf (\boldsymbol, \bm) of such a name is then written \vec; any other
+        bold text stays styling.
+        """
+        pat = re.compile(r"\\(?:mathbf|boldsymbol|bm)(?![A-Za-z])\s*")
+        found = []
+        for m in pat.finditer(s):
+            arg, nxt = self._cmd_arg(s, m.end())
+            name = self._vec_name(arg)
+            if name is None:
+                continue
+            end, scripted = nxt, False
+            while (sm := re.compile(r"\s*[_^]\s*").match(s, end)):
+                scripted = True
+                end = _match_brace(s, sm.end()) + 1 if s[sm.end():sm.end() + 1] == "{" else sm.end() + 1
+            op = (re.match(r"\s*\\(?:cdot|times)(?![A-Za-z])", s[end:]) is not None
+                  or re.search(r"\\(?:cdot|times)\s*$", s[:m.start()]) is not None)
+            if scripted:
+                if op:
+                    raise LatexError("A bold name with an index or exponent next to \\cdot or \\times (v_1, v^2) "
+                                     "can't be read as a vector: TI-Nspire names have no subscripts. Use "
+                                     "\\vec{u}\\cdot\\vec{v}, or write it in TI-Nspire syntax and use nspire_eval.")
+                continue
+            found.append((m.start(), nxt, name, op))
+        names = {n for *_, n, op in found if op}
+        for a, b, name, _ in reversed(found):
+            if name in names:
+                s = s[:a] + r"\vec{" + (name if len(name) == 1 else "\\" + name) + "}" + s[b:]
+        return s
+
     def _vectors(self, s: str) -> str:
         r"""\vec{u} (or \vec u) -> a vector name, printed as u."""
+        s = self._bold_vectors(s)
         pat = re.compile(r"\\vec(?![A-Za-z])\s*")
         while (m := pat.search(s)):
             j = m.end()
@@ -788,6 +847,53 @@ class _Pre:
                 rep = self.ph("vecop", (kind, x.group(), y.group(), shape))
                 s = s[:x.start()] + rep + s[y.end():]
 
+    def _norms(self, s: str) -> str:
+        r"""|\vec u|, \|v\|, \lVert v\rVert -> norm(v). abs would act on each element.
+
+        A pair of single bars around a vector (a \vec name, a row or column matrix, a cross
+        product) is a length; around anything else it stays abs. Double bars are always norm.
+        """
+        pat = re.compile(re.escape(_NORM) + r"([LRB])(?![A-Za-z])")
+        while True:
+            stack: list = []
+            for m in pat.finditer(s):
+                kind = m.group(1)
+                if kind == "L" or (kind == "B" and not (stack and stack[-1][0] == "B")):
+                    stack.append((kind, m))
+                    continue
+                if not stack or (kind == "R") != (stack[-1][0] == "L"):
+                    raise LatexError("The norm bars \\| \\| or \\lVert \\rVert don't pair up.")
+                _, o = stack.pop()
+                inner = s[o.end():m.start()]
+                if not inner.strip():
+                    raise LatexError("Nothing between the norm bars.")
+                atom = re.fullmatch(r"\s*(\\" + _PH + r"_\{9\d+\})\s*", inner)
+                if atom:
+                    kind_, _p = self.placeholders.get(atom.group(1)[1:], (None, None))
+                    if kind_ == "matrix" and not self._vec_shape(atom.group(1)):
+                        raise LatexError("The norm of a matrix that isn't a single row or column is ambiguous "
+                                         "(Frobenius or operator norm); use nspire_eval with norm(...).")
+                s = s[:o.start()] + self.ph("norm", inner) + s[m.end():]
+                break
+            else:
+                break
+        if pat.search(s):
+            raise LatexError("The norm bars \\| \\| or \\lVert \\rVert don't pair up.")
+        return self._abs_norms(s)
+
+    def _abs_norms(self, s: str) -> str:
+        """|v| around a vector is its length: norm(v)."""
+        bars = [m.start() for m in re.finditer(r"(?<!\\)\|", s)]
+        if len(bars) % 2:
+            return s
+        atom = re.compile(r"\s*(\\" + _PH + r"_\{9\d+\})\s*")
+        for a, b in reversed(list(zip(bars[::2], bars[1::2], strict=True))):
+            inner = s[a + 1:b]
+            m = atom.fullmatch(inner)
+            if m and self._vec_shape(m.group(1)):
+                s = s[:a] + self.ph("norm", inner) + s[b + 1:]
+        return s
+
     @staticmethod
     def _vec_pair(kind: str, a, b):
         """Check the shapes of a dot/cross product's vectors; the shape of a cross product."""
@@ -824,7 +930,8 @@ class _Pre:
             words = content.lower().split()
             called = content in _KNOWN_CMDS and re.match(r"\s*\(", after)  # 2\,\mathrm{min}(a,b)
             if (not content or content in ("d", "e", "i") or words[0] in _CONDITION_WORDS | _TEXT_WORDS
-                    or content in (",", "&") or called or not self._unit_place(before, ends)):
+                    or content in (",", "&") or re.fullmatch(r"[.;:!?]+", content) or called
+                    or not self._unit_place(before, ends)):
                 i = end + 1
                 continue
             unit = self._unit_tex(content)
@@ -1081,6 +1188,8 @@ def parse(latex: str) -> Parsed:
             ph_values[name] = (kind, [parse1(x) for x in payload])  # pyright: ignore[reportGeneralTypeIssues]
         elif kind == "vecop":
             ph_values[name] = (kind, (payload[0], parse1(payload[1]), parse1(payload[2])))  # pyright: ignore[reportIndexIssue]
+        elif kind == "norm":
+            ph_values[name] = (kind, parse1(payload))  # pyright: ignore[reportArgumentType]
 
     # T(t) = 20+80e^{-0.1t} defines T: only f g h F G H are functions otherwise, so
     # T(t) would be the product T*t. A name on the left called with bare variables
@@ -1123,6 +1232,8 @@ def parse(latex: str) -> Parsed:
                         return _eval_at(*v)  # pyright: ignore[reportGeneralTypeIssues]
                     if kind == "list":
                         return TiList(*[fix(x) for x in v], evaluate=False)  # pyright: ignore[reportGeneralTypeIssues]
+                    if kind == "norm":
+                        return sp.Function("norm")(fix(v))
                     if kind == "vecop":
                         op, a, b = v  # pyright: ignore[reportGeneralTypeIssues]
                         return sp.Function("dotP" if op == "dot" else "crossP")(walk(a), walk(b))
@@ -1230,7 +1341,7 @@ def parse(latex: str) -> Parsed:
         _plain_names(e, plain, vecs)
     if vecs & plain:
         n = sorted(vecs & plain)[0]
-        raise LatexError(f"Both \\vec{{{n}}} and plain {n} appear, and TI-Nspire would read them as the same "
+        raise LatexError(f"Both \\vec{{{n}}} (or bold {n} next to \\cdot/\\times) and plain {n} appear, and TI-Nspire would read them as the same "
                          f"variable {n}. Rename one of them.")
     indep = pre.ode_indep
     if ode_dep and not indep:

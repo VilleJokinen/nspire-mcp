@@ -72,6 +72,9 @@ LATEX_CASES = [
     # unit conversions come back as decimals
     (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000."),
     (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4."),
+    # the length of a vector is norm, not the elementwise abs
+    (r"\left|\begin{pmatrix}3\\4\end{pmatrix}\right|", "auto", "5"),
+    (r"\lVert\begin{pmatrix}3&4\end{pmatrix}\rVert", "auto", "5"),
 ]
 
 
