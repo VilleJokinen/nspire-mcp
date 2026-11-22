@@ -78,6 +78,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer")` | The user wants the worked solution written into TI-Nspire itself. |
+| `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200)` | The user wants to see a graph. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
 
@@ -159,6 +160,17 @@ If it reports that the LaTeX could not be parsed, or that a command isn't
 supported (it refuses rather than guesses), translate it to TI-Nspire syntax
 yourself and use `nspire_eval`. Show the user `result_latex` when it is
 not null; otherwise show `result`.
+
+### `nspire_plot`
+
+Graphs up to 8 functions of one variable, e.g. `exprs=["sin(x)", "x^2/4"]` or
+`latex=["\frac{1}{x-2}"]`, with `x_min`/`x_max` chosen to show the interesting part.
+The CAS computes every point; the image is only drawn from them. Points where a function
+is undefined or non-real are gaps, and lines are not drawn across asymptotes. The text
+summary lists each function's y range, its gaps and where it jumps: base what you say
+about the graph on it, not on guesses from the picture. If the automatic y range cuts off
+spikes, pass `y_min`/`y_max`. It stores nothing: `Define` a function with `nspire_eval`
+first if you want to plot `f(x)`. Every other name needs a stored value.
 
 ### `nspire_notes`
 

@@ -2,7 +2,7 @@
 # requires-python = ">=3.11,<3.15"
 # dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
 # ///
-"""Check the bridge and the LaTeX translator end to end:  uv run --script selftest.py
+"""Check the bridge, the LaTeX translator and plot sampling end to end:  uv run --script selftest.py
 
 Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
@@ -13,12 +13,14 @@ own), and switches the angle and Auto/Approximate modes for one evaluation each 
 check that setMode works through the bridge (nspire_eval's angle / exact_mode), then
 checks they were put back.
 """
+import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
+from nspire_plot import Func, prepare, sample  # noqa: E402
 
 bridge = Bridge()
 
@@ -69,6 +71,34 @@ LATEX_CASES = [
 
 def norm(s: str) -> str:
     return s.replace("−", "-").replace(" ", "")
+
+
+# nspire_plot: (functions, x_min, x_max, samples, expected value of each function, None for a gap)
+# x = 0 is the 6th point: √ is 0 there, 1/x undef (a gap), and √ non-real left of it.
+PLOT_CASE = ([Func("sin(x)", "sin(x)"), Func("√(x)", "√(x)"), Func("1/x", "1/x")], -1, 1, 11,
+             [math.sin, lambda x: math.sqrt(max(x, 0)) if x > -1e-9 else None,
+              lambda x: 1 / x if abs(x) > 1e-9 else None])
+
+
+def plot_check(report: "Report") -> None:
+    """Sample three functions on the CAS (inside the session): values, a non-real gap, undef at 0."""
+    funcs, a, b, n, want = PLOT_CASE
+    spec = prepare(funcs, "x", a, b, n)
+    try:
+        got = sample(bridge, spec, 10)
+    except BridgeTimeout:
+        raise
+    except Exception as e:
+        report(False, "nspire_plot sampling", f"{type(e).__name__}: {e}")
+        return
+    bad = []
+    for f, ys, w in zip(funcs, got.ys, want):
+        for i, y in enumerate(ys):
+            x = spec.grid.x(i)
+            e = w(x)
+            if (e is None) != (y is None) or (e is not None and abs(y - e) > 1e-5 * max(1, abs(e))):
+                bad.append(f"{f.command} at x={x:g}: got {y}, want {e}")
+    report(not bad, "nspire_plot sampling", "; ".join(bad[:3]) or f"{got.requests} request(s), gaps where expected")
 
 
 class Report:
@@ -165,6 +195,11 @@ def cas_checks(report: Report, plans: list) -> list | None:
         document_checks(report, cas)
     except BridgeTimeout as e:
         report(False, "document checks", str(e))
+        return None
+    try:
+        plot_check(report)
+    except BridgeTimeout as e:
+        report(False, "nspire_plot sampling", str(e))
         return None
 
     runs: list = []

@@ -1,5 +1,5 @@
 """Offline tests of server.py: tool schemas and annotations, the nspire_latex
-document warnings, and nspire_notes cancellation. A fake bridge answers instead
+document warnings, nspire_plot's sampling, and nspire_notes cancellation. A fake bridge answers instead
 of TI-Nspire; the real clipboard is never touched.
 
 Skipped by tests/conftest.py where pywin32 or mcp is missing.
@@ -7,7 +7,9 @@ Skipped by tests/conftest.py where pywin32 or mcp is missing.
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
+import math
 import os
 import re
 import subprocess
@@ -79,15 +81,16 @@ def tools() -> dict:
 def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
-                       "nspire_latex", "nspire_notes"}
+                       "nspire_latex", "nspire_notes", "nspire_plot"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
     for name in ("nspire_status", "nspire_vars"):
         assert ts[name].annotations.readOnlyHint is True and ts[name].annotations.idempotentHint is True
     assert ts["nspire_clear"].annotations.destructiveHint is True
-    for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear"):
-        assert not ts[name].annotations.readOnlyHint  # they can define or delete things
+    for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
+        assert not ts[name].annotations.readOnlyHint  # they can define or delete things, or evaluate in the document
+    assert ts["nspire_plot"].annotations.destructiveHint is False
 
 
 def test_action_enum_matches_translator():
@@ -113,7 +116,7 @@ def test_notes_schema():
 def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
-                   "isolated=True", "exact_mode"):
+                   "isolated=True", "exact_mode", "nspire_plot"):
         assert needle in text
 
 
@@ -127,9 +130,10 @@ def test_bad_action_rejected_before_the_bridge(monkeypatch):
 
 def test_startup_imports_stay_light():
     # The client times out a server that's slow to answer initialize: no SymPy, no
-    # keystroke module at import. A fresh interpreter, since other tests import them.
+    # matplotlib, no keystroke module at import. A fresh interpreter, since other tests import them.
     code = ("import sys; sys.path.insert(0, '.'); import server; "
-            "print(sorted(m for m in ('sympy', 'nspire_latex', 'nspire_notes', 'nspire_keys') if m in sys.modules))")
+            "print(sorted(m for m in ('sympy', 'nspire_latex', 'nspire_notes', 'nspire_keys', 'matplotlib', "
+            "'nspire_plot') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120,
                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     assert out.returncode == 0, out.stderr
@@ -563,3 +567,197 @@ def test_check_solution_prompt():
     text = got.messages[0].content.text
     assert "Solve x^2=4 {real}" in text and "x=2" in text
     assert "nspire_eval_batch" in text and "isolated=True" in text
+# ------------------------------------------------------------ nspire_plot
+
+_SEQ_RE = re.compile(r"^seq\(approx\((.*)\),(\w+),([^,]+),([^,]+),([^,]+)\)$")
+
+
+def _cas_number(v: float) -> str:
+    return f"{v:.6g}".replace("e", nb.NS_EXP).replace("-", "−")
+
+
+class SeqBridge(FakeBridge):
+    """Answers seq(approx(f),x,a,b,h) like the CAS: funcs maps f to a Python function. A
+    point where it raises fails the whole seq with error 800 (as a non-real result does in
+    Real mode); None is undef, a str is returned as written. More than max_len points is
+    error 672. The first dead_rounds seq batches time out."""
+
+    def __init__(self, funcs: dict, replies: dict | None = None, max_len: int = 10_000, dead_rounds: int = 0):
+        super().__init__(replies or {})
+        self.funcs, self.max_len, self.dead_rounds, self.rounds = funcs, max_len, dead_rounds, 0
+
+    def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+        if not any(_SEQ_RE.match(e) for e in exprs):
+            return super().eval_batch(exprs, timeout_s, raw)
+        self.batches.append(list(exprs))
+        self.rounds += 1
+        if self.rounds <= self.dead_rounds:
+            self.last_timeout = dead = f"No reply from the TI-Nspire bridge within {timeout_s:g} s."
+            return [{"expr": e, "ok": False, "error": dead if k == 0 else "skipped: " + dead}
+                    for k, e in enumerate(exprs)]
+        self.last_timeout = None
+        return [self._seq(e) for e in exprs]
+
+    def _seq(self, expr: str) -> dict:
+        self.calls.append(expr)
+        f, _var, a, b, h = _SEQ_RE.match(expr).groups()
+        if f not in self.funcs:
+            return {"expr": expr, "ok": False, "error": "error 910 (syntax error)"}
+        a, b, h = float(a), float(b), float(h)
+        xs = [a + k * h for k in range(int((b - a) / h + 1e-9) + 1)]
+        if len(xs) > self.max_len:
+            return {"expr": expr, "ok": False, "error": "error 672 (resource exhaustion)"}
+        out = []
+        for x in xs:
+            try:
+                v = self.funcs[f](x)
+            except (ValueError, ZeroDivisionError):
+                return {"expr": expr, "ok": False, "error": "error 800 (non-real result)"}
+            out.append("undef" if v is None else v if isinstance(v, str) else _cas_number(v))
+        return {"expr": expr, "ok": True, "result": "{" + ",".join(out) + "}"}
+
+
+def plot(monkeypatch, fake, **kw):
+    monkeypatch.setattr(server, "bridge", fake)
+    return run(server.nspire_plot(**kw))
+
+
+def text_of(res) -> str:
+    return res.content[0].text
+
+
+def test_plot_schema():
+    schema = tools()["nspire_plot"].inputSchema
+    props = schema["properties"]
+    assert set(props) == {"exprs", "latex", "var", "x_min", "x_max", "y_min", "y_max", "samples", "timeout_s"}
+    assert props["var"]["default"] == "x" and props["samples"]["default"] == 200
+    assert props["x_min"]["default"] == -10 and props["x_max"]["default"] == 10
+    assert not schema.get("required")
+
+
+def test_plot_one_request_for_all_functions(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"sin(x)": math.sin, "x^2-2": lambda x: x * x - 2},
+                     {"getVarInfo()": NOTHING, "getMode(2)": RADIAN})
+    res = plot(monkeypatch, fake, exprs=["sin(x)", "y=x^2-2"], x_min=-3, x_max=3, samples=50)
+    assert fake.sessions == 1  # clipboard saved and restored once
+    assert fake.batches[0] == ["getVarInfo()", "getMode(2)"]
+    assert len(fake.batches) == 2 and len(fake.batches[1]) == 2  # both functions in one batch
+    assert fake.batches[1][1].startswith("seq(approx(x^2-2),x,-3.0,")
+    text = text_of(res)
+    assert "Plotted 2 functions for x from −3 to 3: 50 points each" in text
+    assert "2. y=x^2-2  (TI-Nspire: x^2-2): y from −1.99625 to 7." in text
+    assert "Warnings" not in text
+    img = res.content[1]
+    assert img.type == "image" and img.mimeType == "image/png"
+    assert base64.b64decode(img.data).startswith(b"\x89PNG")
+
+
+def test_plot_via_call_tool(monkeypatch):
+    pytest.importorskip("matplotlib")
+    monkeypatch.setattr(server, "bridge", SeqBridge({"x": lambda x: x}))
+    out = run(server.mcp.call_tool("nspire_plot", {"exprs": ["x"], "samples": 20}))
+    blocks = out.content if hasattr(out, "content") else out[0] if isinstance(out, tuple) else out
+    assert [b.type for b in blocks] == ["text", "image"]
+
+
+def test_plot_long_seq_falls_back_to_pieces():
+    import nspire_plot as pl
+    fake = SeqBridge({"x^3": lambda x: x ** 3}, max_len=60)
+    spec = pl.prepare([pl.Func("x^3", "x^3")], "x", -2, 2, 200)
+    got = pl.sample(fake, spec, 5)
+    assert got.requests == 2 and len(fake.batches[1]) == pl.SPLIT
+    assert all(v is not None for v in got.ys[0])
+    for i in (0, 57, 199):
+        assert got.ys[0][i] == pytest.approx(spec.grid.x(i) ** 3, rel=1e-5, abs=1e-5)
+    assert not got.errors[0]
+
+
+def test_plot_domain_errors_become_gaps():
+    import nspire_plot as pl
+    fake = SeqBridge({"√(x)": math.sqrt})
+    spec = pl.prepare([pl.Func("√(x)", "√(x)")], "x", -5, 5, 200)
+    got = pl.sample(fake, spec, 5)
+    neg = [i for i in range(200) if spec.grid.x(i) < 0]
+    assert all(got.ys[0][i] is None for i in neg)
+    assert all(got.ys[0][i] is not None for i in range(200) if i not in neg)
+    assert got.errors[0] == {"error 800 (non-real result)": len(neg)}
+    assert got.requests <= 6  # split down to single points in a few rounds, not one request per point
+
+
+def test_plot_undef_points_are_gaps(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"1/x": lambda x: None if abs(x) < 1e-12 else 1 / x})
+    text = text_of(plot(monkeypatch, fake, exprs=["1/x"], x_min=-1, x_max=1, samples=21))
+    assert "undefined or non-real at 1 of 21 points (x≈0)" in text
+
+
+def test_plot_timeout_retried_once_in_pieces():
+    import nspire_plot as pl
+    spec = pl.prepare([pl.Func("x", "x")], "x", 0, 1, 40)
+    fake = SeqBridge({"x": lambda x: x}, dead_rounds=1)
+    got = pl.sample(fake, spec, 5)
+    assert got.requests == 2 and len(fake.batches[1]) == pl.SPLIT
+    assert all(v is not None for v in got.ys[0])
+    fake = SeqBridge({"x": lambda x: x}, dead_rounds=2)
+    with pytest.raises(nb.BridgeTimeout, match="fewer samples"):
+        pl.sample(fake, spec, 5)
+
+
+def test_plot_syntax_error_fails_at_once(monkeypatch):
+    fake = SeqBridge({})
+    with pytest.raises(ValueError, match="syntax error"):
+        plot(monkeypatch, fake, exprs=["sin(x"])
+    assert len(fake.batches) == 2  # the warnings check, then one seq: no splitting
+
+
+def test_plot_free_variable_is_an_error(monkeypatch):
+    fake = SeqBridge({"a*x": lambda x: f"{_cas_number(x)}*a"})
+    with pytest.raises(ValueError, match="needs a value: store it first"):
+        plot(monkeypatch, fake, exprs=["a*x"])
+
+
+def test_plot_nothing_real_is_an_error(monkeypatch):
+    fake = SeqBridge({"ln(x)": math.log})
+    with pytest.raises(ValueError, match="no real value anywhere"):
+        plot(monkeypatch, fake, exprs=["ln(x)"], x_min=-5, x_max=-1, samples=10)
+
+
+def test_plot_bad_arguments_never_reach_the_bridge(monkeypatch):
+    for kw in ({}, {"exprs": ["x"], "x_min": 1, "x_max": 1}, {"exprs": ["a:=2"]},
+               {"exprs": ["x"] * 9}, {"exprs": ["x"], "var": "1x"}):
+        fake = SeqBridge({})
+        with pytest.raises(ValueError):
+            plot(monkeypatch, fake, **kw)
+        assert fake.calls == [] and fake.sessions == 0
+
+
+def test_plot_warns_about_stored_variable_but_not_the_plot_variable(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"a*x^2": lambda x: 2 * x * x},
+                     {"getVarInfo()": (True, '[["a","NUM","none",0]["x","NUM","none",0]]'),
+                      "getMode(2)": DEGREE, "a": (True, "2")})
+    text = text_of(plot(monkeypatch, fake, exprs=["a*x^2"], samples=20))
+    assert "- a is stored in the document (a = 2)" in text
+    assert "x is stored" not in text  # seq binds x itself
+    assert "angle mode" not in text   # no trig
+    assert fake.batches[1] == ["a"]
+
+
+def test_plot_warns_about_degree_mode(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"sin(x)": lambda x: math.sin(math.radians(x))},
+                     {"getVarInfo()": NOTHING, "getMode(2)": DEGREE})
+    text = text_of(plot(monkeypatch, fake, exprs=["sin(x)"], x_min=0, x_max=360, samples=37))
+    assert "angle mode is Degree" in text
+
+
+def test_plot_latex_input(monkeypatch):
+    pytest.importorskip("matplotlib")
+    import nspire_latex
+    cmd = nspire_latex.plan(r"\frac{1}{x^2+1}", "eval").command
+    fake = SeqBridge({cmd: lambda x: 1 / (x * x + 1)})
+    text = text_of(plot(monkeypatch, fake, latex=[r"\frac{1}{x^2+1}"], samples=21))
+    assert f"1. \\frac{{1}}{{x^2+1}}  (TI-Nspire: {cmd}): y from 0.00990099 to 1" in text
+    with pytest.raises(ValueError, match="frac"):
+        plot(monkeypatch, SeqBridge({}), latex=[r"\frac{1}"])

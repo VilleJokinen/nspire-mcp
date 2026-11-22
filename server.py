@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["mcp>=1.30,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = ["mcp>=1.30,<2", "pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*", "matplotlib>=3.8"]
 # ///
 """MCP server: evaluate expressions in the TI-Nspire CX (CAS) desktop app.
 
@@ -10,6 +10,7 @@ Windows clipboard. Run with:  uv run --script server.py
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import importlib
 import logging
@@ -17,12 +18,13 @@ import os
 import re
 import sys
 import threading
+from collections.abc import Collection
 from typing import Annotated, Any, Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
-from mcp.types import CallToolResult, TextContent, ToolAnnotations  # noqa: E402
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations  # noqa: E402
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
@@ -49,6 +51,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
 - nspire_notes types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
+- nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
+  its summary.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -443,7 +447,8 @@ def _short(v: str) -> str:
 
 
 def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
-                 isolated: bool = False, angle_override: bool = False) -> list[str]:
+                 isolated: bool = False, angle_override: bool = False,
+                 ignore: Collection[str] = ()) -> list[str]:
     """Warnings about the open document for command: stored variables or functions it
     uses or replaces, and an angle mode other than radian when it uses trig functions.
     isolated: what command replaces is put back afterwards. angle_override: the call sets
@@ -453,6 +458,7 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
     values when a stored variable is used. Never fails the tool: anything unexpected just
     gives fewer warnings. Raises BridgeTimeout only if the bridge doesn't answer at all, in
     which case command would time out too. notes_mod is nspire_notes (for scan_names).
+    ignore: names (lower case) that command binds itself, such as seq's variable.
     """
     t = min(float(timeout_s), 5.0)
     res = bridge.eval_batch(["getVarInfo()", "getMode(2)"], t)
@@ -464,7 +470,7 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
             names = notes_mod.scan_names(command)
             stored = {r[0].lower(): (r[0], r[1].upper() if len(r) > 1 else "")
                       for r in parse_var_info(res[0]["result"]) if r}
-            used = [stored[n] for n in sorted(names.uses) if n in stored]
+            used = [stored[n] for n in sorted(names.uses) if n in stored and n not in ignore]
             replaced = [stored[n.lower()] for n in names.defines
                         if n.lower() in stored and n.lower() not in names.uses]
             with_value = [name for name, typ in used if typ in VALUE_TYPES]
@@ -575,6 +581,62 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     if warnings:
         out["warnings"] = warnings
     return out
+
+
+@mcp.tool(annotations=_hints("Plot functions with the TI-Nspire CAS", destructiveHint=False, idempotentHint=True))
+async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = None, var: str = "x",
+                      x_min: float = -10, x_max: float = 10, y_min: float | None = None,
+                      y_max: float | None = None, samples: int = 200, timeout_s: float = 20) -> CallToolResult:
+    """Graph functions of one variable: returns a PNG image and a short text summary.
+
+    exprs: functions in TI-Nspire syntax, e.g. ["sin(x)", "x^2-2", "f(x)"] ("y=..." is fine too).
+    latex: or LaTeX, e.g. ["\\frac{1}{x}"], translated like nspire_latex. Up to 8 functions in
+    all, one colour each. var: the variable (default x). x_min, x_max: the range. y_min, y_max:
+    the y range to show (automatic if left out; spikes next to asymptotes are then cut off).
+    samples: points per function, 10 to 1000.
+
+    Every value comes from the CAS: one seq(approx(f),x,...) request per function; the image is
+    only drawn from them. Points where a function is undefined or non-real are gaps, and lines
+    aren't drawn across asymptotes. The summary gives each function's y range, gaps and jumps:
+    describe the graph from it. Variables and functions stored in the open document are
+    substituted (a*x^2 uses a stored a; the summary warns), and trig functions follow the
+    document's angle mode (a warning if it isn't radian). Other names without a value are an
+    error. Nothing is stored or changed: define functions with nspire_eval first.
+    timeout_s: per request (one request holds every function's points, or a piece of them).
+    """
+    pl = await asyncio.to_thread(importlib.import_module, "nspire_plot")
+    funcs = []
+    for e in exprs or []:
+        if not isinstance(e, str):
+            raise ValueError("exprs must be strings")
+        funcs.append(pl.Func(e, e))
+    if latex:
+        # SymPy only for LaTeX input
+        lx = await asyncio.to_thread(importlib.import_module, "nspire_latex")
+        for src in latex:
+            try:
+                p = await asyncio.to_thread(lx.plan, src, "eval")
+            except lx.LatexError as err:
+                raise ValueError(f"{src!r}: {err}") from None
+            funcs.append(pl.Func(src, p.command))
+    spec = pl.prepare(funcs, var, x_min, x_max, samples, y_min, y_max)  # bad arguments fail before the bridge
+    notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")
+
+    def work():
+        both = ",".join(f.command for f in spec.funcs)
+        warnings = doc_warnings(bridge, both, timeout_s, notes_mod, ignore={spec.var.lower()})
+        return pl.sample(bridge, spec, timeout_s), warnings
+    log.info("plot %d function(s), %d samples", len(spec.funcs), spec.grid.n)
+    got, warnings = await asyncio.to_thread(bridge.session, work)
+    text = pl.summary(spec, got, warnings)
+    if not any(v is not None for ys in got.ys for v in ys):
+        raise ValueError(text)
+    # drawn after the session, with the user's clipboard already restored
+    png = await asyncio.to_thread(pl.render_png, spec, got)
+    return CallToolResult(content=[
+        TextContent(type="text", text=text),
+        ImageContent(type="image", data=base64.b64encode(png).decode("ascii"), mimeType="image/png"),
+    ])
 
 
 @mcp.tool(annotations=_hints("Write a worked solution on a TI-Nspire Notes page"))

@@ -118,7 +118,7 @@ hotkey.
   command, rewrite it in `_Pre` or add it there, with a case in `tests/test_plan.py`.
 - `server.py`: MCP tools. Keep heavy imports (SymPy) lazy: the client times out a
   server that is slow to answer `initialize` (`tests/test_server.py` checks that
-  startup imports neither SymPy nor the Notes modules). It also holds the server
+  startup imports neither SymPy, matplotlib nor the Notes and plot modules). It also holds the server
   `INSTRUCTIONS`, each tool's annotations (read-only / destructive), and
   `doc_warnings()`, which adds `warnings` to `nspire_latex` results (stored variables
   substituted, stored functions used or replaced, a non-radian angle mode with trig).
@@ -135,6 +135,17 @@ hotkey.
   keys be `None` (FastMCP fills them with null). `nspire_eval` returns a
   `CallToolResult` so its first content block stays the bare result text; warnings go
   in a second block. `check_solution` is an MCP prompt.
+- `nspire_plot.py`: the `nspire_plot` tool's work, without pywin32 or matplotlib at import.
+  `prepare()` checks arguments offline (no `:=`/`Define`/`DelVar`: plotting stores nothing),
+  `sample()` runs inside `bridge.session()`: one batch with a `seq(approx(f),x,a,b,h)` per
+  function, the upper bound half a step past the last point so rounding can't change the
+  count. A range that errors (non-real, domain, too long, bad reply) is split into `SPLIT`
+  pieces, down to single points that become gaps; syntax-type errors (`_FATAL_CODES`) and
+  non-numeric results fail at once; after a timeout the rest is retried once in pieces.
+  `parse_values()` reads the list (`undef`, `±∞` and values with 𝑖 are gaps),
+  `breaks()` finds asymptote jumps (not drawn), and `render_png()` imports matplotlib and
+  draws after the session. The CAS computes every value: never compute points in Python.
+  The tool reuses `doc_warnings` with `ignore={var}` (seq binds the plot variable).
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
 - `nspire_notes.py` / `nspire_keys.py`: Notes-page builder. It works by keystrokes:
   Ctrl+N, `6` (Add Notes), text typed as Unicode, Ctrl+M for a math box, the
@@ -158,7 +169,7 @@ hotkey.
   `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
   throughout. Validation undoes what it changes in the bridge document and warns
   about steps that read variables the new document won't have.
-- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2" pytest -q tests`
+- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2" --with matplotlib pytest -q tests`
   (CI runs them on Ubuntu and Windows, again on Windows with the versions pinned in
   `server.py.lock`, and runs `ruff check` with `ruff.toml` and pyright with
   `pyrightconfig.json`; tests needing pywin32, lupa or mcp are skipped without them).

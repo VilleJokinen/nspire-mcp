@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: >
           uv run --no-project --python ${{ matrix.python }}
-          --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" ${{ matrix.extra }}
+          --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with matplotlib ${{ matrix.extra }}
           pytest -q tests
 
   locked:
