@@ -75,8 +75,13 @@ User: "Find the area between y = x^2 and y = 2x on a notes page."
     {"text": "On [0, 2] the line is above the parabola, so the area is"},
     {"text": "A =", "math": "∫(2*x-x^2,x,0,2)"},
     {"text": "The area is 4/3."}
-  ]
+  ],
+  "graphs": ["x^2", "2*x"]
 }
 ```
 
-4. Tell the user the new document is unsaved.
+   `graphs` adds a Graphs page with both curves after the Notes page. To save
+   the document too, add `"save_as": "C:\\Users\\<user>\\Documents\\area.tns"`
+   with a path the user chose.
+4. Tell the user the new document is unsaved, or, with `save_as`, check
+   `save.saved` and pass on `save.message` if it is false.

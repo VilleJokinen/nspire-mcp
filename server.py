@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations  # noqa: E402
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
@@ -642,7 +642,8 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
 @mcp.tool(annotations=_hints("Write a worked solution on a TI-Nspire Notes page"))
 async def nspire_notes(steps: list[NotesStep], title: str | None = None,
                        page_size: Literal["computer", "handheld"] = "computer",
-                       timeout_s: float = 10) -> dict:
+                       graphs: list[str] | None = None, save_as: str | None = None, overwrite: bool = False,
+                       timeout_s: float = 10, ctx: Context | None = None) -> dict:
     """Write a worked solution onto a new TI-Nspire Notes page, with live math boxes.
 
     Use this when the user wants the solution shown *in TI-Nspire* (e.g. "write this up
@@ -669,24 +670,46 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
     (found by its process, never by title; if several are open the one in front is used), which
     comes to the front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus, or
     the call is cancelled, it stops without typing anywhere else. Returns {document,
-    window:{hwnd, title, process}, steps:[{text, math, result}], warnings:[str], note}.
-    The new document is unsaved.
+    window:{hwnd, title, process}, steps:[{text, math, result}], warnings:[str], note,
+    graphs?:[str], save?:{path, saved, message}}. Progress is reported per step while it runs.
 
     page_size: "computer" (default: large page, fills the TI-Nspire window) or "handheld"
     (the calculator's small screen, e.g. to transfer the document to a handheld).
+    graphs: functions of x to draw on a Graphs page after the Notes page, e.g. ["x^2", "2*x"]
+    (TI-Nspire syntax) or LaTeX between dollar signs ("$\\frac{1}{x}$"); a leading y= or f(x)= is
+    dropped. Each is checked on the bridge first, like math steps, and becomes f1, f2, ...
+    save_as: full path of a .tns file (its folder must exist) to save the new document to, through
+    TI-Nspire's Save dialog. An existing file is refused unless overwrite=true. Each step of the
+    save is checked (dialog open, file name box focused and holding the path, file written); if
+    one can't be, it stops, leaves the dialog for the user and says so in save.message and
+    warnings. Without save_as the new document is unsaved.
     """
     nb = await asyncio.to_thread(importlib.import_module, "nspire_notes")
     cancel = threading.Event()  # set when the client cancels the call: the worker stops typing
+    loop = asyncio.get_running_loop()
+    sent: list = []  # progress notifications scheduled from the worker thread
+
+    def progress(done: int, total: int, message: str) -> None:
+        if ctx is None or cancel.is_set():
+            return
+        fut = asyncio.run_coroutine_threadsafe(ctx.report_progress(done, total, message), loop)
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception() is None
+                              or log.info("progress not sent: %s", f.exception()))
+        sent.append(fut)
 
     def work():
-        return nb.build_notes(bridge, steps, title, page_size, timeout_s, cancel=cancel)
-    log.info("notes: %d steps", len(steps))
+        return nb.build_notes(bridge, steps, title, page_size, timeout_s, cancel=cancel,
+                              graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress)
+    log.info("notes: %d steps, %d graphs%s", len(steps), len(graphs or ()), ", save" if save_as else "")
     try:
-        return await asyncio.to_thread(bridge.session, work)
+        out = await asyncio.to_thread(bridge.session, work)
     except asyncio.CancelledError:
         cancel.set()
         log.info("notes: cancelled")
         raise
+    if sent:  # let the last notifications go out before the result
+        await asyncio.wait([asyncio.wrap_future(f) for f in sent], timeout=2)
+    return out
 
 
 # ---------------------------------------------------------------- prompts
