@@ -254,7 +254,7 @@ equations separated by `\\`, commas or `;`, conditions (`\text{for } x>0`, also 
 `when`, `if`, `kun`, `jos`, become `|x>0`), `30^\circ`, `|x|`, `n!`, `\binom`, `\arg`, `\Re`,
 `\Im`, `\operatorname{sgn}`, `a \bmod b`, `:=` (`a:=5` stores, `f(x):=…` defines), Greek letters,
 subscripts (`x_1`, `a_{ij}`, `\alpha_2` become `x1`, `aij`, `α2`), vectors (`\vec{u}\cdot\vec{v}` is
-`dotP(u,v)`, `\times` is `crossP`, also between row or column matrices), and units after a number
+`dotP(u,v)`, `\times` is `crossP`, also between row or column matrices; `\mathbf{u}\cdot\mathbf{v}` too, and the lengths `|\vec u|`, `\|\vec u\|`, `\lVert u\rVert` are `norm(u)`, while `|x|` stays `abs(x)`), and units after a number
 (`5\,\mathrm{m}`, `9.81\,\mathrm{m/s^2}`, `3\text{ kg}` become `5*_m`, `9.81*_m/_s^2`, `3*_kg`: m, cm,
 mm, km, s, min, h, kg, g, N, J, W, Pa, l and a few more; gram is TI-Nspire's `_gm`, hour `_hr`).
 
@@ -266,8 +266,10 @@ digits (`x_{n+1}` would lose its `+` and collide with `x_{n1}`; `x_{1,2}`), a Gr
 followed by parentheses unless it's being defined (`\Gamma(5)`: write `\Gamma\cdot(5)` for a
 product; `\phi(x)=x^2` still defines `φ`), two vectors multiplied without `\cdot`/`\times`,
 chained vector products without parentheses (`\vec u\cdot\vec v\times\vec w`), `\vec{v}`
-together with plain `v`, unknown units after a number (`5\text{ apples}`, `5\,\mathrm{V}`)
-and temperatures (`25^\circ\mathrm{C}`).
+or `\mathbf{v}` next to `\cdot`/`\times` together with plain `v`, a bold name with an index there
+(`\mathbf{v}_1\cdot\mathbf{v}_2`), the norm of a matrix that isn't one row or column, unknown units after a
+number (`5\text{ apples}`, `5\,\mathrm{V}`), temperatures (`25^\circ\mathrm{C}`), and any other `\text{...}`
+(`\text{area} = 5`; only `and`/`ja`, empty text, punctuation, units and condition words are understood).
 
 With `action="auto"` (what the hotkey uses):
 
@@ -288,7 +290,7 @@ natural; `e` and `i` are the constants unless used as a sum/integral variable;
 `x(x+1)` is a product (`f g h F G H` are functions, and so is any `T(t)=…` whose
 argument appears on the right, which defines `T`; for `x`, `y`, `z`, `t` write
 `x(t):=…`); accents are separate variables (`\bar x` is `xbar`, `x^*` is `xstar`,
-`\hat x` is `xhat`), while `\mathbf` is only styling and `\vec{u}` is the name `u`; a
+`\hat x` is `xhat`), while `\mathbf` is only styling (unless next to `\cdot`/`\times`) and `\vec{u}` is the name `u`; a
 script without braces is one character, as LaTeX shows it (`\sum_{k=1}^5 2k` has the
 upper limit 5, `x^12` is `x^1*2`); `1,5` between digits
 is a decimal comma, also inside `{}` groups such as `\frac{1,5}{2}`, but not inside

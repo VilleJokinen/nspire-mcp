@@ -71,6 +71,9 @@ LATEX_CASES = [
     (r"\begin{pmatrix}1&0&0\end{pmatrix}\times\begin{pmatrix}0&1&0\end{pmatrix}", "auto", "[0,0,1]"),
     (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000"),
     (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4"),
+    # the length of a vector is norm, not the elementwise abs
+    (r"\left|\begin{pmatrix}3\\4\end{pmatrix}\right|", "auto", "5"),
+    (r"\lVert\begin{pmatrix}3&4\end{pmatrix}\rVert", "auto", "5"),
 ]
 
 

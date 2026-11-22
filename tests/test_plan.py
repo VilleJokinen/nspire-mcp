@@ -459,6 +459,107 @@ def test_vectors_refused(latex, what):
         plan(latex)
 
 
+BOLD_VECTORS = [
+    (r"\mathbf{u}\cdot\mathbf{v}", "dotP(u,v)"),            # was u*v
+    (r"\mathbf{u}\times\mathbf{v}", "crossP(u,v)"),
+    (r"\boldsymbol{u}\cdot\bm{v}", "dotP(u,v)"),
+    (r"\mathbf u\cdot\mathbf v", "dotP(u,v)"),
+    (r"\mathbf{u}\cdot\vec{v}", "dotP(u,v)"),
+    (r"\mathbf{u}\cdot(\mathbf{v}\times\mathbf{w})", "dotP(u,crossP(v,w))"),
+    (r"2\mathbf{u}\cdot\mathbf{v}", "2*dotP(u,v)"),
+    (r"\mathbf{u}\cdot\begin{pmatrix}1\\2\end{pmatrix}", "dotP(u,[[1][2]])"),
+    # bold that isn't next to \cdot or \times stays styling
+    (r"\mathbf{F}=m\mathbf{a}", "solve(F=m*a,a)"),
+    (r"\mathbf{x}+1", "x + 1"),
+]
+
+
+@pytest.mark.parametrize("latex,want", BOLD_VECTORS)
+def test_bold_vectors(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"\mathbf{v}\cdot\mathbf{v}=v^2", "same variable"),
+    (r"\mathbf{u}\cdot\mathbf{v}+v", "same variable"),
+    (r"\mathbf{u}\cdot\mathbf{v}\mathbf{u}\mathbf{v}", r"\\cdot or \\times"),
+    (r"\mathbf{u}\cdot\mathbf{v}^2", "exponent"),
+    (r"\mathbf{v}_1\cdot\mathbf{v}_2", "index or exponent"),
+])
+def test_bold_vectors_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)
+
+
+NORMS = [
+    (r"|\vec u|", "norm(u)"),                       # was abs(u), which acts on each element
+    (r"|\vec{u}|", "norm(u)"),
+    (r"\left|\vec u\right|", "norm(u)"),
+    (r"\|\vec u\|", "norm(u)"),
+    (r"\left\|\vec u\right\|", "norm(u)"),
+    (r"\lVert u\rVert", "norm(u)"),
+    (r"\left\lVert \vec{u} \right\rVert", "norm(u)"),
+    (r"\Vert u\Vert", "norm(u)"),
+    (r"\|x+y\|", "norm(x + y)"),
+    (r"|\mathbf{u}|\cdot|\mathbf{v}|", "abs(u)*abs(v)"),   # bold only counts next to \cdot or \times
+    (r"|\vec u|^2", "norm(u)^2"),
+    (r"\frac{\vec u}{|\vec u|}", "u/norm(u)"),
+    (r"|\vec u\times\vec v|", "norm(crossP(u,v))"),
+    (r"|\begin{pmatrix}3\\4\end{pmatrix}|", "norm([[3][4]])"),
+    (r"|\begin{pmatrix}3&4&5\end{pmatrix}|", "norm([[3,4,5]])"),
+    (r"\|\begin{pmatrix}3\\4\end{pmatrix}\|", "norm([[3][4]])"),
+    (r"|x|", "abs(x)"),                              # scalars keep abs
+    (r"|x|+|\vec u|+|y|", "abs(x) + norm(u) + abs(y)"),
+    (r"|x-1|\cdot|\vec u|", "abs(x - 1)*norm(u)"),
+]
+
+
+@pytest.mark.parametrize("latex,want", NORMS)
+def test_norms(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"\|\begin{pmatrix}1&2\\3&4\end{pmatrix}\|", "ambiguous"),
+    (r"\| \|", "Nothing between"),
+    (r"\lVert x", "pair up"),
+    (r"\lVert x \|", "pair up"),
+    (r"\|\vec u\|\vec u\|", "pair up"),
+])
+def test_norms_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)
+
+
+@pytest.mark.parametrize("latex,want", [
+    (r"x=1 \text{ and } y=2", "solve(x=1 and y=2,{x,y})"),
+    (r"x=1 \text{ ja } y=2", "solve(x=1 and y=2,{x,y})"),
+    (r"x=1 \text{ } y", "solve(x=y,x)"),
+    (r"\text{}x", "x"),
+    (r"x=1 \text{ . } y", "solve(x=y,x)"),
+    (r"x^2=2 \text{ for } x>0", "solve(x^2=2,x)|x>0"),
+    (r"x^2=2 \text{ where } x>0", "solve(x^2=2,x)|x>0"),
+    (r"\sqrt{x^2} \text{ kun } x<0", "√(x^2)|x<0"),
+    (r"5\text{ m}", "5*_m"),
+])
+def test_text_layout_kept(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex", [
+    r"x^2 \text{ meters squared}",
+    r"\text{area} = 5",
+    r"x+1 \text{ and so on}",
+    r"\textbf{x}+1",
+    r"x \textit{approximately} 3",
+    r"x=y \text{ andrew } z",
+    r"\mbox{speed} = 3",
+])
+def test_unknown_text_refused(latex):
+    with pytest.raises(LatexError, match=r"text|isn't a unit"):
+        plan(latex)
+
+
 UNITS = [
     (r"5\,\mathrm{m} + 3\,\mathrm{cm}", "5*_m + 3*_cm"),   # was 5*m + 3*cm
     (r"5\mathrm{m}", "5*_m"),
