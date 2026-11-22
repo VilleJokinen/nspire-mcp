@@ -10,7 +10,6 @@ The platform-specific parts are in nspire_clip_win.py and nspire_clip_mac.py.
 """
 from __future__ import annotations
 
-import contextlib
 import logging
 import re
 import sys
@@ -198,10 +197,23 @@ def _mode_ints(text: str) -> list[int] | None:
     return [int(i) for i in items]
 
 
-def _mode_names(mode: int, setting: int) -> tuple[str, str]:
-    """(3, 2) -> ("exponential format", "Scientific"), for messages."""
-    key, names = MODES.get(mode, (f"mode {mode}", {}))
-    return key.replace("_", " "), str(names.get(setting, setting))
+# The per-call mode override (Bridge.eval_in_modes) runs an expression as the
+# result of this temporary function, with its own local for setMode's reply.
+MODE_FUNC = "brgmodeeval"
+MODE_LOCAL = "brgmodeold"
+# Statements a function can't run (storing, defining, deleting, changing modes)
+# and ':' (the statement separator inside the one-line function).
+_FUNC_UNSAFE_RE = re.compile(r":|→|\b(?:Define|DelVar|Lock|Unlock|setMode|NewProb|Local|Func|EndFunc|Prgm|"
+                             r"EndPrgm|Return)\b", re.IGNORECASE)
+
+
+def mode_override_refusal(expr: str) -> str | None:
+    """Why angle/exact_mode can't be used with expr, or None if they can."""
+    if _FUNC_UNSAFE_RE.search(re.sub(r'"[^"]*"', '""', expr)):
+        return ("angle/exact_mode can't be used with an expression that stores, defines or deletes something "
+                "(a:=5, Define, DelVar) or contains ':': TI-Nspire runs the override inside a temporary "
+                "function, where those aren't allowed. Store in a separate call without them.")
+    return None
 
 
 def mode_setting(mode: int, text: str) -> str | int | None:
@@ -636,94 +648,43 @@ class Bridge:
             log.info("couldn't read the mode settings: %s", e)
             return None
 
-    def _apply_modes(self, settings: dict[int, int], timeout_s: float) -> list[tuple[int, int | None, str | None]]:
-        """setMode(mode, setting) for each, then getMode(mode) to check it stuck. One request.
+    def eval_in_modes(self, expr: str, settings: dict[int, int], timeout_s: float,
+                      raw: bool = False) -> tuple[str, list[str]]:
+        """Evaluate expr with document mode settings (MODES numbers, e.g. {2: 2} for
+        Degree) changed for this evaluation only. Returns (result, warnings).
 
-        Returns (mode, previous setting or None, problem or None) per mode, in order.
+        TI-Nspire accepts setMode only inside a function or program (error 550 from
+        math.evalStr otherwise), and puts the settings back itself when the function
+        returns. So expr runs as the result of a temporary function, defined, called
+        and deleted again in one request:
+            Define brgmodeeval()=Func:Local brgmodeold:brgmodeold:=setMode(2,2):Return expr:EndFunc
+        The document's settings never change. A statement that stores or defines can't
+        run inside a function: mode_override_refusal() refuses those before anything is
+        sent. Call inside session().
         """
-        modes = list(settings)
-        exprs = [f"setMode({m},{settings[m]})" for m in modes] + [f"getMode({m})" for m in modes]
-        res = self.eval_batch(exprs, timeout_s)
-        if self.last_timeout:
-            raise BridgeTimeout(self.last_timeout)
-        out = []
-        for k, m in enumerate(modes):
-            set_r, get_r = res[k], res[len(modes) + k]
-            prev = _mode_ints(set_r["result"]) if set_r["ok"] else None
-            now = _mode_ints(get_r["result"]) if get_r["ok"] else None
-            if not set_r["ok"]:
-                problem = set_r["error"]
-            elif not prev or len(prev) != 1:
-                problem = f"setMode returned {set_r['result']!r} instead of the previous setting"
-            elif now != [settings[m]]:
-                got = get_r["result"] if get_r["ok"] else get_r["error"]
-                problem = f"the setting didn't stay: getMode({m}) gave {got!r} afterwards"
-            else:
-                problem = None
-            out.append((m, prev[0] if prev and len(prev) == 1 else None, problem))
-        return out
-
-    @contextlib.contextmanager
-    def temp_modes(self, settings: dict[int, int], timeout_s: float = 5.0):
-        """Change document mode settings (MODES numbers, e.g. {2: 2} for Degree) for the
-        with block, and put the old settings back afterwards, also if the block raises.
-
-        Call inside session(), so no other request runs while the settings differ.
-        Raises ValueError before the block runs if TI-Nspire doesn't take a setting
-        through math.evalStr (whatever did change is put back first). Yields a list
-        that receives a warning for each setting that couldn't be put back; if the
-        block raised, those are added to its error message instead.
-        """
-        t = min(_clamp_timeout(timeout_s), 2.5)  # per expression; setMode and getMode answer at once
-        warnings: list[str] = []
         if not settings:
-            yield warnings
-            return
-        changed: list[tuple[int, int]] = []  # (mode, previous setting) to put back
-        problems = []
-        try:
-            applied = self._apply_modes(settings, t)
-        except BridgeTimeout as e:
-            which = ", ".join("{} {}".format(*_mode_names(m, s)) for m, s in settings.items())
-            raise BridgeTimeout(f"{e} The document may have been left with {which} if TI-Nspire runs the "
-                                f"request later: check the modes with nspire_status once it answers.") from None
-        for m, prev, problem in applied:
-            if prev is not None and prev != settings[m]:
-                changed.append((m, prev))
-            if problem:
-                key, name = _mode_names(m, settings[m])
-                problems.append(f"setMode({m},{settings[m]}) for {key} {name}: {problem}")
-        if problems:
-            warnings += self._restore_modes(changed, t)
-            raise ValueError("TI-Nspire didn't change the mode setting with setMode, so the override can't be "
-                             "used here (" + "; ".join(problems) + "). Leave angle/exact_mode out and ask the "
-                             "user to change the document's settings instead." + "".join(" " + w for w in warnings))
-        try:
-            yield warnings
-        except Exception as e:
-            extra = self._restore_modes(changed, t)
-            changed = []
-            if extra and type(e) in (ValueError, RuntimeError, BridgeTimeout):
-                raise type(e)(f"{e} {' '.join(extra)}") from None
-            for w in extra:
-                log.warning(w)
-            raise
-        finally:
-            warnings += self._restore_modes(changed, t)
-
-    def _restore_modes(self, changed: list[tuple[int, int]], timeout_s: float) -> list[str]:
-        """Put settings back; returns a warning for each that couldn't be."""
-        if not changed:
-            return []
-        try:
-            failed = [(m, s, problem) for (m, s), (_, _, problem)
-                      in zip(changed, self._apply_modes(dict(changed), timeout_s)) if problem]
-        except Exception as e:
-            failed = [(m, s, str(e)) for m, s in changed]
-        for m, s, problem in failed:
-            log.warning("couldn't put mode %d back to %d: %s", m, s, problem)
-        return [f"Couldn't put the document's {key} setting back to {name} ({problem}): ask the user to "
-                f"check TI-Nspire's document settings." for m, s, problem in failed for key, name in [_mode_names(m, s)]]
+            return self.eval_one(expr, timeout_s, raw), []
+        _check_expr(expr)
+        refusal = mode_override_refusal(expr)
+        if refusal:
+            raise ValueError(refusal)
+        sets = "".join(f":{MODE_LOCAL}:=setMode({m},{s})" for m, s in settings.items())
+        define = f"Define {MODE_FUNC}()=Func:Local {MODE_LOCAL}{sets}:Return {expr}:EndFunc"
+        res = self.eval_batch([define, f"{MODE_FUNC}()", f"DelVar {MODE_FUNC}"], timeout_s, raw)
+        if self.last_timeout:
+            raise BridgeTimeout(f"{self.last_timeout} The temporary function {MODE_FUNC} may be left in the "
+                                f"document; the next call with angle/exact_mode replaces and deletes it.")
+        defined, called, cleanup = res
+        warnings = [] if cleanup["ok"] else [
+            f"Couldn't delete the temporary function {MODE_FUNC} from the document ({cleanup['error']})."]
+        for r in (defined, called):
+            if not r["ok"]:
+                err = r["error"]
+                if any(k in err for k in ("error 450", "error 550", "error 565", "function", "program")):
+                    err += (" (with angle/exact_mode the expression runs inside a temporary TI-Nspire function; "
+                            "if it works without them, leave them out)")
+                raise ValueError(err)
+        return called["result"], warnings
 
     # -- variables
 

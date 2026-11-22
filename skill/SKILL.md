@@ -91,10 +91,12 @@ Call `nspire_status()` once at the start of a math session. It returns
   program; pick another name then. Leave it off when the user wants the
   definition kept.
 - `angle` (`"radian"`, `"degree"`, `"gradian"`) and `exact_mode` (`"auto"`,
-  `"exact"`, `"approx"`) set the document's mode for one call and put it back
-  afterwards, e.g. `nspire_eval("sin(30)", angle="degree")`. If TI-Nspire
-  doesn't accept the setting, the call fails saying so; then work in the
-  document's mode (`nspire_status` shows it) or ask the user to change it.
+  `"exact"`, `"approx"`) evaluate in that mode for one call without changing the
+  document's settings, e.g. `nspire_eval("sin(30)", angle="degree")`. They can't
+  be combined with anything that stores or defines (`a:=5`, `Define`): store in
+  one call, then evaluate with the mode in the next. If the call fails saying the
+  expression runs inside a temporary function, work in the document's mode
+  (`nspire_status` shows it) or ask the user to change it.
 - The prompt `check_solution(problem, solution)` walks through checking a
   student's worked solution step by step with `nspire_eval_batch(...,
   isolated=True)`.

@@ -105,7 +105,10 @@ class FakeNspire:
         self.evals: list[str] = []
         # Float6, Degree, ..., Exact, and a mode number this code doesn't know
         self.modes = {1: 7, 2: 2, 3: 1, 4: 1, 5: 3, 6: 1, 7: 1, 8: 1, 9: 4}
-        self.set_mode = "works"  # or "refused" (an error), "ignored" (answers but changes nothing)
+        # setMode inside the mode override's temporary function: "works", "refused" (an
+        # error), "ignored" (runs but changes nothing). At top level it's always error 550.
+        self.set_mode = "works"
+        self.mode_func: tuple[list[tuple[str, str]], str] | None = None  # (setMode args, returned expr)
         g = self.lua.globals()
         g.platform = self.lua.table(apiLevel="2.7", window=self.lua.table(invalidate=lambda self_: None))
         g.timer = self.lua.table(start=lambda p: None)
@@ -130,6 +133,28 @@ class FakeNspire:
 
     def eval_str(self, expr):
         self.evals.append(expr)
+        m = re.fullmatch(r"Define brgmodeeval[(][)]=Func:Local brgmodeold((?::brgmodeold:=setMode[(][0-9]+,[0-9]+[)])*)"
+                         r":Return (.*):EndFunc", expr)
+        if m:
+            self.mode_func = (re.findall(r"setMode[(]([0-9]+),([0-9]+)[)]", m.group(1)), m.group(2))
+            return "", None
+        if expr == "brgmodeeval()":
+            if self.mode_func is None:
+                return None, 1090
+            if self.set_mode == "refused":
+                return None, 450
+            sets, inner = self.mode_func
+            saved = dict(self.modes)
+            if self.set_mode == "works":
+                for mode, setting in sets:
+                    self.modes[int(mode)] = int(setting)
+            try:
+                return self.eval_str(inner)
+            finally:
+                self.modes = saved  # TI-Nspire puts the settings back when the function returns
+        if expr == "DelVar brgmodeeval":
+            self.mode_func = None
+            return "", None
         if expr == "copyduring":
             clip.set_text("copied while evaluating")
             return "cd", None
@@ -158,14 +183,8 @@ class FakeNspire:
         m = re.fullmatch(r"getMode\((\d+)\)", expr)
         if m:
             return str(self.modes[int(m.group(1))]), None
-        m = re.fullmatch(r"setMode\((\d+),(\d+)\)", expr)
-        if m:
-            if self.set_mode == "refused":
-                return None, 430
-            old = self.modes[int(m.group(1))]
-            if self.set_mode == "works":
-                self.modes[int(m.group(1))] = int(m.group(2))
-            return str(old), None
+        if re.fullmatch(r"setMode[(][0-9]+,[0-9]+[)]", expr):
+            return None, 550  # invalid outside function or program
         if expr == "modes?":  # what the modes are while an expression runs
             return ",".join(str(self.modes[k]) for k in (2, 5)), None
         if expr.startswith("DelVar "):
@@ -412,65 +431,65 @@ def test_busy_hint_window():
     assert b._busy_hint(now) is None
 
 
-def test_temp_modes_set_and_put_back(env):
+def test_set_mode_only_inside_a_function(env):
+    # like the real CAS: math.evalStr refuses setMode at top level (error 550)
     kind, ns, b = env
-
-    def work():
-        with b.temp_modes({2: 1, 5: 2}) as warnings:
-            during = b.eval_one("modes?", 3)
-        return during, warnings
-    during, warnings = b.session(work)
-    assert during == "1,2" and warnings == []
-    assert (ns.modes[2], ns.modes[5]) == (2, 3)
-    assert clip.text() == "user text"
-    # already the document's setting: nothing to put back afterwards
-    ns.evals.clear()
-
-    def same():
-        with b.temp_modes({2: 2}):
-            pass
-    b.session(same)
-    assert ns.evals.count("setMode(2,2)") == 1 and ns.modes[2] == 2
-
-
-def test_temp_modes_put_back_when_the_block_fails(env):
-    kind, ns, b = env
-
-    def work():
-        with b.temp_modes({2: 3}):
-            b.eval_one("bad", 3)
-    with pytest.raises(ValueError, match="syntax error"):
-        b.session(work)
+    with pytest.raises(ValueError, match="error 550"):
+        b.session(lambda: b.eval_one("setMode(2,1)", 3))
     assert ns.modes[2] == 2
 
 
-@pytest.mark.parametrize("how", ["refused", "ignored"])
-def test_temp_modes_detects_set_mode_not_working(env, how):
+def test_eval_in_modes(env):
     kind, ns, b = env
-    ns.set_mode = how
-    ran = []
+    during, warnings = b.session(lambda: b.eval_in_modes("modes?", {2: 1, 5: 2}, 3))
+    assert during == "1,2" and warnings == []
+    # the document's settings never changed, and the temporary function is gone
+    assert (ns.modes[2], ns.modes[5]) == (2, 3) and ns.mode_func is None
+    assert "setMode(2,1)" not in ns.evals and "brgmodeeval()" in ns.evals
+    assert clip.text() == "user text"
+    # no settings: an ordinary evaluation
+    ns.evals.clear()
+    assert b.session(lambda: b.eval_in_modes("2+2", {}, 3)) == ("4", [])
+    assert ns.evals == ["2+2"]
 
-    def work():
-        with b.temp_modes({2: 1, 5: 2}):
-            ran.append(b.eval_one("2+2", 3))
-    with pytest.raises(ValueError, match="didn't change the mode setting with setMode") as e:
-        b.session(work)
-    assert ran == [] and "angle Radian" in str(e.value)
-    assert (ns.modes[2], ns.modes[5]) == (2, 3)
+
+def test_eval_in_modes_expression_fails(env):
+    kind, ns, b = env
+    with pytest.raises(ValueError, match="syntax error"):
+        b.session(lambda: b.eval_in_modes("bad", {2: 3}, 3))
+    assert ns.modes[2] == 2 and ns.mode_func is None
     assert clip.text() == "user text"
 
 
-def test_temp_modes_dead_bridge(env):
+def test_eval_in_modes_set_mode_refused_in_function(env):
+    kind, ns, b = env
+    ns.set_mode = "refused"
+    with pytest.raises(ValueError, match="runs inside a temporary TI-Nspire function"):
+        b.session(lambda: b.eval_in_modes("2+2", {2: 1, 5: 2}, 3))
+    assert (ns.modes[2], ns.modes[5]) == (2, 3) and ns.mode_func is None
+    assert clip.text() == "user text"
+
+
+@pytest.mark.parametrize("expr", ["a:=5", "Define f(x)=x", "DelVar a", "5→a", "1:2"])
+def test_eval_in_modes_refuses_stores(env, expr):
+    kind, ns, b = env
+    ns.evals.clear()
+    with pytest.raises(ValueError, match="stores, defines or deletes"):
+        b.session(lambda: b.eval_in_modes(expr, {2: 1}, 3))
+    assert ns.evals == []  # nothing sent
+
+
+def test_eval_in_modes_store_inside_a_string_is_fine():
+    assert nb.mode_override_refusal('"a:=5"&"x"') is None
+    assert nb.mode_override_refusal("sin(30)") is None
+
+
+def test_eval_in_modes_dead_bridge(env):
     kind, ns, b = env
     ns.close()
-    ran = []
-
-    def work():
-        with b.temp_modes({2: 1}):
-            ran.append(1)
-    with pytest.raises(nb.BridgeTimeout, match="may have been left with angle Radian"):
-        b.session(work)
-    assert ran == []
+    with pytest.raises(nb.BridgeTimeout, match="brgmodeeval may be left in the document"):
+        b.session(lambda: b.eval_in_modes("2+2", {2: 1}, 0.5))
+    assert ns.modes[2] == 2
 
 
 def test_vars_and_clear(env):

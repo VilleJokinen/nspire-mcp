@@ -134,9 +134,12 @@ return objects publish an output schema, so clients get typed `structuredContent
   nothing, if it would replace a stored function or program (those can't be read back).
   Whatever couldn't be put back comes back as a warning.
 - **`angle`** (`"radian"`, `"degree"`, `"gradian"`) and **`exact_mode`** (`"auto"`,
-  `"exact"`, `"approx"`) change the document's mode for one call with `setMode` and put
-  the old setting back afterwards, also when the call fails. If TI-Nspire doesn't take
-  the setting, the call fails with an error saying so, and nothing is evaluated.
+  `"exact"`, `"approx"`) evaluate in that mode for one call without changing the
+  document's settings. TI-Nspire only allows `setMode` inside a function, so the
+  expression runs inside a temporary one (`brgmodeeval`, deleted again right away), and
+  TI-Nspire restores the mode when it returns. That's also why they can't be used with
+  something that stores or defines (`a:=5`, `Define`, `f(x)=…`): that's refused before
+  anything runs.
 
 There's also an MCP prompt, `check_solution(problem, solution)`, that has Claude check a
 student's worked solution step by step with `nspire_eval_batch(..., isolated=True)`.
@@ -418,9 +421,11 @@ and pyright (`pyrightconfig.json`); see `.github/workflows/tests.yml`.
   exact values, come from the document's settings: `nspire_status` shows its `modes`
   (change them in TI-Nspire's document settings, or have Claude pass `angle` /
   `exact_mode` for one call).
-- **"TI-Nspire didn't change the mode setting with setMode":** this TI-Nspire version
-  doesn't accept `setMode` from the bridge script, so `angle` / `exact_mode` can't be
-  used; change the document's settings instead. `selftest.py` checks this.
+- **"…runs inside a temporary TI-Nspire function" with `angle` / `exact_mode`:** this
+  TI-Nspire version or this expression doesn't work inside a function. Leave them out and
+  change the document's settings instead. `selftest.py` checks the override.
+- **"angle/exact_mode can't be used with an expression that stores…":** store or define
+  in one call without them, then evaluate with them in another.
 - **"isolated=True: f is a function stored in the document":** an isolated call would
   replace something it can't put back. Use another name, or run it without `isolated`
   if you do want it replaced.
