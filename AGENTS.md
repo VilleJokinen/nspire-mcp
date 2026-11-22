@@ -140,10 +140,13 @@ hotkey.
   `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
   throughout. Validation undoes what it changes in the bridge document and warns
   about steps that read variables the new document won't have.
-- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.2,<2" pytest -q tests`
+- Offline tests: `uv run --no-project --with pytest --with "sympy>=1.13" --with "antlr4-python3-runtime==4.11.*" --with "pywin32>=306" --with lupa --with "mcp>=1.30,<2" pytest -q tests`
   (CI runs them on Ubuntu and Windows, again on Windows with the versions pinned in
-  `server.py.lock`, and runs `ruff check` with `ruff.toml`; tests needing pywin32,
-  lupa or mcp are skipped without them). Lint locally with `uvx ruff check .`. When you change the translator, add the expected command to
+  `server.py.lock`, and runs `ruff check` with `ruff.toml` and pyright with
+  `pyrightconfig.json`; tests needing pywin32, lupa or mcp are skipped without them).
+  Lint locally with `uvx ruff check .` and type-check with
+  `uv run --no-project --with-requirements server.py --with pytest --with lupa --with "pyright[nodejs]==1.1.414" pyright`
+  (expect 0 errors; the warnings are known SymPy/pywin32 typing gaps). When you change the translator, add the expected command to
   `tests/test_plan.py`, and a case to `LATEX_CASES` in `selftest.py` when the
   result needs the real CAS.
 - After changing a script's PEP 723 header, run `uv lock --script <file>` so its

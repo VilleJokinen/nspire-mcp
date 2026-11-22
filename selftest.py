@@ -143,5 +143,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8")  # ∫ and − in piped output
+    # ∫ and − in piped output (sys.stdout is a TextIOWrapper here; typeshed says TextIO)
+    sys.stdout.reconfigure(encoding="utf-8")  # pyright: ignore[reportAttributeAccessIssue]
     sys.exit(main())

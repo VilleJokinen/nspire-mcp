@@ -150,7 +150,7 @@ class FakeBridge:
             n = m.group(1).lower()
             if n in self.BUILTINS:
                 raise ValueError("TI-Nspire error: error 680")
-            return '"%s"' % self.vars.get(n, ("NONE", None))[0]
+            return f'"{self.vars.get(n, ("NONE", None))[0]}"'
         m = re.fullmatch(r"DelVar (\w+)", expr)
         if m:
             self.vars.pop(m.group(1).lower(), None)

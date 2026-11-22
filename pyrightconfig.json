@@ -1,0 +1,48 @@
+// Type checking with pyright (CI runs it; see .github/workflows/tests.yml).
+// A pyrightconfig.json rather than pyproject.toml, so uv doesn't treat this folder as a project.
+{
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Windows",
+  // CI type-checks on Linux, where pywin32 can't be installed; its types come from
+  // pyright's bundled stubs on any OS, so the missing source isn't worth a warning.
+  "reportMissingModuleSource": "none",
+  "executionEnvironments": [
+    // SymPy's types don't say what a Basic holds (.name, args, iterating, indexing) or what
+    // parse_latex returns. Warnings, not errors, until a pass with focused ignores.
+    {
+      "root": "nspire_latex.py",
+      "extraPaths": ["."],
+      "reportArgumentType": "warning",
+      "reportAssignmentType": "warning",
+      "reportAttributeAccessIssue": "warning",
+      "reportGeneralTypeIssues": "warning",
+      "reportIndexIssue": "warning",
+      "reportOperatorIssue": "warning",
+      "reportReturnType": "warning"
+    },
+    // pywin32's stubs: PyHANDLE where int is declared, no None for security attributes,
+    // str | bytes / str | None results; plus Optional values pyright can't narrow.
+    {
+      "root": "nspire_bridge.py",
+      "extraPaths": ["."],
+      "reportArgumentType": "warning",
+      "reportCallIssue": "warning",
+      "reportOperatorIssue": "warning"
+    },
+    {"root": "hotkey.py", "extraPaths": ["."], "reportArgumentType": "warning"},
+    {"root": "nspire_keys.py", "extraPaths": ["."], "reportArgumentType": "warning"},
+    // Tests hand in fakes for Bridge, set attributes on lupa's Lua tables and modules,
+    // and index results they have just asserted on.
+    {
+      "root": "tests",
+      "extraPaths": ["."],
+      "reportArgumentType": "none",
+      "reportAttributeAccessIssue": "none",
+      "reportOperatorIssue": "none",
+      "reportOptionalMemberAccess": "none",
+      "reportOptionalSubscript": "none"
+    },
+    {"root": "."}
+  ]
+}

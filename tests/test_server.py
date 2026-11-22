@@ -112,7 +112,7 @@ def test_instructions():
 def test_bad_action_rejected_before_the_bridge(monkeypatch):
     fake = FakeBridge({})
     monkeypatch.setattr(server, "bridge", fake)
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="action"):
         run(server.mcp.call_tool("nspire_latex", {"latex": "x^2=4", "action": "bogus"}))
     assert fake.calls == []
 
