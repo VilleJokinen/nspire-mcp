@@ -105,11 +105,14 @@ hotkey.
   Everything else (protocol, batching, late replies) is shared. `Bridge.modes()` reads `getMode(0)` and never raises (None on
   failure); the setting numbers in `MODES` come from TI's Reference Guide and haven't
   all been checked against the real CAS (the angle mode is the most certain).
-  `with bridge.temp_modes({2: 2}) as warnings:` (inside a session) sets modes with
-  `setMode`, checks them with `getMode`, and puts the old settings back on exit, also
-  on an exception; it raises ValueError before the block if TI-Nspire doesn't take a
-  setting. Whether `math.evalStr` accepts `setMode` at all is checked only by
-  `selftest.py` against the real CAS. A timeout while an earlier timed-out request is
+  `bridge.eval_in_modes(expr, {2: 2}, timeout_s)` (inside a session) evaluates with
+  other mode settings for that one expression. `math.evalStr` refuses `setMode` at top
+  level (error 550, "invalid outside function or program"), so `expr` runs as the
+  result of a temporary function, `Define brgmodeeval()=Func:Local brgmodeold:brgmodeold:=setMode(2,2):Return expr:EndFunc`,
+  called and deleted (`DelVar`) in the same request. TI-Nspire puts the settings back
+  itself when the function returns, so the document's settings never change.
+  Statements a function can't run (`:=`, `→`, `Define`, `DelVar`, `:`) are refused up
+  front by `mode_override_refusal()`. `selftest.py` checks this on the real CAS. A timeout while an earlier timed-out request is
   still within `LATE_WINDOW_S` says that request is probably still being computed
   (`Bridge._busy_hint`): `math.evalStr` blocks bridge.lua until it returns.
 - `nspire_chars.py`: TI-Nspire's private-use characters (`NS_*`), `readable()`,

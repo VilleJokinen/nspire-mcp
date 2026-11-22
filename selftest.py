@@ -14,16 +14,16 @@ On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
 LaTeX cases need the CAS and are skipped without it. Variables stored in the
 open document (e.g. x:=3) can change answers; DelVar them if a case fails oddly.
 It also reads the mode settings, stores and deletes brgselftest (a variable of its
-own), and switches the angle and Auto/Approximate modes for one evaluation each to
-check that setMode works through the bridge (nspire_eval's angle / exact_mode), then
-checks they were put back.
+own), and evaluates once each in another angle mode and in Approximate mode (the
+per-call override behind nspire_eval's angle / exact_mode, which runs setMode inside a
+temporary function), then checks the document's settings didn't change.
 """
 import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nspire_bridge import Bridge, BridgeTimeout  # noqa: E402
+from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
 from nspire_plot import Func, prepare, sample  # noqa: E402
 
@@ -68,9 +68,10 @@ LATEX_CASES = [
     (r"12 \bmod 5", "auto", "2"),
     # dot and cross products (dotP, crossP), and units (TI-Nspire's _km, _m, _kg, _gm)
     (r"\begin{pmatrix}1\\2\\3\end{pmatrix}\cdot\begin{pmatrix}4\\5\\6\end{pmatrix}", "auto", "32"),
-    (r"\begin{pmatrix}1&0&0\end{pmatrix}\times\begin{pmatrix}0&1&0\end{pmatrix}", "auto", "[0,0,1]"),
-    (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000"),
-    (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4"),
+    (r"\begin{pmatrix}1&0&0\end{pmatrix}\times\begin{pmatrix}0&1&0\end{pmatrix}", "auto", "[[0,0,1]]"),
+    # unit conversions come back as decimals
+    (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000."),
+    (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4."),
 ]
 
 
@@ -125,7 +126,8 @@ def _names() -> set[str]:
 
 def document_checks(report: Report, cas: bool) -> None:
     """Mode settings, a variable round trip, and the per-call mode override (setMode
-    through math.evalStr, which nspire_eval's angle/exact_mode rely on). Inside the session."""
+    inside a temporary function, which nspire_eval's angle/exact_mode rely on). Inside
+    the session."""
     modes = bridge.modes()
     report(modes is not None, "modes (getMode(0))", repr(modes))
 
@@ -146,25 +148,24 @@ def document_checks(report: Report, cas: bool) -> None:
             report(False, "variables round trip", str(e))
 
     if modes is None or "angle" not in modes:
-        report(False, "setMode override", "skipped: the mode settings couldn't be read")
+        report(False, "mode override", "skipped: the mode settings couldn't be read")
         return
-    # Switch to the other angle mode for one evaluation, then check it was put back.
+    # Evaluate once in the other angle mode, then check the document's settings didn't change.
     to_degree = modes["angle"] != "Degree"
     expr = "sin(30)" if to_degree else "sin(π/6)"
     try:
-        with bridge.temp_modes({2: 2 if to_degree else 1}) as warnings:
-            got = bridge.eval_one(expr, 5)
-        with bridge.temp_modes({5: 2}) as warnings2:  # Approximate
-            third = bridge.eval_one("1/3", 5)
+        got, warnings = bridge.eval_in_modes(expr, {2: 2 if to_degree else 1}, 5)
+        third, warnings2 = bridge.eval_in_modes("1/3", {5: 2}, 5)  # Approximate
     except ValueError as e:
-        report(False, "setMode override", str(e))
+        report(False, "mode override", str(e))
         return
     after = bridge.modes()
+    left = MODE_FUNC in _names()
     want = ("1/2",) if cas else ("0.5", "1/2")
-    report(norm(got) in want, f"setMode override: {expr} in {'Degree' if to_degree else 'Radian'}", repr(got))
-    report(third.startswith("0.333"), "setMode override: 1/3 in Approximate", repr(third))
-    report(after == modes and not warnings and not warnings2, "setMode override: modes put back",
-           f"{after}" + "".join(f"; {w}" for w in warnings + warnings2))
+    report(norm(got) in want, f"mode override: {expr} in {'Degree' if to_degree else 'Radian'}", repr(got))
+    report(third.startswith("0.333"), "mode override: 1/3 in Approximate", repr(third))
+    report(after == modes and not left and not warnings and not warnings2, "mode override: document unchanged",
+           f"{after}, {MODE_FUNC} left: {left}" + "".join(f"; {w}" for w in warnings + warnings2))
 
 
 def cas_checks(report: Report, plans: list) -> list | None:

@@ -35,8 +35,8 @@ from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, T
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
-from nspire_bridge import (VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_setting,  # noqa: E402
-                           parse_var_info, readable)
+from nspire_bridge import (VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_override_refusal,  # noqa: E402
+                           mode_setting, parse_var_info, readable)
 
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
@@ -54,7 +54,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   Define f(x)=..., DelVar a) is put back afterwards, so the user's document isn't left with it.
   Leave it off when the user wants the definition kept.
 - angle ("radian"/"degree"/"gradian") and exact_mode ("auto"/"exact"/"approx") on nspire_eval and
-  nspire_latex override the document's mode for that one call; it's put back afterwards.
+  nspire_latex evaluate in that mode for that one call; the document's settings aren't changed.
+  They can't be used with input that stores or defines (a:=5, Define, f(x)=...).
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
 - nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
@@ -326,10 +327,31 @@ async def nspire_status() -> BridgeStatus:
 
 _ISOLATED_DOC = Field(description="Scratch work: put back afterwards whatever the call stores or deletes "
                                   "(a:=5, Define f(x)=..., DelVar a), so the user's document is left as it was.")
-_ANGLE_DOC = Field(description="Angle mode for this call only (setMode); the document's setting is put back "
-                               "afterwards. Leave out to use the document's.")
-_EXACT_DOC = Field(description="Auto/Exact/Approximate mode for this call only (setMode); put back afterwards. "
-                               "Leave out to use the document's.")
+_ANGLE_DOC = Field(description="Angle mode for this call only; the document's setting isn't changed. Not for "
+                               "expressions that store or define. Leave out to use the document's.")
+_EXACT_DOC = Field(description="Auto/Exact/Approximate mode for this call only; the document's setting isn't "
+                               "changed. Not for expressions that store or define. Leave out to use the document's.")
+
+
+class _InModes:
+    """Stands in for the bridge in nspire_latex.run_plan: every evaluation runs with the
+    call's mode settings (Bridge.eval_in_modes), and its warnings are collected."""
+
+    def __init__(self, bridge: Bridge, settings: dict[int, int]):
+        self.bridge, self.settings = bridge, settings
+        self.warnings: list[str] = []
+
+    def eval_one(self, expr: str, timeout_s: float, raw: bool = False) -> str:
+        result, warnings = self.bridge.eval_in_modes(expr, self.settings, timeout_s, raw)
+        self.warnings += [w for w in warnings if w not in self.warnings]
+        return result
+
+
+def _check_mode_override(settings: dict[int, int], command: str) -> None:
+    """Refuse angle/exact_mode for a command that can't run inside a function, before any bridge use."""
+    refusal = mode_override_refusal(command) if settings else None
+    if refusal:
+        raise ValueError(refusal)
 
 
 async def _isolation_module(isolated: bool):
@@ -357,19 +379,20 @@ async def nspire_eval(expr: str, timeout_s: float = 5,
     isolated=True is for scratch work (checking a value, trying a definition): whatever the
     expression stores or deletes is put back afterwards, so the user's document isn't left
     with it. It refuses to run, changing nothing, if that would replace a stored function or
-    program (those can't be put back). angle / exact_mode change the document's mode for
-    this call only. The result text is the first content block, as without these options;
+    program (those can't be put back). angle / exact_mode evaluate in that mode for this
+    call only, without changing the document's settings (TI-Nspire runs the expression
+    inside a temporary function, so it can't store or define anything: a:=5 or Define with
+    them is refused). The result text is the first content block, as without these options;
     anything that couldn't be put back comes as a second block starting "Warnings:" (and in
     structured output as {result, warnings}): tell the user.
     """
-    nm = await _isolation_module(isolated)
     settings = _mode_settings(angle, exact_mode)
+    _check_mode_override(settings, expr)
+    nm = await _isolation_module(isolated)
 
     def work():
-        # isolation outside the mode change: values are saved and restored in the document's own modes
-        with isolated_names(bridge, nm, [expr], timeout_s) as iso, \
-                bridge.temp_modes(settings, timeout_s) as mode_warnings:
-            result = bridge.eval_one(expr, timeout_s)
+        with isolated_names(bridge, nm, [expr], timeout_s) as iso:
+            result, mode_warnings = bridge.eval_in_modes(expr, settings, timeout_s)
         return result, mode_warnings + iso.all_warnings()
     log.info("eval %r%s", expr, " (isolated)" if isolated else "")
     result, warnings = await asyncio.to_thread(bridge.session, work)
@@ -562,8 +585,9 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     is put back afterwards, so the user's document isn't left with it; it refuses to run,
     changing nothing, if that would replace a stored function. Anything that couldn't be put
     back is in warnings. angle ("radian"/"degree"/"gradian") and exact_mode
-    ("auto"/"exact"/"approx") set the document's mode for this call only, e.g. angle="degree"
-    for \\sin(30), and put it back afterwards.
+    ("auto"/"exact"/"approx") evaluate in that mode for this call only, e.g. angle="degree"
+    for \\sin(30), without changing the document's settings; not for input that stores or
+    defines (f(x)=..., a:=5).
     """
     # Imported here, not at startup: sympy takes seconds to load and the MCP
     # client times out a server that's slow to answer initialize.
@@ -574,16 +598,17 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
         p = await asyncio.to_thread(lx.plan, latex, action, var, order, point)
     except lx.LatexError as e:
         raise ValueError(str(e)) from None
+    settings = _mode_settings(angle, exact_mode)
+    _check_mode_override(settings, p.command)
     # scan_names (and the undo, when isolated), imported outside the session
     notes_mod = await _isolation_module(True) if isolated else await asyncio.to_thread(_import_optional, "nspire_notes")
-    settings = _mode_settings(angle, exact_mode)
 
     def work():
         with isolated_names(bridge, notes_mod if isolated else None, [p.command], timeout_s) as iso:
             warnings = doc_warnings(bridge, p.command, timeout_s, notes_mod, isolated, angle is not None)
-            with bridge.temp_modes(settings, timeout_s) as mode_warnings:
-                run = lx.run_plan(bridge, p, timeout_s)
-        return run, warnings + mode_warnings + iso.all_warnings()
+            in_modes = _InModes(bridge, settings) if settings else None
+            run = lx.run_plan(in_modes or bridge, p, timeout_s)
+        return run, warnings + (in_modes.warnings if in_modes else []) + iso.all_warnings()
     run, warnings = await asyncio.to_thread(bridge.session, work)
     # LaTeX conversion after the session, with the user's clipboard already restored
     out = await asyncio.to_thread(lx.format_answer, run)

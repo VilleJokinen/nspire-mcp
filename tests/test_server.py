@@ -44,10 +44,8 @@ class FakeBridge:
         self.sessions += 1
         return work()
 
-    # the real mode override, on top of this fake's eval_batch
-    temp_modes = nb.Bridge.temp_modes
-    _apply_modes = nb.Bridge._apply_modes
-    _restore_modes = nb.Bridge._restore_modes
+    # the real mode override, on top of this fake's eval_one/eval_batch
+    eval_in_modes = nb.Bridge.eval_in_modes
 
     def _reply(self, expr: str) -> tuple[bool, str]:
         self.calls.append(expr)
@@ -394,8 +392,10 @@ def test_structured_results_match_schemas(monkeypatch):
 
 class CasBridge(FakeBridge):
     """Just enough of a CAS for isolation and modes: getVarInfo, getType, DelVar,
-    Define, :=, reading a variable, getMode/setMode. self.modes_seen records the
-    angle and auto/approx settings each other expression ran under."""
+    Define, :=, reading a variable, getMode, and the mode override's temporary function
+    (setMode works only inside it, as on the real CAS, and the modes come back when it
+    returns). self.modes_seen records the angle and auto/approx settings each other
+    expression ran under."""
 
     def __init__(self, stored=None, modes=None, set_mode="works", undeletable=()):
         super().__init__({})
@@ -404,6 +404,7 @@ class CasBridge(FakeBridge):
         self.set_mode = set_mode
         self.undeletable = set(undeletable)
         self.modes_seen: dict[str, tuple[int, int]] = {}
+        self.mode_func: tuple[list[tuple[str, str]], str] | None = None  # (setMode args, returned expr)
 
     def _reply(self, expr):
         self.calls.append(expr)
@@ -415,12 +416,28 @@ class CasBridge(FakeBridge):
             return True, f'"{self.vars.get(m.group(1).lower(), ("NONE", None))[0]}"'
         if m := re.fullmatch(r"getMode\((\d+)\)", expr):
             return True, str(self.modes.get(int(m.group(1)), 1))
-        if m := re.fullmatch(r"setMode\((\d+),(\d+)\)", expr):
+        if m := re.fullmatch(r"Define brgmodeeval\(\)=Func:Local brgmodeold((?::brgmodeold:=setMode\(\d+,\d+\))*)"
+                             r":Return (.*):EndFunc", expr):
+            self.mode_func = (re.findall(r"setMode\((\d+),(\d+)\)", m.group(1)), m.group(2))
+            return True, ""
+        if expr == "brgmodeeval()":
+            if self.mode_func is None:
+                return False, "error 1090 (function is not defined)"
             if self.set_mode == "refused":
-                return False, "error 430 (invalid for the current mode settings)"
-            old = self.modes.get(int(m.group(1)), 1)
-            self.modes[int(m.group(1))] = int(m.group(2))
-            return True, str(old)
+                return False, "error 450 (invalid in a function or current expression)"
+            sets, inner = self.mode_func
+            saved = dict(self.modes)
+            for mode, setting in sets:
+                self.modes[int(mode)] = int(setting)
+            try:
+                return self._reply(inner)
+            finally:
+                self.modes = saved
+        if expr == "DelVar brgmodeeval":
+            self.mode_func = None
+            return True, ""
+        if re.fullmatch(r"setMode\((\d+),(\d+)\)", expr):
+            return False, "error 550 (invalid outside function or program)"
         self.modes_seen[expr] = (self.modes.get(2, 1), self.modes.get(5, 1))
         if m := re.fullmatch(r"DelVar (\w+)", expr):
             if m.group(1).lower() in self.undeletable:
@@ -517,35 +534,49 @@ def test_latex_isolated(monkeypatch):
 
 def test_eval_angle_override(monkeypatch):
     fake = use(monkeypatch, CasBridge(modes={2: 1, 5: 1}))
-    run(server.nspire_eval("sin(30)", angle="degree", exact_mode="approx"))
+    r = run(server.nspire_eval("sin(30)", angle="degree", exact_mode="approx"))
+    assert r.structuredContent == {"result": "<sin(30)>"}
     assert fake.modes_seen["sin(30)"] == (2, 2) and fake.modes == {2: 1, 5: 1}
+    # one temporary function, defined, called and deleted again; no top-level setMode
+    assert fake.batches[-1] == [
+        "Define brgmodeeval()=Func:Local brgmodeold:brgmodeold:=setMode(2,2):brgmodeold:=setMode(5,2)"
+        ":Return sin(30):EndFunc", "brgmodeeval()", "DelVar brgmodeeval"]
+    assert fake.mode_func is None
     before = len(fake.calls)
     run(server.nspire_eval("sin(31)"))
     assert fake.calls[before:] == ["sin(31)"] and fake.modes_seen["sin(31)"] == (1, 1)
-    # put back when the expression fails
+    # the expression's own error, and the function is deleted all the same
     with pytest.raises(ValueError, match="syntax error"):
         run(server.nspire_eval("bad", angle="gradian"))
-    assert fake.modes == {2: 1, 5: 1}
+    assert fake.modes == {2: 1, 5: 1} and fake.mode_func is None
 
 
 def test_mode_override_refused(monkeypatch):
     fake = use(monkeypatch, CasBridge(set_mode="refused"))
     r = call("nspire_eval", {"expr": "sin(30)", "angle": "degree"})
-    assert r.isError and "didn't change the mode setting with setMode" in r.content[0].text
-    assert "sin(30)" not in fake.calls
+    assert r.isError and "runs inside a temporary TI-Nspire function" in r.content[0].text
+    assert "sin(30)" not in fake.calls and fake.mode_func is None
     from mcp.server.fastmcp.exceptions import ToolError
     with pytest.raises(ToolError, match="angle"):
         call_args = {"expr": "1", "angle": "turns"}
         run(server.mcp.call_tool("nspire_eval", call_args))
 
 
-def test_isolation_outside_the_mode_change(monkeypatch):
-    # values are saved and written back in the document's own modes
-    fake = use(monkeypatch, CasBridge({"a": ("NUM", "3")}, modes={2: 1, 5: 1}))
-    run(server.nspire_eval("a:=7", isolated=True, exact_mode="approx"))
-    order = [c for c in fake.calls if c in ("a", "setMode(5,2)", "a:=7", "setMode(5,1)", "a:=3")]
-    assert order == ["a", "setMode(5,2)", "a:=7", "setMode(5,1)", "a:=3"]
-    assert fake.modes_seen["a:=3"] == (1, 1) and fake.vars["a"] == ("NUM", "3")
+@pytest.mark.parametrize("expr", ["a:=7", "Define f(x)=x^2", "DelVar a", "7→a", "7=:a", "a:=7:a+1"])
+def test_mode_override_refuses_stores(monkeypatch, expr):
+    # a store can't run inside the temporary function: refused before anything is sent
+    fake = use(monkeypatch, CasBridge({"a": ("NUM", "3")}))
+    with pytest.raises(ValueError, match="stores, defines or deletes"):
+        run(server.nspire_eval(expr, isolated=True, exact_mode="approx"))
+    assert fake.calls == [] and fake.vars == {"a": ("NUM", "3")}
+
+
+def test_latex_mode_override_refuses_definitions(monkeypatch):
+    fake = use(monkeypatch, CasBridge())
+    for latex in ("f(x)=x^2", "a:=5"):
+        with pytest.raises(ValueError, match="stores, defines or deletes"):
+            run(server.nspire_latex(latex, angle="degree"))
+    assert fake.calls == []
 
 
 def test_latex_angle_override_skips_angle_warning(monkeypatch):
@@ -554,7 +585,22 @@ def test_latex_angle_override_skips_angle_warning(monkeypatch):
     assert "angle mode is Degree" in out["warnings"][0]
     out = run(server.nspire_latex(r"\sin(x)", angle="radian"))
     assert "warnings" not in out and fake.modes == {2: 2, 5: 1}
-    assert fake.modes_seen["sin(x)"] == (1, 1)
+    assert fake.modes_seen["sin(x)"] == (1, 1) and fake.mode_func is None
+
+
+def test_latex_mode_override_covers_the_approx(monkeypatch):
+    # run_plan's approx() of an exact answer runs in the same modes
+    class B(CasBridge):
+        def _reply(self, expr):
+            if expr in ("π/4", "approx(π/4)"):
+                self.calls.append(expr)
+                self.modes_seen[expr] = (self.modes.get(2, 1), self.modes.get(5, 1))
+                return True, "π/4" if expr == "π/4" else "0.785398"
+            return super()._reply(expr)
+    fake = use(monkeypatch, B(modes={2: 1, 5: 1}))
+    out = run(server.nspire_latex(r"\frac{\pi}{4}", angle="degree"))
+    assert out["result"] == "π/4" and out["approx"] == "0.785398"
+    assert fake.modes_seen == {"π/4": (2, 1), "approx(π/4)": (2, 1)} and fake.modes == {2: 1, 5: 1}
 
 
 # ------------------------------------------------------------ prompts
