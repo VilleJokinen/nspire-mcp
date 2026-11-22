@@ -742,13 +742,13 @@ class _Pre:
         if kind == "vec":
             return ("sym", None)
         if kind == "matrix":
-            rows, cols = len(payload), len(payload[0])
+            rows, cols = len(payload), len(payload[0])  # pyright: ignore[reportArgumentType, reportIndexIssue, reportOptionalSubscript]
             if rows == 1 and cols >= 2:
                 return ("row", cols)
             if cols == 1 and rows >= 2:
                 return ("col", rows)
-        if kind == "vecop" and payload[0] == "cross":
-            return payload[3]
+        if kind == "vecop" and payload[0] == "cross":  # pyright: ignore[reportIndexIssue, reportOptionalSubscript]
+            return payload[3]  # pyright: ignore[reportIndexIssue, reportOptionalSubscript]
         return None
 
     def _vector_ops(self, s: str) -> str:
@@ -937,7 +937,7 @@ def _parse_one(src: str) -> sp.Basic:
         with sp.evaluate(False):
             # strict: fail if the parser stops early. Without it, "2x ) + 7" reads as 2x
             # and "x^2 = 4 ] ..." as x^2 = 4, silently dropping the rest.
-            return parse_latex(src, strict=True, backend="antlr")
+            return parse_latex(src, strict=True, backend="antlr")  # pyright: ignore[reportReturnType]
     except Exception as e:
         first = str(e).splitlines()[0] if str(e) else type(e).__name__
         if first == "Invalid LaTeX":
@@ -992,7 +992,7 @@ def _bound_symbols(e: sp.Basic) -> set[str]:
     names = set()
     for node in sp.preorder_traversal(e):
         if isinstance(node, (sp.Integral, sp.Sum, sp.Product)):
-            names |= {str(lim[0]) for lim in node.limits}
+            names |= {str(lim[0]) for lim in node.limits}  # pyright: ignore[reportIndexIssue]
         elif isinstance(node, sp.Limit):
             names.add(str(node.args[1]))
     return names
@@ -1004,8 +1004,8 @@ def _ode_indep(raw, dep: str, all_syms: set[str]) -> str:
     for e in raw:  # written as an argument: y'(t) = y(t)
         for node in sp.preorder_traversal(e):
             if isinstance(node, AppliedUndef) and dep_fn.fullmatch(node.func.__name__) \
-                    and len(node.args) == 1 and node.args[0].is_Symbol and node.args[0].name != dep:
-                return node.args[0].name
+                    and len(node.args) == 1 and node.args[0].is_Symbol and node.args[0].name != dep:  # pyright: ignore[reportAttributeAccessIssue]
+                return node.args[0].name  # pyright: ignore[reportAttributeAccessIssue]
     others = {s for s in all_syms if s.rstrip("'") != dep}
     if "x" in others:
         return "x"
@@ -1074,13 +1074,13 @@ def parse(latex: str) -> Parsed:
     ph_values: dict[str, tuple[str, object]] = {}
     for name, (kind, payload) in pre.placeholders.items():
         if kind in ("matrix", "det"):
-            ph_values[name] = (kind, sp.ImmutableMatrix([[parse1(c) for c in row] for row in payload]))
+            ph_values[name] = (kind, sp.ImmutableMatrix([[parse1(c) for c in row] for row in payload]))  # pyright: ignore[reportGeneralTypeIssues]
         elif kind == "evalat":
-            ph_values[name] = (kind, tuple(None if x is None else parse1(x) for x in payload))
+            ph_values[name] = (kind, tuple(None if x is None else parse1(x) for x in payload))  # pyright: ignore[reportGeneralTypeIssues]
         elif kind == "list":
-            ph_values[name] = (kind, [parse1(x) for x in payload])
+            ph_values[name] = (kind, [parse1(x) for x in payload])  # pyright: ignore[reportGeneralTypeIssues]
         elif kind == "vecop":
-            ph_values[name] = (kind, (payload[0], parse1(payload[1]), parse1(payload[2])))
+            ph_values[name] = (kind, (payload[0], parse1(payload[1]), parse1(payload[2])))  # pyright: ignore[reportIndexIssue]
 
     # T(t) = 20+80e^{-0.1t} defines T: only f g h F G H are functions otherwise, so
     # T(t) would be the product T*t. A name on the left called with bare variables
@@ -1089,13 +1089,13 @@ def parse(latex: str) -> Parsed:
     if len(raw) == 1 and isinstance(raw[0], sp.Eq) and isinstance(raw[0].lhs, AppliedUndef):
         head, rhs = raw[0].lhs, raw[0].rhs
         n = head.func.__name__
-        rhs_names = {s.name for s in rhs.free_symbols} | {f.func.__name__ for f in rhs.atoms(AppliedUndef)}
-        if n not in ("e", "i") and "'" not in n and n not in pre.placeholders \
-                and head.args and all(a.is_Symbol and a.name != n for a in head.args) \
-                and (pre.assign or (all(a.name in rhs_names for a in head.args) and n not in rhs_names)):
+        rhs_names = {s.name for s in rhs.free_symbols} | {f.func.__name__ for f in rhs.atoms(AppliedUndef)}  # pyright: ignore[reportAttributeAccessIssue]
+        if (n not in ("e", "i") and "'" not in n and n not in pre.placeholders
+                and head.args and all(a.is_Symbol and a.name != n for a in head.args)  # pyright: ignore[reportAttributeAccessIssue]
+                and (pre.assign or (all(a.name in rhs_names for a in head.args) and n not in rhs_names))):  # pyright: ignore[reportAttributeAccessIssue]
             if n in ("x", "y", "z", "t") and not pre.assign and n not in _FUNC_NAMES:
                 # Defining x would turn the document's main variable into a function: ask
-                args = ",".join(a.name for a in head.args)
+                args = ",".join(a.name for a in head.args)  # pyright: ignore[reportAttributeAccessIssue]
                 raise LatexError(f"{n}({args})=... would define {n} as a function in the document, replacing the "
                                  f"variable {n}. Write {n}({args}):=... to define it, or {n}\\cdot({args}) for a product.")
             fn_heads.add(n)
@@ -1109,7 +1109,7 @@ def parse(latex: str) -> Parsed:
     # primes make an ODE only alongside an equation; a bare f'(x) is a derivative
     has_rel = any(isinstance(e, Relational) for e in raw)
     ode_dep = sorted(prime_names)[0][0] if prime_names and has_rel else None
-    all_syms = {s.name for e in raw for s in e.free_symbols}
+    all_syms = {s.name for e in raw for s in e.free_symbols}  # pyright: ignore[reportAttributeAccessIssue]
 
     def fix(e):
         bound = _bound_symbols(e)
@@ -1120,13 +1120,13 @@ def parse(latex: str) -> Parsed:
                 if n in ph_values:
                     kind, v = ph_values[n]
                     if kind == "evalat":
-                        return _eval_at(*v)
+                        return _eval_at(*v)  # pyright: ignore[reportGeneralTypeIssues]
                     if kind == "list":
-                        return TiList(*[fix(x) for x in v], evaluate=False)
+                        return TiList(*[fix(x) for x in v], evaluate=False)  # pyright: ignore[reportGeneralTypeIssues]
                     if kind == "vecop":
-                        op, a, b = v
+                        op, a, b = v  # pyright: ignore[reportGeneralTypeIssues]
                         return sp.Function("dotP" if op == "dot" else "crossP")(walk(a), walk(b))
-                    m = v.applyfunc(walk)
+                    m = v.applyfunc(walk)  # pyright: ignore[reportAttributeAccessIssue]
                     return sp.Function("det")(m) if kind == "det" else m
                 if n in pre.placeholders:
                     kind, name = pre.placeholders[n]
@@ -1134,7 +1134,7 @@ def parse(latex: str) -> Parsed:
                         return TiVec(sp.Symbol(name))
                     if kind == "unit":
                         return TiUnit(name)
-                    if name.lower() in _FUNC_WORDS:
+                    if name.lower() in _FUNC_WORDS:  # pyright: ignore[reportAttributeAccessIssue]
                         raise LatexError(f"Write {name} with its argument in parentheses, e.g. {name}(x).")
                     return sp.Symbol(name)
                 if n not in bound:
@@ -1388,7 +1388,7 @@ class NspirePrinter(StrPrinter):
         return ("-" if neg else "") + s
 
     _print_MatAdd = _print_Add
-    _print_MatMul = _print_Mul
+    _print_MatMul = _print_Mul  # pyright: ignore[reportAssignmentType]
 
     def _print_Pow(self, e, rational=False):
         b, x = e.args
@@ -1408,7 +1408,7 @@ class NspirePrinter(StrPrinter):
         exp = self._print(x) if (x.is_Symbol or (x.is_Integer and x >= 0)) else f"({self._print(x)})"
         return f"{self._paren(b, self.ATOM)}^{exp}"
 
-    _print_MatPow = _print_Pow
+    _print_MatPow = _print_Pow  # pyright: ignore[reportAssignmentType]
 
     def _print_Relational(self, e):
         op = {"==": "=", "!=": "≠", "<=": "≤", ">=": "≥", "<": "<", ">": ">"}[e.rel_op]
@@ -1432,7 +1432,7 @@ class NspirePrinter(StrPrinter):
             return n
         n = _FN_MAP.get(n, n)
         if isinstance(e, AppliedUndef):
-            n = _clean_name(n) if "'" not in n else n
+            n = _clean_name(n) if "'" not in n else n  # pyright: ignore[reportArgumentType, reportOperatorIssue]
         return f"{n}({','.join(self._print(a) for a in e.args)})"
 
     def _print_Integral(self, e):
@@ -1449,7 +1449,7 @@ class NspirePrinter(StrPrinter):
             counts = list(expr.variable_count) + counts
             expr = expr.expr
         merged: list[list] = []
-        for v, n in counts:
+        for v, n in counts:  # pyright: ignore[reportGeneralTypeIssues]
             n = int(n) if n.is_number else n
             if merged and merged[-1][0] == v:
                 merged[-1][1] = merged[-1][1] + n

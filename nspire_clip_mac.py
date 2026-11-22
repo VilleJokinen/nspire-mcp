@@ -206,7 +206,7 @@ class ProcessLock:
         deadline = time.monotonic() + max(timeout_s, 0)
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # pyright: ignore[reportAttributeAccessIssue]
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     os.close(fd)

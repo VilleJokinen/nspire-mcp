@@ -148,7 +148,7 @@ def list_windows() -> list[WinInfo]:
         pid = win32process.GetWindowThreadProcessId(h)[1]
         if pid not in images:
             images[pid] = process_image(pid)
-        out.append(WinInfo(h, title, win32gui.GetClassName(h), pid, images[pid]))
+        out.append(WinInfo(h, title, win32gui.GetClassName(h), pid, images[pid]))  # pyright: ignore[reportArgumentType]
     win32gui.EnumWindows(cb, None)
     return out
 

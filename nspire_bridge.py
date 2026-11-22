@@ -236,7 +236,7 @@ def parse_var_info(text: str) -> list[list[str]]:
             if ch == '"':
                 quoted = False
             else:
-                cell += ch
+                cell += ch  # pyright: ignore[reportOperatorIssue]
         elif ch == '"':
             quoted = True
             cell = cell or ""
@@ -305,7 +305,7 @@ class _LateReplyWatcher(threading.Thread):
         rid = _reply_id(text)
         if rid in self.pending:
             del self.pending[rid]  # answered: no further reply will come for it
-            if self._put_back(text):
+            if self._put_back(text):  # pyright: ignore[reportArgumentType]
                 return _seq()
         elif not is_bridge_traffic(text) and seq != _ours_seq:
             # The user copied something: that is what to put back now.
@@ -398,7 +398,7 @@ class Bridge:
         self._batch_checked = False
         snap = clip_snapshot()
         text = snap.text()
-        self._pending.pop(_reply_id(text), None)
+        self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
         if is_bridge_traffic(text):
             # A late reply to a request that timed out, or traffic left by a
             # process that died mid-request: not the user's. Use what this
@@ -414,7 +414,7 @@ class Bridge:
         text = clip_get()
         ours = _seq() == _ours_seq or is_bridge_traffic(text)
         if ours:
-            self._pending.pop(_reply_id(text), None)
+            self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
             clip_restore(saved)
         if self._pending:
             # A timed-out request may still be answered by an old bridge.lua.
@@ -435,7 +435,7 @@ class Bridge:
         snap = clip_snapshot()
         text = snap.text()
         if is_bridge_traffic(text):
-            self._pending.pop(_reply_id(text), None)
+            self._pending.pop(_reply_id(text), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
         else:
             self._saved = snap
         self._seen_seq = cur
@@ -479,7 +479,7 @@ class Bridge:
                 # A late reply to an earlier request that timed out replaced
                 # ours (an old bridge.lua writes whatever it finishes). The
                 # script is free again: ask again.
-                self._pending.pop(_reply_id(clip), None)
+                self._pending.pop(_reply_id(clip), None)  # pyright: ignore[reportArgumentType, reportCallIssue]
             else:
                 # The user copied something meanwhile. Keep it to put back at
                 # the end, then ask again.

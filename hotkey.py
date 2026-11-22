@@ -36,6 +36,7 @@ import tkinter as tk
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Started without a console (--gui-script / uvw), stdout and stderr are None.
@@ -477,7 +478,7 @@ class TrayIcon(threading.Thread):
     def _add(self) -> bool:
         flags = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
         try:
-            win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, (self.hwnd, 0, flags, self.CALLBACK, self.hicon, self.tip))
+            win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, (self.hwnd, 0, flags, self.CALLBACK, self.hicon, self.tip))  # pyright: ignore[reportArgumentType]
             return True
         except Exception as e:  # taskbar not up yet (start at login): TaskbarCreated adds it later
             print(f"tray icon not added yet: {e}", file=sys.stderr)
@@ -510,9 +511,9 @@ class TrayIcon(threading.Thread):
             x, y = win32gui.GetCursorPos()
             # Without this the menu doesn't close when you click elsewhere.
             with contextlib.suppress(Exception):
-                win32gui.SetForegroundWindow(self.hwnd)
+                win32gui.SetForegroundWindow(self.hwnd)  # pyright: ignore[reportArgumentType]
             flags = win32con.TPM_RETURNCMD | win32con.TPM_NONOTIFY | win32con.TPM_RIGHTBUTTON
-            cmd = win32gui.TrackPopupMenu(m, flags, x, y, 0, self.hwnd, None)
+            cmd = win32gui.TrackPopupMenu(m, flags, x, y, 0, self.hwnd, None)  # pyright: ignore[reportArgumentType]
             win32gui.PostMessage(self.hwnd, win32con.WM_NULL, 0, 0)
         finally:
             win32gui.DestroyMenu(m)  # pyright: ignore[reportCallIssue]
@@ -521,7 +522,7 @@ class TrayIcon(threading.Thread):
 
     def _on_destroy(self, hwnd, msg, wparam, lparam):
         with contextlib.suppress(Exception):
-            win32gui.Shell_NotifyIcon(win32gui.NIM_DELETE, (self.hwnd, 0))
+            win32gui.Shell_NotifyIcon(win32gui.NIM_DELETE, (self.hwnd, 0))  # pyright: ignore[reportArgumentType]
         win32gui.PostQuitMessage(0)
         return 0
 
@@ -659,7 +660,7 @@ class ActionPicker:
                               anchor="w", justify="left", wraplength=420)
         self.title.pack(fill="x")
         self.query = tk.StringVar(master=w)
-        entry_opts = dict(bg=BG2, fg=FG, insertbackground=FG, relief="flat", font=("Segoe UI", 11),
+        entry_opts: dict[str, Any] = dict(bg=BG2, fg=FG, insertbackground=FG, relief="flat", font=("Segoe UI", 11),
                           highlightthickness=1, highlightbackground=BG2, highlightcolor=ACC)
         self.entry = tk.Entry(w, textvariable=self.query, **entry_opts)
         self.entry.pack(fill="x", pady=(6, 4))
@@ -1099,7 +1100,7 @@ def main():
     if sys.platform != "win32":
         sys.exit("hotkey.py works on Windows only (it uses Windows global hotkeys).")
 
-    single = win32event.CreateMutex(None, False, "Local\\nspire_hotkey_single_instance")
+    single = win32event.CreateMutex(None, False, "Local\\nspire_hotkey_single_instance")  # pyright: ignore[reportArgumentType]
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         print("hotkey.py is already running.", file=sys.stderr)
         return
