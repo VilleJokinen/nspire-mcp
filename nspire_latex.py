@@ -19,7 +19,8 @@ import re
 from dataclasses import dataclass, field
 
 import sympy as sp
-from mpmath.libmp import prec_to_dps, to_str as mpf_to_str
+from mpmath.libmp import prec_to_dps
+from mpmath.libmp import to_str as mpf_to_str
 from sympy.core.function import AppliedUndef
 from sympy.core.relational import Relational
 from sympy.parsing.latex import parse_latex

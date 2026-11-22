@@ -31,10 +31,27 @@ from nspire_bridge import TIMEOUT_MAX_S, TIMEOUT_MIN_S, Bridge, clip_set, readab
 # Typing needs Windows (SendInput); scan_names and the step checks work anywhere
 # (server.py's nspire_latex warnings use scan_names on macOS too).
 if sys.platform == "win32":
-    from nspire_keys import (FILE_DIALOG_CLASS, chord, control_text, describe_window, find_nspire_windows,
-                             focus_nspire, focused_control, foreground_is, foreground_window, is_file_name_box,
-                             menu_area, menu_changed, new_dialogs, process_windows, type_text, wait_for_popup,
-                             window_class, window_open, window_title)
+    from nspire_keys import (
+        FILE_DIALOG_CLASS,
+        chord,
+        control_text,
+        describe_window,
+        find_nspire_windows,
+        focus_nspire,
+        focused_control,
+        foreground_is,
+        foreground_window,
+        is_file_name_box,
+        menu_area,
+        menu_changed,
+        new_dialogs,
+        process_windows,
+        type_text,
+        wait_for_popup,
+        window_class,
+        window_open,
+        window_title,
+    )
     UNSUPPORTED = None
 else:
     UNSUPPORTED = ("nspire_notes works on Windows only: it types into the TI-Nspire window with Windows "

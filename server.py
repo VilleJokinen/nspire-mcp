@@ -35,9 +35,7 @@ from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, T
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
-from nspire_bridge import (VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_setting,  # noqa: E402
-                           parse_var_info, readable)
-
+from nspire_bridge import VALUE_MAX_CHARS, VALUE_TYPES, Bridge, BridgeTimeout, mode_setting, parse_var_info, readable  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
 log = logging.getLogger("nspire")

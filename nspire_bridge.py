@@ -44,7 +44,6 @@ class BridgeTimeout(Exception):
 # the LaTeX translator imports on any platform). Re-exported for callers.
 from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable, to_cas_chars  # noqa: E402,F401
 
-
 # ---------------------------------------------------------------- clipboard
 
 # The platform primitives (clipboard access, change counter, snapshots, the
