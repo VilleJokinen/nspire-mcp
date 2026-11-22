@@ -1,6 +1,7 @@
 # /// script
 # requires-python = ">=3.11,<3.15"
-# dependencies = ["pywin32>=306", "sympy>=1.13", "antlr4-python3-runtime==4.11.*"]
+# dependencies = ["pywin32>=306; sys_platform == 'win32'", "sympy>=1.13", "antlr4-python3-runtime==4.11.*",
+#                 "matplotlib>=3.8"]
 # ///
 """Open nspire_bridge.tns in TI-Nspire and start the LaTeX hotkey.
 

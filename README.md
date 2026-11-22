@@ -139,12 +139,31 @@ uv run --gui-script hotkey.py      # no console
 | --- | --- |
 | Ctrl+Alt+Shift+L | solve/evaluate the LaTeX on the clipboard |
 | Ctrl+Alt+Shift+K | same, but the decimal value is the answer |
+| Ctrl+Alt+Shift+J | pick an action for it: factor, expand, solve, diff, integrate, limit, … |
 | Ctrl+Alt+Shift+Q | quit |
 
 The answer shows in a popup in the bottom-right corner (click it to close) and
-replaces the clipboard as LaTeX. Options: `--copy text` (TI-Nspire text instead of
-LaTeX), `--copy none` (leave the clipboard alone), `--hotkey ctrl+alt+f9`,
-`--approx-hotkey …`, `--quit-hotkey …`. Only one copy runs at a time.
+replaces the clipboard as LaTeX. The popup draws the answer as math with
+matplotlib's mathtext; matrices, and anything else mathtext can't draw, show as
+text. A hotkey pressed while an answer is still coming shows "Still solving…"
+instead of starting another request.
+
+**Action picker.** Ctrl+Alt+Shift+J opens a small list next to the mouse pointer.
+Type to filter it, then press Enter or click an action; Esc closes it. Actions that
+need a variable (solve, diff, integrate, limit, taylor, zeros, …) ask for it next,
+prefilled with the one the solver would pick (several for a system: `x, y`). limit
+also asks where the variable goes (default 0), taylor the order (default 5).
+
+**Tray icon.** A green √ in the notification area (it may be under the taskbar's ^
+arrow). Click it for the last 10 answers, newest first: clicking one copies it again,
+as LaTeX, or as TI-Nspire text with `--copy text`. The menu also has Solve clipboard,
+Pick an action, Clear history and Quit.
+
+Options: `--copy text` (TI-Nspire text instead of LaTeX), `--copy none` (leave the
+clipboard alone; a click in the tray menu still copies), `--hotkey ctrl+alt+f9`,
+`--approx-hotkey …`, `--actions-hotkey …`, `--quit-hotkey …` (a letter, digit or
+F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--plain` (answers as text,
+matplotlib never loaded). Only one copy runs at a time.
 
 ### What the LaTeX solver understands
 
@@ -370,7 +389,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_notes.py` | builds a Notes page of text and math boxes |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |
-| `hotkey.py` | clipboard hotkey and popup |
+| `hotkey.py` | clipboard hotkey, answer popup, action picker and tray icon |
 | `launch.py` | opens the document and starts the hotkey (desktop shortcut) |
 | `setup.ps1` | one-step setup |
 | `selftest.py` | end-to-end check |
