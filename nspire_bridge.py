@@ -9,6 +9,7 @@ bridge's traffic. Traffic is kept out of clipboard history and cloud sync.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import re
@@ -388,6 +389,12 @@ def _mode_ints(text: str) -> list[int] | None:
     return [int(i) for i in items]
 
 
+def _mode_names(mode: int, setting: int) -> tuple[str, str]:
+    """(3, 2) -> ("exponential format", "Scientific"), for messages."""
+    key, names = MODES.get(mode, (f"mode {mode}", {}))
+    return key.replace("_", " "), str(names.get(setting, setting))
+
+
 def mode_setting(mode: int, text: str) -> str | int | None:
     """Name of one mode's setting from getMode(mode)'s reply, e.g. (2, '2') -> 'Degree'."""
     nums = _mode_ints(text)
@@ -679,8 +686,25 @@ class Bridge:
             if reposts < MAX_REPOSTS:
                 reposts += 1
                 seq = self._post(request)
-        self._pending[rid] = time.monotonic() + LATE_WINDOW_S
-        raise BridgeTimeout(f"No reply from the TI-Nspire bridge within {timeout_s:g} s. {TIMEOUT_HINT}")
+        now = time.monotonic()
+        busy = self._busy_hint(now)
+        self._pending[rid] = now + LATE_WINDOW_S
+        raise BridgeTimeout(f"No reply from the TI-Nspire bridge within {timeout_s:g} s. {busy or TIMEOUT_HINT}")
+
+    def _busy_hint(self, now: float) -> str | None:
+        """Timeout hint for when an earlier request timed out less than LATE_WINDOW_S ago.
+
+        math.evalStr blocks bridge.lua until it returns, so while that earlier request
+        is still being computed nothing else is answered. Call inside session(): the
+        late-reply watcher's pending requests are handed back to self._pending there.
+        """
+        started = [t - LATE_WINDOW_S for t in self._pending.values() if t > now]
+        if not started:
+            return None
+        return (f"A request that timed out {now - min(started):.0f} s ago is probably still being computed in "
+                f"TI-Nspire, and the bridge can't answer anything else until it finishes. Wait a little and "
+                f"try again, with a longer timeout_s for heavy commands. While TI-Nspire computes, the bridge "
+                f"page's tick count stops rising. If it never answers: {TIMEOUT_HINT}")
 
     def ping(self, timeout_s: float = 3.0) -> dict:
         """Returns {alive, api_level, cas, protocol}. protocol 2 = bridge.lua with batch support."""
@@ -805,6 +829,95 @@ class Bridge:
         except Exception as e:
             log.info("couldn't read the mode settings: %s", e)
             return None
+
+    def _apply_modes(self, settings: dict[int, int], timeout_s: float) -> list[tuple[int, int | None, str | None]]:
+        """setMode(mode, setting) for each, then getMode(mode) to check it stuck. One request.
+
+        Returns (mode, previous setting or None, problem or None) per mode, in order.
+        """
+        modes = list(settings)
+        exprs = [f"setMode({m},{settings[m]})" for m in modes] + [f"getMode({m})" for m in modes]
+        res = self.eval_batch(exprs, timeout_s)
+        if self.last_timeout:
+            raise BridgeTimeout(self.last_timeout)
+        out = []
+        for k, m in enumerate(modes):
+            set_r, get_r = res[k], res[len(modes) + k]
+            prev = _mode_ints(set_r["result"]) if set_r["ok"] else None
+            now = _mode_ints(get_r["result"]) if get_r["ok"] else None
+            if not set_r["ok"]:
+                problem = set_r["error"]
+            elif not prev or len(prev) != 1:
+                problem = f"setMode returned {set_r['result']!r} instead of the previous setting"
+            elif now != [settings[m]]:
+                got = get_r["result"] if get_r["ok"] else get_r["error"]
+                problem = f"the setting didn't stay: getMode({m}) gave {got!r} afterwards"
+            else:
+                problem = None
+            out.append((m, prev[0] if prev and len(prev) == 1 else None, problem))
+        return out
+
+    @contextlib.contextmanager
+    def temp_modes(self, settings: dict[int, int], timeout_s: float = 5.0):
+        """Change document mode settings (MODES numbers, e.g. {2: 2} for Degree) for the
+        with block, and put the old settings back afterwards, also if the block raises.
+
+        Call inside session(), so no other request runs while the settings differ.
+        Raises ValueError before the block runs if TI-Nspire doesn't take a setting
+        through math.evalStr (whatever did change is put back first). Yields a list
+        that receives a warning for each setting that couldn't be put back; if the
+        block raised, those are added to its error message instead.
+        """
+        t = min(_clamp_timeout(timeout_s), 2.5)  # per expression; setMode and getMode answer at once
+        warnings: list[str] = []
+        if not settings:
+            yield warnings
+            return
+        changed: list[tuple[int, int]] = []  # (mode, previous setting) to put back
+        problems = []
+        try:
+            applied = self._apply_modes(settings, t)
+        except BridgeTimeout as e:
+            which = ", ".join("{} {}".format(*_mode_names(m, s)) for m, s in settings.items())
+            raise BridgeTimeout(f"{e} The document may have been left with {which} if TI-Nspire runs the "
+                                f"request later: check the modes with nspire_status once it answers.") from None
+        for m, prev, problem in applied:
+            if prev is not None and prev != settings[m]:
+                changed.append((m, prev))
+            if problem:
+                key, name = _mode_names(m, settings[m])
+                problems.append(f"setMode({m},{settings[m]}) for {key} {name}: {problem}")
+        if problems:
+            warnings += self._restore_modes(changed, t)
+            raise ValueError("TI-Nspire didn't change the mode setting with setMode, so the override can't be "
+                             "used here (" + "; ".join(problems) + "). Leave angle/exact_mode out and ask the "
+                             "user to change the document's settings instead." + "".join(" " + w for w in warnings))
+        try:
+            yield warnings
+        except Exception as e:
+            extra = self._restore_modes(changed, t)
+            changed = []
+            if extra and type(e) in (ValueError, RuntimeError, BridgeTimeout):
+                raise type(e)(f"{e} {' '.join(extra)}") from None
+            for w in extra:
+                log.warning(w)
+            raise
+        finally:
+            warnings += self._restore_modes(changed, t)
+
+    def _restore_modes(self, changed: list[tuple[int, int]], timeout_s: float) -> list[str]:
+        """Put settings back; returns a warning for each that couldn't be."""
+        if not changed:
+            return []
+        try:
+            failed = [(m, s, problem) for (m, s), (_, _, problem)
+                      in zip(changed, self._apply_modes(dict(changed), timeout_s)) if problem]
+        except Exception as e:
+            failed = [(m, s, str(e)) for m, s in changed]
+        for m, s, problem in failed:
+            log.warning("couldn't put mode %d back to %d: %s", m, s, problem)
+        return [f"Couldn't put the document's {key} setting back to {name} ({problem}): ask the user to "
+                f"check TI-Nspire's document settings." for m, s, problem in failed for key, name in [_mode_names(m, s)]]
 
     # -- variables
 

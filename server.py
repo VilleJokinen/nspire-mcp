@@ -10,18 +10,19 @@ Windows clipboard. Run with:  uv run --script server.py
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import logging
 import os
 import re
 import sys
 import threading
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
-from mcp.types import ToolAnnotations  # noqa: E402
+from mcp.types import CallToolResult, TextContent, ToolAnnotations  # noqa: E402
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
@@ -39,6 +40,12 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's Windows PC, used
 - Requests travel through the Windows clipboard: each call briefly replaces it and puts it back.
 - Variables and functions stored in the open document (a:=5, Define f(x)=...) persist and are
   substituted into every answer. If an answer looks oddly specific, check nspire_vars.
+- For scratch work (checking a step, trying a definition, testing values) pass isolated=True to
+  nspire_eval, nspire_eval_batch or nspire_latex: whatever the call defines or deletes (a:=5,
+  Define f(x)=..., DelVar a) is put back afterwards, so the user's document isn't left with it.
+  Leave it off when the user wants the definition kept.
+- angle ("radian"/"degree"/"gradian") and exact_mode ("auto"/"exact"/"approx") on nspire_eval and
+  nspire_latex override the document's mode for that one call; it's put back afterwards.
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
 - nspire_notes types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
@@ -65,13 +72,227 @@ class NotesStep(TypedDict, total=False):
     var: Annotated[str, Field(description="With latex: the variable(s), as in nspire_latex.")]
 
 
+AngleMode = Literal["radian", "degree", "gradian"]
+ExactMode = Literal["auto", "exact", "approx"]
+# setMode numbers, as in nspire_bridge.MODES: mode 2 is the angle, mode 5 auto/approximate/exact.
+_ANGLE_SETTINGS = {"radian": 1, "degree": 2, "gradian": 3}
+_EXACT_SETTINGS = {"auto": 1, "approx": 2, "exact": 3}
+
+
+def _mode_settings(angle: str | None, exact_mode: str | None) -> dict[int, int]:
+    out = {}
+    if angle is not None:
+        out[2] = _ANGLE_SETTINGS[angle]
+    if exact_mode is not None:
+        out[5] = _EXACT_SETTINGS[exact_mode]
+    return out
+
+
+# ---------------------------------------------------------------- result types
+#
+# Return types are TypedDicts so FastMCP publishes an outputSchema. It turns a
+# top-level TypedDict into a model whose missing optional keys come out as null in
+# structuredContent (and checks that against the schema), so those keys allow None.
+# TypedDicts inside a list are validated as they are: a missing key stays missing.
+# Keys a TypedDict doesn't declare are dropped from structuredContent: declare them all.
+# Optional keys go in a total=False subclass: NotRequired[...] isn't seen in the
+# string annotations that `from __future__ import annotations` makes.
+
+class _BridgeStatus(TypedDict):
+    alive: bool
+
+
+class BridgeStatus(_BridgeStatus, total=False):
+    api_level: str | None
+    cas: bool | None
+    protocol: int | None
+    modes: dict[str, str | int] | None
+    error: str | None
+
+
+class _EvalResult(TypedDict):
+    result: str
+
+
+class EvalResult(_EvalResult, total=False):
+    warnings: list[str] | None
+
+
+class _BatchItem(TypedDict):
+    expr: str
+    ok: bool
+
+
+class BatchItem(_BatchItem, total=False):
+    result: str
+    error: str
+    warnings: list[str]
+
+
+class _VarEntry(TypedDict):
+    name: str
+    type: str
+    library: str | None
+    locked: bool | None
+
+
+class VarEntry(_VarEntry, total=False):
+    value: str
+
+
+class ClearError(TypedDict):
+    name: str
+    error: str
+
+
+class ClearResult(TypedDict):
+    deleted: list[str]
+    errors: list[ClearError]
+
+
+class _LatexResult(TypedDict):
+    action: str
+    nspire: str
+    result: str
+    result_latex: str | None
+
+
+class LatexResult(_LatexResult, total=False):
+    approx: str | None
+    approx_latex: str | None
+    warnings: list[str] | None
+
+
+# ---------------------------------------------------------------- isolated evaluation
+
+_DELVAR_RE = re.compile(r"\bDelVar\s+([^:]*)", re.IGNORECASE)
+_VAR_NAME_RE = re.compile(r"[^\W\d]\w*(?:\.\w+)?")
+
+
+def changed_names(notes_mod, cmds: list[str]) -> list[list[str]]:
+    """Per command, the names it stores (a:=5, Define f(x)=..., 5→a) or deletes (DelVar a).
+    notes_mod is nspire_notes (scan_names). Over-detecting only costs a round trip."""
+    out = []
+    for c in cmds:
+        names = list(notes_mod.scan_names(c).defines)
+        for m in _DELVAR_RE.finditer(c):
+            names += [n for n in _VAR_NAME_RE.findall(m.group(1)) if n not in names]
+        out.append(names)
+    return out
+
+
+class _FailFast:
+    """Bridge stand-in for the undo: after one request times out, the rest fail at once
+    instead of each waiting out its own timeout."""
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self.dead: str | None = None
+
+    def eval_one(self, expr: str, timeout_s: float, raw: bool = False) -> str:
+        if self.dead:
+            raise BridgeTimeout(self.dead)
+        try:
+            return self._bridge.eval_one(expr, timeout_s, raw)
+        except BridgeTimeout as e:
+            self.dead = str(e)
+            raise
+
+
+# nspire_notes words its undo warnings for checking Notes steps.
+_UNDO_WORDING = (("Checking the steps redefined", "The isolated call redefined"),
+                 ("after checking the steps", "after the isolated call"))
+
+
+class Isolation:
+    """What an isolated call changes in the document, saved before it runs."""
+
+    def __init__(self, names: list[list[str]]):
+        self.names = names                         # per command, as changed_names() gives them
+        self.saved: dict[str, Any] = {}            # lower-case name -> nspire_notes._Saved
+        self.warnings: dict[str, list[str]] = {}   # lower-case name -> what couldn't be put back
+
+    def all_warnings(self) -> list[str]:
+        return [w for ws in self.warnings.values() for w in ws]
+
+    def first_use(self, key: str) -> int:
+        """Index of the first command that changes the name key (lower case)."""
+        return next(i for i, names in enumerate(self.names) if key in (n.lower() for n in names))
+
+
+def _undo_all(bridge, notes_mod, iso: Isolation, timeout_s: float) -> None:
+    ff = _FailFast(bridge)
+    for key in reversed(list(iso.saved)):
+        for w in notes_mod._undo(ff, {key: iso.saved[key]}, timeout_s):
+            for old, new in _UNDO_WORDING:
+                w = w.replace(old, new)
+            iso.warnings.setdefault(key, []).append(w)
+
+
+@contextlib.contextmanager
+def isolated_names(bridge, notes_mod, cmds: list[str], timeout_s: float):
+    """Save every name cmds store or delete, run the with block, then put them back.
+
+    notes_mod is nspire_notes (scan_names, _bridge_vars, _type_of, _snapshot, _undo), or
+    None for no isolation. Call inside bridge.session(), before changing modes (values are
+    read and written back in the document's own mode). Raises ValueError before anything
+    runs if a name holds something that can't be put back: a function, a program, or a
+    value that can't be read. Yields an Isolation whose warnings are filled in after the
+    block; if the block raised ValueError or BridgeTimeout, they're added to its message.
+    """
+    iso = Isolation(changed_names(notes_mod, cmds) if notes_mod is not None else [[] for _ in cmds])
+    if not any(iso.names):
+        yield iso
+        return
+    t = min(float(timeout_s), 5.0)
+    existing = notes_mod._bridge_vars(bridge, t)  # None: couldn't list them, so ask getType name by name
+    for name in dict.fromkeys(n for names in iso.names for n in names):
+        key = name.lower()
+        if key in iso.saved:
+            continue
+        typ = existing.get(key, "NONE") if existing is not None else notes_mod._type_of(bridge, name, t)
+        others = existing is None or any(k != key for k in existing)
+        kind = {"FUNC": "a function", "PRGM": "a program"}.get(typ.upper())
+        sv = None if kind else notes_mod._snapshot(bridge, name, typ, t, others)
+        if kind or (typ.upper() != "NONE" and sv.value is None):
+            what = kind or f"a variable ({typ}) whose value couldn't be read"
+            raise ValueError(f"isolated=True: {name} is {what} stored in the document, which can't be saved and "
+                             f"put back, so this call would change it for good. Use another name, or ask the "
+                             f"user before running it without isolated.")
+        iso.saved[key] = sv
+    undone = False
+    try:
+        yield iso
+    except Exception as e:
+        _undo_all(bridge, notes_mod, iso, t)
+        undone = True
+        if iso.warnings and type(e) in (ValueError, BridgeTimeout):
+            raise type(e)(f"{e} ({' '.join(iso.all_warnings())})") from None
+        raise
+    finally:
+        if not undone:
+            _undo_all(bridge, notes_mod, iso, t)
+
+
+def _eval_result(result: str, warnings: list[str]) -> CallToolResult:
+    """nspire_eval's reply: the result as the only text block, as before isolated existed,
+    plus a second block when there are warnings. structuredContent is EvalResult."""
+    content = [TextContent(type="text", text=result)]
+    structured: dict = {"result": result}
+    if warnings:
+        content.append(TextContent(type="text", text="Warnings: " + " ".join(warnings)))
+        structured["warnings"] = warnings
+    return CallToolResult(content=content, structuredContent=structured)
+
+
+
 # Every tool talks only to the local TI-Nspire app.
 def _hints(title: str, **kw) -> ToolAnnotations:
     return ToolAnnotations(title=title, openWorldHint=False, **kw)
 
 
 @mcp.tool(annotations=_hints("TI-Nspire bridge status", readOnlyHint=True, idempotentHint=True))
-async def nspire_status() -> dict:
+async def nspire_status() -> BridgeStatus:
     """Ping the TI-Nspire bridge.
 
     Returns alive, the Lua API level, whether the CAS is available, the bridge script's
@@ -79,7 +300,7 @@ async def nspire_status() -> dict:
     settings: modes = {angle, auto_or_approx, real_or_complex, display_digits,
     exponential_format, vector_format, base, unit_system}, or null if they couldn't be read.
     Angle mode Degree changes trig answers; Approximate mode gives decimals instead of
-    exact results.
+    exact results. If the bridge doesn't answer: {alive: false, error}.
     """
     def work():
         try:
@@ -91,8 +312,27 @@ async def nspire_status() -> dict:
     return await asyncio.to_thread(bridge.session, work)
 
 
+_ISOLATED_DOC = Field(description="Scratch work: put back afterwards whatever the call stores or deletes "
+                                  "(a:=5, Define f(x)=..., DelVar a), so the user's document is left as it was.")
+_ANGLE_DOC = Field(description="Angle mode for this call only (setMode); the document's setting is put back "
+                               "afterwards. Leave out to use the document's.")
+_EXACT_DOC = Field(description="Auto/Exact/Approximate mode for this call only (setMode); put back afterwards. "
+                               "Leave out to use the document's.")
+
+
+async def _isolation_module(isolated: bool):
+    """nspire_notes (scan_names, _snapshot, _undo) when isolated, imported outside the session."""
+    if not isolated:
+        return None
+    return await asyncio.to_thread(importlib.import_module, "nspire_notes")
+
+
 @mcp.tool(annotations=_hints("Evaluate a TI-Nspire expression"))
-async def nspire_eval(expr: str, timeout_s: float = 5) -> str:
+async def nspire_eval(expr: str, timeout_s: float = 5,
+                      isolated: Annotated[bool, _ISOLATED_DOC] = False,
+                      angle: Annotated[AngleMode | None, _ANGLE_DOC] = None,
+                      exact_mode: Annotated[ExactMode | None, _EXACT_DOC] = None,
+                      ) -> Annotated[CallToolResult, EvalResult]:
     """Evaluate one expression in TI-Nspire (CAS if available) and return the result as text.
 
     Use TI-Nspire syntax, e.g. solve(x^2=4,x), factor(x^2-5x+6), ∫(x^2,x), approx(π).
@@ -101,30 +341,58 @@ async def nspire_eval(expr: str, timeout_s: float = 5) -> str:
     sent back as input. Arbitrary constants show as c1, c2 (deSolve) and n1, n2 (integers).
     Definitions (Define f(x)=..., a:=5) persist in the open document's problem,
     so later calls can use them. Undefine with DelVar a.
+
+    isolated=True is for scratch work (checking a value, trying a definition): whatever the
+    expression stores or deletes is put back afterwards, so the user's document isn't left
+    with it. It refuses to run, changing nothing, if that would replace a stored function or
+    program (those can't be put back). angle / exact_mode change the document's mode for
+    this call only. The result text is the first content block, as without these options;
+    anything that couldn't be put back comes as a second block starting "Warnings:" (and in
+    structured output as {result, warnings}): tell the user.
     """
+    nm = await _isolation_module(isolated)
+    settings = _mode_settings(angle, exact_mode)
+
     def work():
-        return bridge.eval_one(expr, timeout_s)
-    log.info("eval %r", expr)
-    return await asyncio.to_thread(bridge.session, work)
+        with isolated_names(bridge, nm, [expr], timeout_s) as iso:
+            with bridge.temp_modes(settings, timeout_s) as mode_warnings:
+                result = bridge.eval_one(expr, timeout_s)
+        return result, mode_warnings + iso.all_warnings()
+    log.info("eval %r%s", expr, " (isolated)" if isolated else "")
+    result, warnings = await asyncio.to_thread(bridge.session, work)
+    return _eval_result(result, warnings)
 
 
 @mcp.tool(annotations=_hints("Evaluate several TI-Nspire expressions"))
-async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5) -> list[dict]:
+async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5,
+                            isolated: Annotated[bool, _ISOLATED_DOC] = False) -> list[BatchItem]:
     """Evaluate expressions in order. Returns one {expr, ok, result | error} per input.
 
     Definitions made by earlier expressions are visible to later ones and persist
     in the open document's problem. timeout_s is per expression. If the bridge stops
     answering, the remaining expressions are skipped. Much faster than separate
     nspire_eval calls: with a current nspire_bridge.tns the whole list is one request.
+
+    isolated=True is for scratch work, e.g. checking a student's steps with helper
+    definitions: later expressions still see earlier definitions, but every name the list
+    stores or deletes is put back afterwards, so the user's document isn't left with them.
+    It refuses to run, changing nothing, if that would replace a stored function or program.
+    If a name couldn't be put back, the item that first changed it gets warnings: [str].
     """
+    nm = await _isolation_module(isolated)
+
     def work():
-        return bridge.eval_batch(exprs, timeout_s)
-    log.info("batch of %d", len(exprs))
+        with isolated_names(bridge, nm, exprs, timeout_s) as iso:
+            res = bridge.eval_batch(exprs, timeout_s)
+        for key, ws in iso.warnings.items():
+            res[iso.first_use(key)].setdefault("warnings", []).extend(ws)
+        return res
+    log.info("batch of %d%s", len(exprs), " (isolated)" if isolated else "")
     return await asyncio.to_thread(bridge.session, work)
 
 
 @mcp.tool(annotations=_hints("List stored TI-Nspire variables", readOnlyHint=True, idempotentHint=True))
-async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[dict]:
+async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[VarEntry]:
     """List the variables and functions stored in the open document's problem (getVarInfo()).
 
     Returns one {name, type, library, locked, value?} per variable. type is TI-Nspire's,
@@ -140,7 +408,7 @@ async def nspire_vars(values: bool = True, timeout_s: float = 5) -> list[dict]:
 
 
 @mcp.tool(annotations=_hints("Delete stored TI-Nspire variables", destructiveHint=True, idempotentHint=True))
-async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> dict:
+async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> ClearResult:
     """DESTRUCTIVE: delete stored variables and functions from the open document's problem.
 
     Runs DelVar on each name, e.g. names=["a", "f"] (bare names: "f", not "f(x)").
@@ -174,9 +442,12 @@ def _short(v: str) -> str:
     return v if len(v) <= VALUE_MAX_CHARS else v[:VALUE_MAX_CHARS] + "…"
 
 
-def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None) -> list[str]:
+def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None,
+                 isolated: bool = False, angle_override: bool = False) -> list[str]:
     """Warnings about the open document for command: stored variables or functions it
     uses or replaces, and an angle mode other than radian when it uses trig functions.
+    isolated: what command replaces is put back afterwards. angle_override: the call sets
+    its own angle mode, so the document's doesn't matter.
 
     Call inside bridge.session(), before running command. One round trip, plus one to read
     values when a stored variable is used. Never fails the tool: anything unexpected just
@@ -214,11 +485,12 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None)
                                     f"substituted; see nspire_vars.")
             for name, typ in replaced:
                 warnings.append(f"{name} was already stored in the document ({typ or 'unknown type'}); "
-                                f"this replaced it.")
+                                + ("this call replaced it until it was put back (isolated)." if isolated
+                                   else "this replaced it."))
     except Exception as e:
         log.info("stored-variable check failed: %s", e)
     try:
-        if res[1]["ok"] and _TRIG_RE.search(readable(command)):
+        if not angle_override and res[1]["ok"] and _TRIG_RE.search(readable(command)):
             angle = mode_setting(2, res[1]["result"])
             if angle is not None and angle != "Radian":
                 warnings.append(f"The document's angle mode is {angle}, so trig functions here work in "
@@ -232,7 +504,10 @@ def doc_warnings(bridge: Bridge, command: str, timeout_s: float, notes_mod=None)
 @mcp.tool(annotations=_hints("Solve LaTeX on the TI-Nspire CAS"))
 async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None = None,
                        order: int | None = None, point: str | None = None,
-                       timeout_s: float = 10) -> dict:
+                       timeout_s: float = 10,
+                       isolated: Annotated[bool, _ISOLATED_DOC] = False,
+                       angle: Annotated[AngleMode | None, _ANGLE_DOC] = None,
+                       exact_mode: Annotated[ExactMode | None, _EXACT_DOC] = None) -> LatexResult:
     """Solve or evaluate a LaTeX problem on the TI-Nspire CAS; returns the answer as text and LaTeX.
 
     Accepts $…$ / \\[…\\] delimiters, \\frac, \\sqrt[n]{}, \\int (with limits, \\,dx or \\mathrm{d}x),
@@ -267,6 +542,13 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     substituted, a stored function was used or replaced, or the angle mode isn't radian for a
     trig function: tell the user. If the LaTeX can't be parsed, the error says so; then
     translate it to TI-Nspire syntax yourself and use nspire_eval.
+
+    isolated=True is for scratch work: whatever the command stores (f(x)=... defines f, a:=5)
+    is put back afterwards, so the user's document isn't left with it; it refuses to run,
+    changing nothing, if that would replace a stored function. Anything that couldn't be put
+    back is in warnings. angle ("radian"/"degree"/"gradian") and exact_mode
+    ("auto"/"exact"/"approx") set the document's mode for this call only, e.g. angle="degree"
+    for \\sin(30), and put it back afterwards.
     """
     # Imported here, not at startup: sympy takes seconds to load and the MCP
     # client times out a server that's slow to answer initialize.
@@ -277,11 +559,16 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
         p = await asyncio.to_thread(lx.plan, latex, action, var, order, point)
     except lx.LatexError as e:
         raise ValueError(str(e)) from None
-    notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")  # scan_names, imported outside the session
+    # scan_names (and the undo, when isolated), imported outside the session
+    notes_mod = await _isolation_module(True) if isolated else await asyncio.to_thread(_import_optional, "nspire_notes")
+    settings = _mode_settings(angle, exact_mode)
 
     def work():
-        warnings = doc_warnings(bridge, p.command, timeout_s, notes_mod)
-        return lx.run_plan(bridge, p, timeout_s), warnings
+        with isolated_names(bridge, notes_mod if isolated else None, [p.command], timeout_s) as iso:
+            warnings = doc_warnings(bridge, p.command, timeout_s, notes_mod, isolated, angle is not None)
+            with bridge.temp_modes(settings, timeout_s) as mode_warnings:
+                run = lx.run_plan(bridge, p, timeout_s)
+        return run, warnings + mode_warnings + iso.all_warnings()
     run, warnings = await asyncio.to_thread(bridge.session, work)
     # LaTeX conversion after the session, with the user's clipboard already restored
     out = await asyncio.to_thread(lx.format_answer, run)
@@ -338,6 +625,49 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
         cancel.set()
         log.info("notes: cancelled")
         raise
+
+
+# ---------------------------------------------------------------- prompts
+
+CHECK_SOLUTION = """\
+Check this worked solution step by step on the TI-Nspire CAS (the nspire tools).
+
+Problem:
+{problem}
+
+Worked solution:
+{solution}
+
+How to check it:
+1. Split the solution into numbered steps, one per line or transformation, quoting each step.
+2. For each step, write one or more TI-Nspire expressions that test whether it follows from
+   the step before, for example:
+   - equal expressions: simplify((before)-(after)) should give 0, or expand both sides;
+   - equations: solve(before,x) and solve(after,x) should give the same solutions
+     (a step that loses or gains solutions is an error even if the algebra looks right);
+   - derivatives and integrals: derivative(f,x) or ∫(f,x), compared with the student's;
+   - numbers: evaluate the student's arithmetic as written.
+   Helper definitions (Define f(x)=..., a:=...) are fine: use names that look unlikely to be
+   stored in the document.
+3. Send all checks in ONE nspire_eval_batch call with isolated=True, so the helper definitions
+   aren't left in the user's document. If it refuses because a name is already stored as a
+   function, pick another name. Read every item: ok, result or error, and warnings.
+4. Check the final answer on its own: solve or evaluate the original problem (nspire_eval or
+   nspire_latex, isolated=True) and compare. If the problem is in degrees, pass angle="degree".
+5. Report, for each step: correct, or wrong with what the CAS shows (results as the CAS gives
+   them) and a short explanation. Name the first wrong step; an error that later steps carry
+   forward counts once. Then say whether the final answer is right. Don't rewrite the whole
+   solution unless asked.
+
+If an answer looks oddly specific, a variable stored in the document may have been substituted:
+check nspire_vars, and ask the user before deleting anything."""
+
+
+@mcp.prompt(title="Check a worked solution")
+def check_solution(problem: str, solution: str) -> str:
+    """Check a student's worked solution step by step on the TI-Nspire CAS, with
+    nspire_eval_batch(isolated=True) so the checks leave the user's document as it was."""
+    return CHECK_SOLUTION.format(problem=problem.strip(), solution=solution.strip())
 
 
 if __name__ == "__main__":

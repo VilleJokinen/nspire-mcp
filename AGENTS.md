@@ -96,6 +96,13 @@ hotkey.
   `BridgeTimeout`. `Bridge.modes()` reads `getMode(0)` and never raises (None on
   failure); the setting numbers in `MODES` come from TI's Reference Guide and haven't
   all been checked against the real CAS (the angle mode is the most certain).
+  `with bridge.temp_modes({2: 2}) as warnings:` (inside a session) sets modes with
+  `setMode`, checks them with `getMode`, and puts the old settings back on exit, also
+  on an exception; it raises ValueError before the block if TI-Nspire doesn't take a
+  setting. Whether `math.evalStr` accepts `setMode` at all is checked only by
+  `selftest.py` against the real CAS. A timeout while an earlier timed-out request is
+  still within `LATE_WINDOW_S` says that request is probably still being computed
+  (`Bridge._busy_hint`): `math.evalStr` blocks bridge.lua until it returns.
 - `nspire_chars.py`: TI-Nspire's private-use characters (`NS_*`), `readable()`,
   `to_cas_chars()`. No pywin32, so the translator imports on any OS;
   `nspire_bridge` re-exports them.
@@ -117,6 +124,17 @@ hotkey.
   substituted, stored functions used or replaced, a non-radian angle mode with trig).
   `LatexAction` lists `nspire_latex.ACTIONS` by hand so SymPy stays lazy: keep the two
   in step when you add an action (a test enforces it).
+  `isolated=True` (`isolated_names()`) saves every name the command(s) store or delete
+  with `nspire_notes`' `scan_names`/`_snapshot`/`_undo` (imported lazily) and puts them
+  back after the call; it refuses up front to replace a stored function or program.
+  Nest it outside `temp_modes`, so values are read and written back in the document's
+  own modes. Return types are TypedDicts so FastMCP publishes an `outputSchema`:
+  declare every key a tool returns (undeclared keys are dropped from
+  `structuredContent`), put optional ones in a `total=False` subclass (`NotRequired`
+  isn't seen under `from __future__ import annotations`), and let top-level optional
+  keys be `None` (FastMCP fills them with null). `nspire_eval` returns a
+  `CallToolResult` so its first content block stays the bare result text; warnings go
+  in a second block. `check_solution` is an MCP prompt.
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
 - `nspire_notes.py` / `nspire_keys.py`: Notes-page builder. It works by keystrokes:
   Ctrl+N, `6` (Add Notes), text typed as Unicode, Ctrl+M for a math box, the

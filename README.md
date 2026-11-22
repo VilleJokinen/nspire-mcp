@@ -75,16 +75,30 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | Tool | Does |
 | --- | --- |
 | `nspire_status()` | ping: `alive`, `api_level`, `cas`, `protocol` (2 = current bridge script, 1 = older `.tns`), and the document's `modes` (angle, auto or approx, real or complex, …) |
-| `nspire_eval(expr, timeout_s=5)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)` |
-| `nspire_eval_batch(exprs, timeout_s=5)` | several in order: `[{expr, ok, result \| error}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
-| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
+| `nspire_eval(expr, timeout_s=5, isolated=False, angle, exact_mode)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)`. The result text is the first content block; if anything couldn't be put back (see below), a second block starts `Warnings:` (structured output: `{result, warnings?}`) |
+| `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | several in order: `[{expr, ok, result \| error, warnings?}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
+| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer")` | write a worked solution onto a new TI-Nspire Notes page (see below) |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
 `timeout_s` is limited to 0.5–120 s. `action` and `page_size` take only the values listed
 below; the tool schemas list them, and every tool says in its MCP annotations whether it
-only reads (`nspire_status`, `nspire_vars`) or can delete (`nspire_clear`).
+only reads (`nspire_status`, `nspire_vars`) or can delete (`nspire_clear`). The tools that
+return objects publish an output schema, so clients get typed `structuredContent`.
+
+- **`isolated=True`** is for scratch work: every name the call stores or deletes
+  (`a:=5`, `Define f(x)=…`, `DelVar a`) is saved first and put back afterwards, so your
+  document isn't left with Claude's helper definitions. It refuses to run, changing
+  nothing, if it would replace a stored function or program (those can't be read back).
+  Whatever couldn't be put back comes back as a warning.
+- **`angle`** (`"radian"`, `"degree"`, `"gradian"`) and **`exact_mode`** (`"auto"`,
+  `"exact"`, `"approx"`) change the document's mode for one call with `setMode` and put
+  the old setting back afterwards, also when the call fails. If TI-Nspire doesn't take
+  the setting, the call fails with an error saying so, and nothing is evaluated.
+
+There's also an MCP prompt, `check_solution(problem, solution)`, that has Claude check a
+student's worked solution step by step with `nspire_eval_batch(..., isolated=True)`.
 
 ### Worked solutions on a Notes page
 
@@ -268,9 +282,11 @@ uv run --script selftest.py
 ```
 
 Pings, then checks `2+2`, `factor`, `solve`, `∫`, `cSolve`, a deliberate syntax error,
-and a set of LaTeX problems (integral, limit, sum, system, determinant, ODEs, decimal
-comma…). On the non-CAS edition the symbolic cases pass if they return a clean error,
-and the LaTeX cases are skipped.
+the document's mode settings, a variable round trip (it stores and deletes `brgselftest`,
+a name of its own), the per-call mode override (it switches the angle and Auto/Approximate
+modes for one evaluation each and checks they're put back), and a set of LaTeX problems
+(integral, limit, sum, system, determinant, ODEs, decimal comma…). On the non-CAS edition
+the symbolic cases pass if they return a clean error, and the LaTeX cases are skipped.
 
 ### Offline tests (no TI-Nspire needed)
 
@@ -292,6 +308,10 @@ Windows with the newest dependencies, once more on Windows with the versions pin
 - **"No reply from the TI-Nspire bridge":** TI-Nspire isn't open, `nspire_bridge.tns`
   isn't, or the bridge page isn't the active page (a script on a page you've navigated
   away from may stop). Run `uv run --script selftest.py` to check outside Claude.
+- **"…is probably still being computed in TI-Nspire":** an earlier request timed out
+  but TI-Nspire is still working on it (the bridge page's tick count stops while it
+  computes), and the bridge can't answer anything else until it's done. Wait, then retry;
+  give heavy commands a longer `timeout_s`.
 - **Tick count rises but `served` doesn't change:** TI-Nspire has stopped seeing
   clipboard changes. Close and reopen `nspire_bridge.tns` (or restart the app).
 - **Tick counter not moving:** click the bridge page once, or re-run Set Script.
@@ -308,7 +328,14 @@ Windows with the newest dependencies, once more on Windows with the versions pin
   says so in its `warnings`; list them with `nspire_vars` (or ask Claude), and `DelVar`
   the ones you don't want. Trig answers in degrees, or decimals where you expected
   exact values, come from the document's settings: `nspire_status` shows its `modes`
-  (change them in TI-Nspire's document settings).
+  (change them in TI-Nspire's document settings, or have Claude pass `angle` /
+  `exact_mode` for one call).
+- **"TI-Nspire didn't change the mode setting with setMode":** this TI-Nspire version
+  doesn't accept `setMode` from the bridge script, so `angle` / `exact_mode` can't be
+  used; change the document's settings instead. `selftest.py` checks this.
+- **"isolated=True: f is a function stored in the document":** an isolated call would
+  replace something it can't put back. Use another name, or run it without `isolated`
+  if you do want it replaced.
 - **"Another request kept the TI-Nspire bridge busy":** a long request (often a Notes
   page) was still running; retry when it's done.
 - **`nspire_status` says `protocol: 1`:** you have an older `nspire_bridge.tns` (or a

@@ -74,14 +74,29 @@ Call `nspire_status()` once at the start of a math session. It returns
 | Tool | Use it for |
 | --- | --- |
 | `nspire_status()` | Health check. First call; again after any timeout. |
-| `nspire_eval` (expr, timeout_s=5) | One expression in TI-Nspire syntax. Your default tool. |
-| `nspire_eval_batch(exprs, timeout_s=5)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
-| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
+| `nspire_eval` (expr, timeout_s=5, isolated=False, angle, exact_mode) | One expression in TI-Nspire syntax. Your default tool. |
+| `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
+| `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer")` | The user wants the worked solution written into TI-Nspire itself. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
 
 `timeout_s` is limited to 0.5–120 seconds.
+
+- `isolated=True`: use it for scratch work (checking a step, a helper
+  `Define`, trying values). Every name the call stores or deletes is put back
+  afterwards, so the user's document isn't left with your definitions. It
+  refuses to run, changing nothing, if it would replace a stored function or
+  program; pick another name then. Leave it off when the user wants the
+  definition kept.
+- `angle` (`"radian"`, `"degree"`, `"gradian"`) and `exact_mode` (`"auto"`,
+  `"exact"`, `"approx"`) set the document's mode for one call and put it back
+  afterwards, e.g. `nspire_eval("sin(30)", angle="degree")`. If TI-Nspire
+  doesn't accept the setting, the call fails saying so; then work in the
+  document's mode (`nspire_status` shows it) or ask the user to change it.
+- The prompt `check_solution(problem, solution)` walks through checking a
+  student's worked solution step by step with `nspire_eval_batch(...,
+  isolated=True)`.
 
 ### `nspire_eval`
 
@@ -97,12 +112,17 @@ TI-Nspire syntax: `solve(x^2=4,x)`, `factor(x^2-5*x+6)`, `expand((x+1)^3)`,
 - Raise `timeout_s` (e.g. 20) for heavy symbolic work. A timeout means the
   bridge did not answer, not that the math has no answer; check
   `nspire_status` before retrying.
+- With `isolated=True` or a mode override, anything that couldn't be put back
+  arrives as a second content block starting `Warnings:` (structured output
+  `{result, warnings}`); tell the user.
 
 ### `nspire_eval_batch`
 
 Pass a list. Earlier definitions are visible to later items. If the bridge
 stops answering, the rest are returned as skipped. Each item comes back as
-`{expr, ok, result}` or `{expr, ok: false, error}`; read each one.
+`{expr, ok, result}` or `{expr, ok: false, error}`; read each one. With
+`isolated=True`, an item may also carry `warnings` about a name it changed that
+couldn't be put back.
 
 ### `nspire_latex`
 
@@ -187,9 +207,19 @@ unsaved; tell the user to save it if they want to keep it. Use
   the open bridge document and are substituted into later answers. If a result
   looks wrong (a number where you expected a symbol), list stored variables
   with `nspire_vars`. `nspire_latex` adds a `warnings` entry when it
-  substituted a stored variable or used a stored function. Delete your own definitions with `nspire_clear(["f"])` or
+  substituted a stored variable or used a stored function. For scratch work
+  pass `isolated=True` so your definitions don't stay at all. Delete your own
+  definitions with `nspire_clear(["f"])` or
   `DelVar f`; ask before deleting anything you didn't define, and never clear
   everything without the user's OK. Prefer names the user is unlikely to reuse.
+- **A timeout can mean TI-Nspire is still computing.** The bridge script is
+  blocked until a command finishes, so after one request times out the next
+  ones can't be answered either; the error then says the earlier request is
+  probably still being computed. Wait, then retry with a longer `timeout_s`;
+  don't fire more requests at it meanwhile.
+- **Modes:** the angle mode and Auto/Approximate change answers. Prefer
+  `angle=` / `exact_mode=` for one call over asking the user to change the
+  document, and say which mode you used.
 - **The clipboard is the transport.** Each call briefly replaces the user's
   clipboard and puts it back afterwards (well under a second), including images,
   HTML and copied files, and keeps the traffic out of Win+V history. A copy the

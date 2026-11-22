@@ -10,6 +10,7 @@ Skipped by tests/conftest.py where pywin32 or lupa is missing.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -21,7 +22,9 @@ REPO = Path(os.environ.get("NSPIRE_REPO", Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import nspire_bridge as nb  # noqa: E402
 
-nb.MUTEX_NAME = "Local\\nspire_mcp_bridge_offline_test"  # don't block a real bridge
+# Don't block a real bridge, nor test runs in other processes (e.g. other checkouts):
+# a mutex held elsewhere delays sessions and stops late replies being cleaned up.
+nb.MUTEX_NAME = f"Local\\nspire_mcp_bridge_offline_test_{os.getpid()}"
 CF_TEXT = 13
 IMG = 8
 
@@ -87,6 +90,9 @@ class FakeNspire:
         self.lua = lupa.LuaRuntime(unpack_returned_tuples=True)
         self.vars: dict[str, str] = {}
         self.evals: list[str] = []
+        # Float6, Degree, ..., Exact, and a mode number this code doesn't know
+        self.modes = {1: 7, 2: 2, 3: 1, 4: 1, 5: 3, 6: 1, 7: 1, 8: 1, 9: 4}
+        self.set_mode = "works"  # or "refused" (an error), "ignored" (answers but changes nothing)
         g = self.lua.globals()
         g.platform = self.lua.table(apiLevel="2.7", window=self.lua.table(invalidate=lambda self_: None))
         g.timer = self.lua.table(start=lambda p: None)
@@ -134,8 +140,21 @@ class FakeNspire:
                 return '"NONE"', None
             rows = "".join(f'["{k}","NUM","none",0]' for k in self.vars)
             return f"[{rows}]", None
-        if expr == "getMode(0)":  # Float6, Degree, ..., Exact, and a mode number this code doesn't know
-            return "{1,7,2,2,3,1,4,1,5,3,6,1,7,1,8,1,9,4}", None
+        if expr == "getMode(0)":
+            return "{" + ",".join(f"{m},{v}" for m, v in self.modes.items()) + "}", None
+        m = re.fullmatch(r"getMode\((\d+)\)", expr)
+        if m:
+            return str(self.modes[int(m.group(1))]), None
+        m = re.fullmatch(r"setMode\((\d+),(\d+)\)", expr)
+        if m:
+            if self.set_mode == "refused":
+                return None, 430
+            old = self.modes[int(m.group(1))]
+            if self.set_mode == "works":
+                self.modes[int(m.group(1))] = int(m.group(2))
+            return str(old), None
+        if expr == "modes?":  # what the modes are while an expression runs
+            return ",".join(str(self.modes[k]) for k in (2, 5)), None
         if expr.startswith("DelVar "):
             for n in expr[7:].split(","):
                 self.vars.pop(n.strip(), None)
@@ -354,6 +373,91 @@ def test_transient_clip_set_in_session_restored(env):
     assert clip.text() == "user text"
     nb.clip_set("result for the user")  # outside a session: an ordinary copy
     assert not clip.history_excluded
+
+
+def test_timeout_says_earlier_request_still_computing(env):
+    kind, ns, b = env
+    with pytest.raises(nb.BridgeTimeout) as first:
+        b.session(lambda: b.eval_one("slow1.5", 0.5))
+    assert "Is TI-Nspire open" in str(first.value) and "still being computed" not in str(first.value)
+    # bridge.lua is stuck in math.evalStr: the next request can't be answered either
+    with pytest.raises(nb.BridgeTimeout, match="ago is probably still being computed") as second:
+        b.session(lambda: b.eval_one("2+2", 0.5))
+    assert "Wait a little" in str(second.value) and nb.TIMEOUT_HINT in str(second.value)
+    time.sleep(1.5)
+    assert b.session(lambda: b.eval_one("2+2", 5)) == "4"
+    assert clip.text() == "user text"
+
+
+def test_busy_hint_window():
+    b = nb.Bridge()
+    now = time.monotonic()
+    assert b._busy_hint(now) is None
+    b._pending = {"old": now + nb.LATE_WINDOW_S - 7}
+    assert "timed out 7 s ago" in b._busy_hint(now)
+    b._pending = {"expired": now - 1}
+    assert b._busy_hint(now) is None
+
+
+def test_temp_modes_set_and_put_back(env):
+    kind, ns, b = env
+
+    def work():
+        with b.temp_modes({2: 1, 5: 2}) as warnings:
+            during = b.eval_one("modes?", 3)
+        return during, warnings
+    during, warnings = b.session(work)
+    assert during == "1,2" and warnings == []
+    assert (ns.modes[2], ns.modes[5]) == (2, 3)
+    assert clip.text() == "user text"
+    # already the document's setting: nothing to put back afterwards
+    ns.evals.clear()
+
+    def same():
+        with b.temp_modes({2: 2}):
+            pass
+    b.session(same)
+    assert ns.evals.count("setMode(2,2)") == 1 and ns.modes[2] == 2
+
+
+def test_temp_modes_put_back_when_the_block_fails(env):
+    kind, ns, b = env
+
+    def work():
+        with b.temp_modes({2: 3}):
+            b.eval_one("bad", 3)
+    with pytest.raises(ValueError, match="syntax error"):
+        b.session(work)
+    assert ns.modes[2] == 2
+
+
+@pytest.mark.parametrize("how", ["refused", "ignored"])
+def test_temp_modes_detects_set_mode_not_working(env, how):
+    kind, ns, b = env
+    ns.set_mode = how
+    ran = []
+
+    def work():
+        with b.temp_modes({2: 1, 5: 2}):
+            ran.append(b.eval_one("2+2", 3))
+    with pytest.raises(ValueError, match="didn't change the mode setting with setMode") as e:
+        b.session(work)
+    assert ran == [] and "angle Radian" in str(e.value)
+    assert (ns.modes[2], ns.modes[5]) == (2, 3)
+    assert clip.text() == "user text"
+
+
+def test_temp_modes_dead_bridge(env):
+    kind, ns, b = env
+    ns.close()
+    ran = []
+
+    def work():
+        with b.temp_modes({2: 1}):
+            ran.append(1)
+    with pytest.raises(nb.BridgeTimeout, match="may have been left with angle Radian"):
+        b.session(work)
+    assert ran == []
 
 
 def test_vars_and_clear(env):
