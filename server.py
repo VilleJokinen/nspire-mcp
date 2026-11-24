@@ -20,6 +20,7 @@ import asyncio
 import base64
 import contextlib
 import importlib
+import json
 import logging
 import os
 import re
@@ -37,6 +38,7 @@ from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one 
 
 import nspire_log as session_log  # noqa: E402
 from nspire_bridge import (  # noqa: E402
+    _NAME_RE,
     VALUE_MAX_CHARS,
     VALUE_TYPES,
     Bridge,
@@ -97,6 +99,10 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   TI-Nspire: a text conversion only, nothing is evaluated.
 - A session log (Markdown scratch notes of every solve) is kept only when the user turned it on
   (NSPIRE_LOG=1 or NSPIRE_LOG_DIR); nspire_log says where it is and reads a day's end.
+- Resources (read without a tool call, JSON, each read is one short bridge session): nspire://variables,
+  nspire://variables/{name}, nspire://modes, nspire://status. A body {"ok": false, "error"} means the
+  bridge didn't answer or the name isn't stored. No change notifications are sent: read again after
+  storing, defining or clearing.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -689,6 +695,88 @@ async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> 
         return bridge.clear_vars(names, timeout_s)
     log.info("clear %s", names if names else "all")
     return await asyncio.to_thread(bridge.session, work)
+
+
+# ---------------------------------------------------------------- resources
+# Read-only views of the open document, so a client can show or attach them without a tool call.
+# Each read is one short bridge session and never raises: if the bridge doesn't answer, the body is
+# {"ok": false, "error": ...}. No list_changed / updated notifications are sent (FastMCP has no cheap
+# hook for them and the document changes under the user's hands anyway): clients re-read.
+
+RESOURCE_WAIT_S = 8.0     # how long a read waits for the bridge (the clipboard is shared)
+RESOURCE_TIMEOUT_S = 4.0  # per bridge request
+
+
+def _json_body(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+async def _read_document(work) -> str:
+    """Run work() in a short bridge session; a failure becomes an {"ok": false, "error"} body."""
+    try:
+        data = await asyncio.to_thread(bridge.session, work, RESOURCE_WAIT_S)
+    except BridgeTimeout as e:
+        data = {"ok": False, "error": f"{e} Is nspire_bridge.tns open in TI-Nspire on its first page?"}
+    except Exception as e:  # a resource read must not take the server down
+        log.info("resource read failed: %s", e)
+        data = {"ok": False, "error": str(e)}
+    return _json_body(data)
+
+
+@mcp.resource("nspire://variables", name="variables", title="Stored TI-Nspire variables",
+              description="Variables and functions stored in the open document: name, type, library, locked and "
+                          "(NUM/EXPR/LIST/MAT/STR) value. Same data as nspire_vars.",
+              mime_type="application/json")
+async def resource_variables() -> str:
+    def work():
+        return {"ok": True, "variables": bridge.list_vars(True, RESOURCE_TIMEOUT_S)}
+    return await _read_document(work)
+
+
+@mcp.resource("nspire://variables/{name}", name="variable", title="One stored TI-Nspire variable",
+              description="One stored variable or function by name (names ignore case in TI-Nspire).",
+              mime_type="application/json")
+async def resource_variable(name: str) -> str:
+    if not _NAME_RE.match(name):
+        return _json_body({"ok": False, "error": f"{name!r} is not a variable name."})
+
+    def work():
+        rows = bridge.list_vars(False, RESOURCE_TIMEOUT_S)
+        row = next((r for r in rows if r["name"].lower() == name.lower()), None)
+        if row is None:
+            return {"ok": False, "error": f"No variable {name!r} is stored in the document."}
+        if row["type"].upper() in VALUE_TYPES:
+            res = bridge.eval_batch([row["name"]], RESOURCE_TIMEOUT_S)[0]
+            if res["ok"]:
+                v = res["result"]
+                row["value"] = v if len(v) <= VALUE_MAX_CHARS else v[:VALUE_MAX_CHARS] + "…"
+        return {"ok": True, "variable": row}
+    return await _read_document(work)
+
+
+@mcp.resource("nspire://modes", name="modes", title="TI-Nspire mode settings",
+              description="The document's mode settings (angle, auto/approx, real/complex, display digits, ...), "
+                          "as in nspire_status.",
+              mime_type="application/json")
+async def resource_modes() -> str:
+    def work():
+        modes = bridge.modes(RESOURCE_TIMEOUT_S)
+        if modes is None:
+            return {"ok": False, "error": "The mode settings couldn't be read (the bridge may not be answering)."}
+        return {"ok": True, "modes": modes}
+    return await _read_document(work)
+
+
+@mcp.resource("nspire://status", name="status", title="TI-Nspire bridge status",
+              description="Whether the bridge answers, its Lua API level, CAS availability, bridge protocol and "
+                          "the mode settings. Same data as nspire_status.",
+              mime_type="application/json")
+async def resource_status() -> str:
+    def work():
+        st = bridge.ping(RESOURCE_TIMEOUT_S)
+        st["modes"] = bridge.modes(RESOURCE_TIMEOUT_S)
+        return {"ok": True, **st}
+    return await _read_document(work)
 
 
 # ---------------------------------------------------------------- document checks for nspire_latex

@@ -173,6 +173,12 @@ hotkey.
   keys be `None` (FastMCP fills them with null). `nspire_eval` returns a
   `CallToolResult` so its first content block stays the bare result text; warnings go
   in a second block. `check_solution` is an MCP prompt.
+- MCP resources in `server.py` (`nspire://variables`, `nspire://variables/{name}`, `nspire://modes`,
+  `nspire://status`): one short `bridge.session` per read (`RESOURCE_WAIT_S`, `RESOURCE_TIMEOUT_S`), JSON bodies
+  `{"ok": true, ...}`; `_read_document()` turns any failure (`BridgeTimeout` or otherwise) into
+  `{"ok": false, "error"}`, so a read never raises. The data comes from `Bridge.list_vars`, `modes` and `ping`,
+  the same as the tools. No `list_changed`/`updated` notifications (FastMCP has no cheap hook, and the user
+  edits the document by hand too): the docs tell clients to re-read. Tests in `tests/test_server.py`.
 - `nspire_log.py`: the session log, standard library only. Off unless `NSPIRE_LOG=1` (`<repo>/logs`, in
   `.gitignore`) or `NSPIRE_LOG_DIR` is set (`NSPIRE_LOG=0` wins); `log_dir()` reads the environment on every
   call. Opt-in because it writes the user's homework to disk. `record(source, **fields)` appends one Markdown
