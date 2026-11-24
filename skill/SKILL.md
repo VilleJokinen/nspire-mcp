@@ -85,6 +85,10 @@ Call `nspire_status()` once at the start of a math session. It returns
 
 `timeout_s` is limited to 0.5–120 seconds.
 
+Resources (JSON, readable without a tool call): `nspire://variables`, `nspire://variables/{name}`,
+`nspire://modes`, `nspire://status`. A body `{"ok": false, "error": ...}` means the bridge didn't answer or the
+name isn't stored. There are no change notifications: read again after storing, defining or clearing.
+
 - `isolated=True`: use it for scratch work (checking a step, a helper
   `Define`, trying values). Every name the call stores or deletes is put back
   afterwards, so the user's document isn't left with your definitions. It

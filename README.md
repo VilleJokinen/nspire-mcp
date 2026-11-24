@@ -128,6 +128,13 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
+**Resources.** The same document state can be read without a tool call (JSON, `application/json`):
+`nspire://variables` (as `nspire_vars`), `nspire://variables/{name}` (one variable or function; names ignore
+case), `nspire://modes` (the mode settings) and `nspire://status` (as `nspire_status`). Each read is one
+short bridge session (waits up to 8 s for the clipboard, 4 s per request). If the bridge doesn't answer, the
+body is `{"ok": false, "error": "..."}` instead of an error; success bodies have `"ok": true`. The server
+sends no change notifications, so read again after storing, defining or clearing something.
+
 `timeout_s` is limited to 0.5–120 s. `action` and `page_size` take only the values listed
 below; the tool schemas list them, and every tool says in its MCP annotations whether it
 only reads (`nspire_status`, `nspire_vars`, `nspire_check_steps`) or can delete (`nspire_clear`). The tools that

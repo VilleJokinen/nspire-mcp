@@ -120,7 +120,7 @@ def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
                    "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats",
-                   "nspire_to_latex", "nspire_log", "NSPIRE_LOG"):
+                   "nspire_to_latex", "nspire_log", "NSPIRE_LOG", "nspire://variables", "nspire://modes"):
         assert needle in text
 
 
@@ -175,6 +175,79 @@ def test_status_dead_bridge(monkeypatch):
     monkeypatch.setattr(server, "bridge", B({}))
     st = run(server.nspire_status())
     assert st["alive"] is False and "No reply" in st["error"] and "modes" not in st
+
+
+# ------------------------------------------------------------ resources
+
+class DocBridge(FakeBridge):
+    def list_vars(self, values=True, timeout_s=5.0):
+        rows = [{"name": "a", "type": "NUM", "library": None, "locked": False},
+                {"name": "f", "type": "FUNC", "library": None, "locked": False}]
+        if values:
+            rows[0]["value"] = "5"
+        return rows
+
+    def modes(self, timeout_s=5.0):
+        return {"angle": "Degree"}
+
+    def ping(self, timeout_s=3.0):
+        return {"alive": True, "api_level": "2.7", "cas": True, "protocol": 2}
+
+
+def read_res(uri: str):
+    import json
+    parts = list(run(server.mcp.read_resource(uri)))
+    assert len(parts) == 1 and parts[0].mime_type == "application/json"
+    return json.loads(parts[0].content)
+
+
+def test_resources_are_listed():
+    assert {str(r.uri) for r in run(server.mcp.list_resources())} == {
+        "nspire://variables", "nspire://modes", "nspire://status"}
+    assert [t.uriTemplate for t in run(server.mcp.list_resource_templates())] == ["nspire://variables/{name}"]
+    assert all(r.mimeType == "application/json" for r in run(server.mcp.list_resources()))
+
+
+def test_resource_variables_and_modes_and_status(monkeypatch):
+    fake = DocBridge({"a": (True, "5")})
+    monkeypatch.setattr(server, "bridge", fake)
+    v = read_res("nspire://variables")
+    assert v["ok"] and [x["name"] for x in v["variables"]] == ["a", "f"] and v["variables"][0]["value"] == "5"
+    assert read_res("nspire://modes") == {"ok": True, "modes": {"angle": "Degree"}}
+    st = read_res("nspire://status")
+    assert st["ok"] and st["alive"] and st["protocol"] == 2 and st["modes"] == {"angle": "Degree"}
+    assert fake.sessions == 3
+
+
+def test_resource_one_variable(monkeypatch):
+    monkeypatch.setattr(server, "bridge", DocBridge({"a": (True, "5")}))
+    assert read_res("nspire://variables/A")["variable"] == {
+        "name": "a", "type": "NUM", "library": None, "locked": False, "value": "5"}
+    assert read_res("nspire://variables/f")["variable"]["type"] == "FUNC"
+    missing = read_res("nspire://variables/zz")
+    assert missing["ok"] is False and "zz" in missing["error"]
+    bad = read_res("nspire://variables/a%3Bb")
+    assert bad["ok"] is False and "not a variable name" in bad["error"]
+
+
+def test_resources_fail_with_a_body_not_an_exception(monkeypatch):
+    class Dead(DocBridge):
+        def session(self, work, wait_s=60):
+            raise nb.BridgeTimeout("No reply from the TI-Nspire bridge within 4 s.")
+
+    class Broken(DocBridge):
+        def list_vars(self, values=True, timeout_s=5.0):
+            raise RuntimeError("boom")
+
+        def modes(self, timeout_s=5.0):
+            return None
+    monkeypatch.setattr(server, "bridge", Dead({}))
+    for uri in ("nspire://variables", "nspire://variables/a", "nspire://modes", "nspire://status"):
+        body = read_res(uri)
+        assert body["ok"] is False and "No reply" in body["error"] and "nspire_bridge.tns" in body["error"]
+    monkeypatch.setattr(server, "bridge", Broken({}))
+    assert read_res("nspire://variables") == {"ok": False, "error": "boom"}
+    assert read_res("nspire://modes")["ok"] is False
 
 
 # ------------------------------------------------------------ nspire_latex warnings
