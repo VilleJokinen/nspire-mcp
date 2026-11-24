@@ -81,7 +81,7 @@ def tools() -> dict:
 def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
-                       "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps"}
+                       "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps", "nspire_stats"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
@@ -91,6 +91,8 @@ def test_tool_list_and_annotations():
     for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
         assert not ts[name].annotations.readOnlyHint  # they can define or delete things, or evaluate in the document
     assert ts["nspire_plot"].annotations.destructiveHint is False
+    # it writes TI-Nspire's stat.* variables, so not read-only; the data lists are put back
+    assert ts["nspire_stats"].annotations.destructiveHint is False and not ts["nspire_stats"].annotations.readOnlyHint
 
 
 def test_action_enum_matches_translator():
@@ -116,7 +118,7 @@ def test_notes_schema():
 def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
-                   "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps"):
+                   "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats"):
         assert needle in text
 
 
@@ -133,7 +135,7 @@ def test_startup_imports_stay_light():
     # matplotlib, no keystroke module at import. A fresh interpreter, since other tests import them.
     code = ("import sys; sys.path.insert(0, '.'); import server; "
             "print(sorted(m for m in ('sympy', 'nspire_latex', 'nspire_notes', 'nspire_keys', 'matplotlib', "
-            "'nspire_plot', 'nspire_steps') if m in sys.modules))")
+            "'nspire_plot', 'nspire_steps', 'nspire_stats') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120,
                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     assert out.returncode == 0, out.stderr
@@ -972,3 +974,127 @@ def test_plot_all_gaps_summary_explains_the_cause(monkeypatch):
 
 def test_instructions_mention_explanations():
     assert "nspire_errors" in server.mcp.instructions
+
+
+# ------------------------------------------------------------ nspire_stats
+
+QUAD_RESULTS = ('[["Title","Quadratic Regression"]["RegEqn","a*x^2+b*x+c"]["a",1.25]["b",−0.95]["c",0.75]'
+                '["R²",0.99965928449744]["Resid","{...}"]]')
+LIN_RESULTS = ('[["Title","Linear Regression (mx+b)"]["RegEqn","m*x+b"]["m",1.9]["b",0.]["r²",0.96266666666667]'
+               '["r",0.98115578103921]["Resid","{...}"]]')
+_LINE_SEQ_RE = re.compile(r"seq\(approx\(1\.9\*x\+0\.\),x,([^,]+),([^,]+),([^,]+)\)")
+
+
+class StatsBridge(CasBridge):
+    """CasBridge (stores, isolation) plus the statistics commands: commands maps a command to
+    (stat.results, stat.RegEqn(mcpstatv)), or to an error text; the command checks its lists
+    are stored. seq() of the fitted line 1.9*x+0. is answered like the CAS would."""
+
+    def __init__(self, commands: dict, **kw):
+        super().__init__(**kw)
+        self.commands = commands
+        self.current: str | None = None
+
+    def _reply(self, expr):
+        if expr in self.commands:
+            self.calls.append(expr)
+            if isinstance(self.commands[expr], str):  # an error
+                return False, self.commands[expr]
+            lists = expr.split(" ", 1)[1].split(",")
+            if any(n not in self.vars for n in lists):
+                return False, "error 960 (variable is not defined)"
+            self.current = expr
+            return True, ""
+        if expr == "stat.results" and self.current:
+            self.calls.append(expr)
+            return True, self.commands[self.current][0]
+        if expr == "stat.RegEqn(mcpstatv)" and self.current:
+            self.calls.append(expr)
+            return True, self.commands[self.current][1]
+        if m := _LINE_SEQ_RE.fullmatch(expr):
+            self.calls.append(expr)
+            a, b, h = map(float, m.groups())
+            xs = [a + k * h for k in range(int((b - a) / h + 1e-9) + 1)]
+            return True, "{" + ",".join(_cas_number(1.9 * x) for x in xs) + "}"
+        return super()._reply(expr)
+
+
+def test_stats_schema():
+    import nspire_stats
+    assert list(get_args(server.StatCommand)) == list(nspire_stats.COMMANDS)
+    t = tools()["nspire_stats"]
+    props = t.inputSchema["properties"]
+    assert props["command"]["enum"] == list(nspire_stats.COMMANDS)
+    assert t.inputSchema["required"] == ["command"]
+    assert {"csv", "columns", "headers", "x_column", "y_column", "freq_column", "plot", "timeout_s"} <= set(props)
+    out = t.outputSchema["properties"]
+    assert {"command", "nspire", "title", "n", "columns", "results", "equation", "r2", "r", "warnings"} <= set(out)
+
+
+def test_stats_regression_through_the_handler(monkeypatch):
+    fake = use(monkeypatch, StatsBridge({"QuadReg mcpstatx,mcpstaty": (QUAD_RESULTS,
+                                                                       "1.25*mcpstatv^2-0.95*mcpstatv+0.75")}))
+    r = call("nspire_stats", {"command": "QuadReg", "csv": "t;h\n1;1\n2;4\n3;9\n4;17\n"})
+    assert not r.isError, r.content
+    out = r.structuredContent
+    assert out["equation"] == "1.25*x^2-0.95*x+0.75" and out["r2"] == "0.99965928449744" and out["r"] is None
+    assert out["columns"] == ["t", "h"] and out["n"] == 4 and out["warnings"] is None
+    assert {"name": "b", "value": "−0.95"} in out["results"]
+    assert r.content[0].text.startswith("Quadratic Regression (QuadReg mcpstatx,mcpstaty): 4 rows of t and h")
+    assert fake.sessions == 1
+    assert fake.batches[-1] == ["mcpstatx:={1,2,3,4}", "mcpstaty:={1,4,9,17}", "QuadReg mcpstatx,mcpstaty",
+                                "stat.results", "stat.RegEqn(mcpstatv)"]
+    assert fake.vars == {}  # the lists were deleted again
+
+
+def test_stats_puts_back_a_stored_list_name_and_explains_errors(monkeypatch):
+    fake = use(monkeypatch, StatsBridge({"CubicReg mcpstatx,mcpstaty": "error 235 (dimension error: not enough "
+                                         "elements in the lists)"}, stored={"mcpstatx": ("NUM", "7")}))
+    with pytest.raises(ValueError, match="error 235") as e:
+        run(server.nspire_stats("CubicReg", columns=[[1, 2, 3], [1, 2, 3]]))
+    assert "too few data points" in str(e.value)
+    assert fake.vars == {"mcpstatx": ("NUM", "7")}
+
+
+def test_stats_onevar_with_frequencies(monkeypatch):
+    onevar = '[["Title","One-Variable Statistics"]["",2.25]["n",4.]]'
+    fake = use(monkeypatch, StatsBridge({"OneVar mcpstatx,mcpstatf": (onevar, "")}))
+    out = run(server.nspire_stats("OneVar", columns=[[1, 2, 3], [1, 2, 1]], headers=["score", "count"],
+                                  freq_column="count")).structuredContent
+    assert out["results"] == [{"name": "x̄", "value": "2.25"}, {"name": "n", "value": "4."}]
+    assert out["frequencies"] == "count" and "equation" not in out
+    assert "stat.RegEqn(mcpstatv)" not in fake.calls
+
+
+def test_stats_bad_data_never_reaches_the_bridge(monkeypatch):
+    fake = use(monkeypatch, StatsBridge({}))
+    for command, kw in (("LinRegMx", {"csv": "1,2\n3"}), ("LinRegMx", {"columns": [[1, 2], [3]]}),
+                        ("LinRegMx", {"csv": "1,a"}), ("LinRegMx", {}), ("OneVar", {"csv": "1\n2", "plot": True}),
+                        ("LinRegMx", {"columns": [[1, 2]]})):
+        with pytest.raises(ValueError):
+            run(server.nspire_stats(command, **kw))
+    assert fake.calls == [] and fake.sessions == 0
+
+
+def test_stats_plot(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = use(monkeypatch, StatsBridge({"LinRegMx mcpstatx,mcpstaty": (LIN_RESULTS, "1.9*mcpstatv+0.")}))
+    r = call("nspire_stats", {"command": "LinRegMx", "columns": [[1, 2, 3, 4], [2, 4, 5, 8]], "plot": True})
+    assert not r.isError, r.content
+    out = r.structuredContent
+    assert out["equation"] == "1.9*x+0." and out["r"] == "0.98115578103921" and out["r2"] == "0.96266666666667"
+    assert out["plot"].startswith("1. y = 1.9*x+0.  (TI-Nspire: 1.9*x+0.): y from")
+    assert fake.sessions == 1 and fake.batches[-1][0].startswith("seq(approx(1.9*x+0.),x,0.85,")
+    img = r.content[1]
+    assert img.type == "image" and base64.b64decode(img.data).startswith(b"\x89PNG")
+    assert "Plot: 1. y = 1.9*x+0." in r.content[0].text
+
+
+def test_stats_twovar_plot_shows_only_the_data(monkeypatch):
+    pytest.importorskip("matplotlib")
+    twovar = '[["Title","Two-Variable Statistics"]["r",0.9]]'
+    fake = use(monkeypatch, StatsBridge({"TwoVar mcpstatx,mcpstaty": (twovar, "")}))
+    r = call("nspire_stats", {"command": "TwoVar", "csv": "1 2\n2 3\n3 5", "plot": True})
+    assert not r.isError, r.content
+    assert r.structuredContent["plot"].startswith("The data points only")
+    assert len(r.content) == 2 and not any(c.startswith("seq(") for c in fake.calls)

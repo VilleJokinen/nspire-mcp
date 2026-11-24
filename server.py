@@ -75,13 +75,17 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   nothing. To test whether two expressions are equal, pass them as two lines.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary.
+- nspire_stats runs TI-Nspire's statistics on data (CSV text or columns): OneVar, TwoVar and the
+  regressions (LinRegMx, QuadReg, ExpReg, ...), returning stat.results, the fitted equation and
+  r²/r, and with plot=True the data with the fitted curve. The data lists are put back afterwards;
+  the stat.* variables keep this call's results, as on a handheld.
 - Units are TI-Nspire's: 5_m, 9.81_m/_s^2, 2_mA*4.7_kΩ; convert with @> (5_km@>_m). Their names
   ignore case, so some aren't what they look like: kelvin is _°K (_K is Boltzmann's constant),
   coulomb _coul (_C is c), henry _henry (_H is h); TI-Nspire has no _MW, _kN, _mT, _MJ. Constants:
   _g, _c, _h, _k, _q, _Na, _Rc, _Gc, _ε0, _μ0, _Me, _Mp, _Mn. In LaTeX, units go right after a number
   (5\\,\\mathrm{m}) and \\to \\mathrm{km/h} converts; constants=["g", ...] reads symbols as constants.
 - When the CAS returns an error, a plain-language cause and fix (nspire_errors.py) is added: to the error
-  text of nspire_eval and nspire_latex, to a failed nspire_eval_batch item's warnings, and to the warnings of
+  text of nspire_eval, nspire_latex and nspire_stats, to a failed nspire_eval_batch item's warnings, and to the warnings of
   nspire_check_steps and nspire_plot. It is a likely cause, not a diagnosis.
 - Report results as the CAS gives them; explain the steps yourself."""
 
@@ -90,6 +94,11 @@ mcp = FastMCP("nspire", instructions=INSTRUCTIONS)
 
 # "auto" plus the keys of nspire_latex.ACTIONS, listed here so SymPy isn't
 # imported at startup (tests/test_server.py checks that they match).
+# The keys of nspire_stats.COMMANDS (tests/test_server.py checks that they match).
+StatCommand = Literal[
+    "OneVar", "TwoVar", "LinRegMx", "LinRegBx", "MedMed", "QuadReg", "CubicReg", "QuartReg", "PowerReg",
+    "ExpReg", "LnReg", "Logistic", "LogisticD", "SinReg",
+]
 LatexAction = Literal[
     "auto", "eval", "simplify", "approx", "solve", "csolve", "nsolve", "zeros", "czeros", "factor",
     "cfactor", "expand", "propfrac", "comdenom", "texpand", "tcollect", "diff", "integrate", "taylor",
@@ -251,6 +260,31 @@ class _CheckStepsResult(TypedDict):
 
 class CheckStepsResult(_CheckStepsResult, total=False):
     var: str | None
+    warnings: list[str] | None
+
+
+class StatRow(TypedDict):
+    name: str
+    value: str
+
+
+class _StatsResult(TypedDict):
+    command: str
+    nspire: str
+    title: str | None
+    n: int
+    columns: list[str]
+    results: list[StatRow]
+
+
+class StatsResult(_StatsResult, total=False):
+    frequencies: str | None
+    equation: str | None
+    equation_template: str | None
+    r2: str | None
+    r: str | None
+    plot: str | None
+    notes: list[str] | None
     warnings: list[str] | None
 
 
@@ -867,6 +901,96 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
         TextContent(type="text", text=text),
         ImageContent(type="image", data=base64.b64encode(png).decode("ascii"), mimeType="image/png"),
     ])
+
+
+_ColumnRef = Annotated[int | str | None, Field(description="A column by number (1 = first) or header name.")]
+
+
+@mcp.tool(annotations=_hints("Statistics and regressions on the TI-Nspire CAS", destructiveHint=False,
+                             idempotentHint=True))
+async def nspire_stats(command: StatCommand, csv: str | None = None,
+                       columns: list[list[float | str]] | None = None,
+                       headers: list[str] | None = None,
+                       x_column: _ColumnRef = None, y_column: _ColumnRef = None, freq_column: _ColumnRef = None,
+                       plot: bool = False, timeout_s: float = 10) -> Annotated[CallToolResult, StatsResult]:
+    """Run a TI-Nspire statistics command on data: summary statistics or a regression fit.
+
+    command: OneVar (one column: mean x̄, Σx, Σx², sample sd sx, population sd σx, n, min, Q1,
+    median, Q3, max, SSX), TwoVar (x and y: both columns' statistics and r), or a regression of y
+    on x: LinRegMx (y=m*x+b), LinRegBx (y=a+b*x), MedMed (median-median line), QuadReg, CubicReg,
+    QuartReg, PowerReg (y=a*x^b, x and y > 0), ExpReg (y=a*b^x, y > 0), LnReg (y=a+b*ln(x), x > 0),
+    Logistic (c/(1+a*e^(-b*x))), LogisticD (... + d), SinReg (a*sin(b*x+c)+d).
+    Data, one of:
+      csv: text, one row per line; columns separated by tabs, semicolons, commas or spaces. A
+        first row with a non-number is the header. Decimal commas (1,5) work with ; or tab
+        separators. Numbers only: no empty cells, every row the same length; up to 1000 rows.
+      columns: lists of numbers, e.g. [[1,2,3,4],[2.1,3.9,6.2,7.8]] (x first), all the same length.
+    headers: column names (with columns; with csv they replace the header row).
+    x_column / y_column / freq_column: which columns to use, by number (1 = first) or header name.
+    By default OneVar uses column 1, the others column 1 as x and column 2 as y. freq_column: a
+    column of frequencies (how many times each row counts); not for Logistic, LogisticD, SinReg.
+    plot=True (not OneVar): also return a PNG of the data points and the fitted curve; every
+    point of the curve is computed by the CAS (like nspire_plot), the dots are the data as given.
+
+    The data goes to the CAS as written; every statistic is TI-Nspire's (Python only reads the
+    numbers in and the results out). Returns {command, nspire (the command run), title, n,
+    columns (names of the columns used), frequencies, results: [{name, value}] (stat.results as
+    TI-Nspire labels them: x̄, sx := sₙ₋₁x, r², ...; values as the CAS writes them), equation
+    (regressions: the fitted y in x with the CAS's decimals), equation_template (e.g. m*x+b),
+    r2 and r (when the fit has them; quadratic and higher give R² only), plot (the plot's text
+    summary), notes, warnings}. The first content block is the same as text; with plot=True the
+    image follows. Report numbers as the CAS gives them; round only when presenting.
+
+    The document: the data is stored as the lists mcpstatx, mcpstaty, mcpstatf only during the
+    call, and those names are put back (or deleted) afterwards, so nothing of the data stays. The
+    command itself writes TI-Nspire's stat.* variables (stat.results, stat.RegEqn, stat.r, ...),
+    as on a handheld: they are left holding this call's results, replacing any earlier
+    statistics command's. Errors (too few points: error 235; a domain error 260 for PowerReg with
+    x <= 0) come with a plain-language explanation.
+    """
+    import nspire_data as dt
+    ns = await asyncio.to_thread(importlib.import_module, "nspire_stats")
+    # bad data fails before the bridge is used
+    table = dt.parse_table(csv, columns, headers)
+    spec = ns.prepare(command, table, x_column, y_column, freq_column, plot)
+    stores, _ = ns.commands(spec)
+    nm = await _isolation_module(True)
+    pl = await asyncio.to_thread(importlib.import_module, "nspire_plot") if plot else None
+
+    def work():
+        with isolated_names(bridge, nm, stores, timeout_s) as iso:
+            replies = ns.run(bridge, spec, timeout_s)
+        out = ns.result(spec, replies)
+        out["warnings"] += iso.all_warnings()
+        got = pspec = None
+        if pl is not None:
+            pspec = ns.plot_spec(spec, out.get("equation"))
+            got = pl.sample(bridge, pspec, timeout_s) if pspec.funcs else pl.Sampled([], [])
+        return out, pspec, got
+    log.info("stats %s on %d rows%s", spec.command, table.rows, ", plot" if plot else "")
+    try:
+        out, pspec, got = await asyncio.to_thread(bridge.session, work)
+    except ValueError as e:
+        raise ValueError(with_explanation(str(e))) from None
+    content: list[ContentBlock] = []
+    if pl is not None and pspec is not None and got is not None:
+        out["warnings"] += explain_all(k for errs in got.errors for k in errs)
+        if pspec.funcs:
+            out["plot"] = pl.summary(pspec, got).split("\n", 1)[-1]  # without the "Plotted ..." line
+        else:
+            out["plot"] = "The data points only (TwoVar fits no curve)."
+        xs, ys = ns.plot_points(spec)
+        title = f"{spec.command}: y = {out['equation']}" if out.get("equation") else (out["title"] or spec.command)
+        # drawn after the session, with the user's clipboard already restored
+        png = await asyncio.to_thread(pl.render_png, pspec, got, (xs, ys), title,
+                                      spec.label(spec.x), spec.label(spec.y))
+        content.append(ImageContent(type="image", data=base64.b64encode(png).decode("ascii"), mimeType="image/png"))
+    if not out["warnings"]:
+        out["warnings"] = None
+    if not out["notes"]:
+        out["notes"] = None
+    content.insert(0, TextContent(type="text", text=ns.summary(out)))
+    return CallToolResult(content=content, structuredContent=out)
 
 
 @mcp.tool(annotations=_hints("Write a worked solution on a TI-Nspire Notes page"))

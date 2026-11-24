@@ -120,6 +120,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and saved to a file (see below) |
 | `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200, timeout_s=20)` | graph up to 8 functions: a PNG image plus a summary (y range, gaps, asymptotes, `warnings`). The CAS computes every point with `seq(approx(f),x,…)`; matplotlib only draws them. Undefined or non-real points are gaps, and lines aren't drawn across asymptotes. Stores nothing |
+| `nspire_stats(command, csv, columns, headers, x_column, y_column, freq_column, plot=False, timeout_s=10)` | statistics on data given as CSV text (tab, `;`, `,` or space separated, optional header row; decimal commas with `;` or tabs) or as columns: `OneVar`, `TwoVar` and the regressions `LinRegMx`, `LinRegBx`, `MedMed`, `QuadReg`, `CubicReg`, `QuartReg`, `PowerReg`, `ExpReg`, `LnReg`, `Logistic`, `LogisticD`, `SinReg`, with an optional frequency column. Returns `stat.results` as `results: [{name, value}]`, and for regressions the fitted `equation` (from `stat.RegEqn`), `r2` and `r`. `plot=True` adds a PNG of the data and the fitted curve (every curve point computed by the CAS). The data lists `mcpstatx`, `mcpstaty`, `mcpstatf` are put back afterwards; TI-Nspire's `stat.*` variables keep this call's results, as on a handheld |
 | `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants, spot_check=True)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `expand((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Expression steps that can't be settled that way get a numeric spot check (one more request): both lines evaluated at 12 random points, `probably_ok` or `broken` with a counterexample. Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| probably_ok \| broken \| undecided, check, cas, reason, residual?, spot_check?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
@@ -433,7 +434,9 @@ Pings, then checks `2+2`, `factor`, `solve`, `∫`, `cSolve`, a deliberate synta
 the document's mode settings, a variable round trip (it stores and deletes `brgselftest`,
 a name of its own), the per-call mode override (it switches the angle and Auto/Approximate
 modes for one evaluation each and checks they're put back), `nspire_plot`'s sampling
-(values, a non-real gap, `undef` at 0), and a set of LaTeX problems (integral, limit, sum,
+(values, a non-real gap, `undef` at 0), `nspire_stats` (a linear fit, `OneVar` with and
+without frequencies, and too few points for `CubicReg`; it stores and deletes the lists
+`mcpstatx`, `mcpstaty`, `mcpstatf`), and a set of LaTeX problems (integral, limit, sum,
 system, determinant, ODEs, decimal comma…). On the non-CAS edition the symbolic cases pass
 if they return a clean error, and the LaTeX cases are skipped.
 
@@ -571,6 +574,8 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_latex.py` | LaTeX → TI-Nspire syntax → result → LaTeX (SymPy) |
 | `nspire_notes.py` | builds a Notes page of text and math boxes |
 | `nspire_plot.py` | samples functions on the CAS and draws them (`nspire_plot`) |
+| `nspire_data.py` | reads CSV text or columns of numbers into TI-Nspire lists (offline, standard library) |
+| `nspire_stats.py` | statistics commands and reading `stat.results` (`nspire_stats`) |
 | `nspire_errors.py` | cause and likely fix for TI-Nspire error codes; added to error text and `warnings` |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |

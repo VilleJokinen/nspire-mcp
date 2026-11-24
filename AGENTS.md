@@ -156,7 +156,7 @@ hotkey.
 - `nspire_errors.py`: plain-language cause and fix per TI-Nspire error code (`explain()`,
   `explain_all()`, `with_explanation()`), stdlib only. Codes and names must match `bridge.lua`'s `ERRORS`
   (a test checks); only add a code that is in that list, and say what you saw on the real CAS if you confirm it.
-  server.py appends the explanation to `nspire_eval`/`nspire_latex` error text, and puts it in `warnings` for
+  server.py appends the explanation to `nspire_eval`/`nspire_latex`/`nspire_stats` error text, and puts it in `warnings` for
   `nspire_eval_batch` failed items, `nspire_check_steps` (from each step's `cas`) and `nspire_plot` (sampled errors).
   Unknown codes get nothing.
 - `nspire_plot.py`: the `nspire_plot` tool's work, without pywin32 or matplotlib at import.
@@ -170,6 +170,24 @@ hotkey.
   `breaks()` finds asymptote jumps (not drawn), and `render_png()` imports matplotlib and
   draws after the session. The CAS computes every value: never compute points in Python.
   The tool reuses `doc_warnings` with `ignore={var}` (seq binds the plot variable).
+- `nspire_data.py`: data for TI-Nspire, standard library only: `parse_table(csv_text, columns, headers, header)`
+  reads CSV text (delimiter: tab, then `;`, then `,` if any line has one, else spaces; decimal commas only
+  with `;`/tab; a header row when a first-row cell isn't a number) or a list of columns into a `Table`
+  (`headers`, `columns` of TI-Nspire number literals written as given, `values` as floats for drawing
+  only). Limits: `MAX_ROWS`, `MAX_COLS`, `EXP_LIMIT`. Very large or small numbers become `1.5ᴇ-30`
+  (accepted by the real CAS). `list_literal()` / `list_chunks()` write a column as `{...}` pieces. Meant
+  to be reused for filling a Lists & Spreadsheet page.
+- `nspire_stats.py`: the `nspire_stats` tool's work, without pywin32 at import. `COMMANDS` (keep
+  `server.StatCommand` in step; a test checks), `prepare()` picks columns offline, `commands()` gives the
+  stores (`mcpstatx:={...}`, then `:=augment(...)` per `CHUNK` values; server.py runs them inside
+  `isolated_names()`, so the names are put back) and `[command, "stat.results", "stat.RegEqn(mcpstatv)"]`,
+  `run()` sends everything in one `eval_batch`, `result()` reads them. On the real CAS the stat commands
+  run at top level through `math.evalStr` (no Func wrapper; they return ""), `stat.results` is a matrix of
+  `["name", value]` rows whose labels use private-use characters for x̄ (U+F003), ȳ (U+F004) and the n of
+  sₙ₋₁x (U+F043), and `stat.RegEqn` is a function, called with the odd name `mcpstatv` that `equation()`
+  renames x. `stat.*` is left holding the results (TI-Nspire's own behaviour; not put back). With
+  `plot=True` the fitted equation is sampled with `nspire_plot.sample()` and drawn by `render_png(...,
+  points=...)` with the data as dots (Python draws the given data; the CAS computes the curve).
 - `nspire_steps.py`: the `nspire_check_steps` tool's work, without pywin32 or SymPy at import
   (`nspire_latex` is imported only for LaTeX lines). `prepare()` reads the lines offline (a leading
   `=`, `&=`, `\iff`, `⇒` is dropped; `x=2 \lor x=3` and `x=2,\ x=3` become `solve(x=2 or x=3,x)`;

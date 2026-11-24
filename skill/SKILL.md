@@ -79,6 +79,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as)` | The user wants the worked solution written into TI-Nspire itself. |
 | `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200)` | The user wants to see a graph. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. |
+| `nspire_stats(command, csv, columns, x_column, y_column, freq_column, plot)` | The user has data: summary statistics (`OneVar`, `TwoVar`) or a regression fit (`LinRegMx`, `QuadReg`, `ExpReg`, ...). Returns `stat.results`, the fitted `equation`, `r2`/`r`, and with `plot=True` an image of the data and the fit. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
 
@@ -184,6 +185,21 @@ summary lists each function's y range, its gaps and where it jumps: base what yo
 about the graph on it, not on guesses from the picture. If the automatic y range cuts off
 spikes, pass `y_min`/`y_max`. It stores nothing: `Define` a function with `nspire_eval`
 first if you want to plot `f(x)`. Every other name needs a stored value.
+
+### `nspire_stats`
+
+Runs TI-Nspire's own statistics commands on data: pass the data as `csv` text (one row per
+line; tab, `;`, `,` or space separated; a first row with words is the header; decimal commas
+only with `;` or tabs) or as `columns` (`[[x...], [y...]]`). `OneVar` describes one column
+(mean x̄, sx := sₙ₋₁x, σx, quartiles, ...); `TwoVar` two; the regressions fit y against x:
+`LinRegMx` (m*x+b), `LinRegBx` (a+b*x), `MedMed`, `QuadReg`, `CubicReg`, `QuartReg`,
+`PowerReg`, `ExpReg`, `LnReg`, `Logistic`, `LogisticD`, `SinReg`. Choose columns with
+`x_column`/`y_column` (number or header name) and frequencies with `freq_column`. Report
+`results`, `equation` and `r2`/`r` as given (round only when presenting) and say which fit was
+used; quadratic and higher fits give R² only. `plot=True` returns an image of the data with
+the fitted curve. Too few points (error 235) or non-positive data for `PowerReg`/`LnReg`/`ExpReg`
+(error 260) come back as errors with an explanation. The data lists are put back afterwards;
+TI-Nspire's `stat.*` variables are left with this call's results.
 
 ### `nspire_notes`
 
