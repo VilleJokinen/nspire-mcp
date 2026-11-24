@@ -124,6 +124,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_to_latex(text)` | TI-Nspire math text (e.g. a result the user pasted from TI-Nspire) → LaTeX, without TI-Nspire: a text conversion only, nothing evaluated. The same conversion as the Ctrl+Alt+Shift+T hotkey |
 | `nspire_stats(command, csv, columns, headers, x_column, y_column, freq_column, plot=False, timeout_s=10)` | statistics on data given as CSV text (tab, `;`, `,` or space separated, optional header row; decimal commas with `;` or tabs) or as columns: `OneVar`, `TwoVar` and the regressions `LinRegMx`, `LinRegBx`, `MedMed`, `QuadReg`, `CubicReg`, `QuartReg`, `PowerReg`, `ExpReg`, `LnReg`, `Logistic`, `LogisticD`, `SinReg`, with an optional frequency column. Returns `stat.results` as `results: [{name, value}]`, and for regressions the fitted `equation` (from `stat.RegEqn`), `r2` and `r`. `plot=True` adds a PNG of the data and the fitted curve (every curve point computed by the CAS). The data lists `mcpstatx`, `mcpstaty`, `mcpstatf` are put back afterwards; TI-Nspire's `stat.*` variables keep this call's results, as on a handheld |
 | `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants, spot_check=True)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `expand((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Expression steps that can't be settled that way get a numeric spot check (one more request): both lines evaluated at 12 random points, `probably_ok` or `broken` with a counterexample. Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| probably_ok \| broken \| undecided, check, cas, reason, residual?, spot_check?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
+| `nspire_log(day, max_chars=6000)` | where the session log is (see Session log) and the end of a day's notes; `enabled: false` when it's off |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
@@ -288,6 +289,54 @@ clipboard alone; a click in the tray menu still copies), `--hotkey ctrl+alt+f9`,
 `--approx-hotkey …`, `--actions-hotkey …`, `--latex-hotkey …`, `--quit-hotkey …` (a letter, digit or
 F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--plain` (answers as text,
 matplotlib never loaded). Only one copy runs at a time.
+
+### Session log
+
+Off by default. Turn it on and every `nspire_eval`, `nspire_eval_batch`, `nspire_latex`,
+`nspire_check_steps`, `nspire_stats` and `nspire_to_latex` call, and every hotkey solve
+and conversion, is appended to a Markdown file of scratch notes: time, the input LaTeX
+as a `$$…$$` block (Obsidian and most Markdown editors draw it), the TI-Nspire command
+that was sent, the result as TI-Nspire text and as LaTeX, the decimal value, and any
+warnings or errors. Failed calls are logged too.
+
+    ## 14:03:22 · nspire_latex
+
+    $$
+    x^2-4=0
+    $$
+
+    TI-Nspire command:
+    `solve(x^2-4=0,x)`
+
+    Result (TI-Nspire text):
+    `x=−2 or x=2`
+
+    $$
+    x = -2 \quad\text{or}\quad x = 2
+    $$
+
+Switches (environment variables, read at every call, so they work for the MCP server
+and the hotkey alike):
+
+| Variable | Effect |
+| --- | --- |
+| `NSPIRE_LOG=1` | log to `logs\` in this folder (git-ignored) |
+| `NSPIRE_LOG_DIR=<folder>` | log there instead, e.g. a folder in your Obsidian vault; also switches logging on. A relative folder is taken from this repo's folder |
+| `NSPIRE_LOG=0` | off, even with `NSPIRE_LOG_DIR` set |
+
+The simplest way is a user environment variable, then restart Claude Code and the
+hotkey (`setx NSPIRE_LOG_DIR "C:\Users\you\Vault\TI-Nspire logs"`); for the MCP server
+alone, add `-e NSPIRE_LOG=1` to `claude mcp add`.
+
+It is off by default because the log keeps your problems and answers on disk, and a
+tool that quietly writes files into a repo or a school folder is a surprise; you
+choose to start it. One file per day (`2026-11-24.md`, local time), shared by the
+server and the hotkey: each entry is written under a lock, so two processes never mix
+or lose entries. A log that can't be written (full disk, read-only folder) is skipped,
+with one note on stderr; it never fails a call. Only what the tools already handle is
+logged (the LaTeX or expression you gave and the CAS's answer); the clipboard's other
+contents never are. The `nspire_log(day?, max_chars=6000)` tool says where the log is
+and returns the end of a day's file (empty and `enabled: false` when it's off).
 
 ### What the LaTeX solver understands
 
@@ -604,6 +653,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_plot.py` | samples functions, parametric, polar and implicit curves on the CAS and draws them, with zeros, extrema and intersections the CAS finds (`nspire_plot`) |
 | `nspire_data.py` | reads CSV text or columns of numbers into TI-Nspire lists (offline, standard library) |
 | `nspire_stats.py` | statistics commands and reading `stat.results` (`nspire_stats`) |
+| `nspire_log.py` | the session log: Markdown notes of every solve (off unless `NSPIRE_LOG` / `NSPIRE_LOG_DIR`; standard library) |
 | `nspire_errors.py` | cause and likely fix for TI-Nspire error codes; added to error text and `warnings` |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |

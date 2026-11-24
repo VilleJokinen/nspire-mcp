@@ -47,6 +47,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")  # noqa: SIM115
 
+import nspire_log  # noqa: E402
 from nspire_latex import ACTIONS, LatexError, format_answer, nspire_to_latex, plan, run_plan  # noqa: E402
 
 # The Windows parts (hotkeys, tray icon, clipboard) load only on Windows, so the
@@ -990,6 +991,7 @@ class App:
     def solve(self, job: Job) -> None:
         """Worker thread: plan, run on the CAS, copy, render; the result goes back as an event."""
         latex = ""
+        log_note = job.action if job.action != "auto" else None
         try:
             latex = job.latex if job.latex is not None else (self.clip.get() or "").strip()
             if not latex or self.clip.is_traffic(latex):
@@ -1012,9 +1014,15 @@ class App:
             if self.renderer is not None and r.get("result_latex"):
                 png = self.renderer.render(r["result_latex"])
             self.events.put(("result", latex, r, copied, png))
+            nspire_log.record("hotkey", note=log_note, latex=latex, command=r.get("nspire"),
+                              result=r.get("exact") or r.get("result"), result_latex=r.get("result_latex"),
+                              approx=r.get("approx") or (r["result"] if r.get("exact") else None),
+                              approx_latex=r.get("approx_latex") or (r.get("result_latex") if r.get("exact") else None))
         except LatexError as e:
+            nspire_log.record("hotkey", note=log_note, latex=latex, error=str(e))
             self.events.put(("error", "Couldn't read the LaTeX", str(e), latex))
         except Exception as e:
+            nspire_log.record("hotkey", note=log_note, latex=latex, error=str(e))
             self.events.put(("error", "TI-Nspire error", str(e), latex))
         finally:
             self.busy.clear()
@@ -1049,7 +1057,9 @@ class App:
             self.clip.set(tex)
             png = self.renderer.render(tex) if self.renderer is not None else None
             self.events.put(("converted", text, tex, png))
+            nspire_log.record("hotkey to LaTeX", result=text, result_latex=tex)
         except LatexError as e:
+            nspire_log.record("hotkey to LaTeX", command=text, error=str(e))
             self.events.put(("error", "Couldn't convert to LaTeX", str(e), text))
         except Exception as e:
             self.events.put(("error", "Hotkey error", f"{type(e).__name__}: {e}", text))

@@ -603,3 +603,51 @@ def test_app_runs_the_picked_action(root, monkeypatch):
     assert ev[0] == "result"
     assert bridge.commands == ["factor(x^2 - 1)"]
     assert clip.copies == [ev[2]["result_latex"]]
+
+
+# ---------------------------------------------------------------- session log
+
+def _log_text(folder) -> str:
+    return next(folder.glob("*.md")).read_text(encoding="utf-8")
+
+
+def test_solve_is_logged(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    app, clip, bridge = make_app()
+    run_job(app)
+    text = _log_text(tmp_path)
+    assert "· hotkey" in text and "$$\nx^2-4=0\n$$" in text and "x=−2 or x=2" in text
+
+
+def test_numeric_solve_logs_both_answers(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    app, clip, bridge = make_app(r"\sqrt{2}", replies={"√(2)": "√(2)", "approx(√(2))": "1.41421"})
+    run_job(app, hk.Job(numeric=True))
+    text = _log_text(tmp_path)
+    assert "1.41421" in text and "Approximately" in text
+
+
+def test_hotkey_errors_and_to_latex_are_logged(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    app, clip, bridge = make_app(r"\unknowncommand{x}")
+    assert run_job(app)[0] == "error"
+    assert "**Error:**" in _log_text(tmp_path)
+    app, clip, bridge = make_app("√(2)/2")
+    app.busy.set()
+    app.to_latex()
+    assert "hotkey to LaTeX" in _log_text(tmp_path)
+
+
+def test_hotkey_logging_failure_changes_nothing(monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(blocker / "sub"))
+    app, clip, bridge = make_app()
+    assert run_job(app)[0] == "result"
+
+
+def test_nothing_logged_when_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app, clip, bridge = make_app()
+    run_job(app)
+    assert list(tmp_path.rglob("*.md")) == []

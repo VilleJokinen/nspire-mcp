@@ -11,3 +11,6 @@ skill.zip
 
 # Per-machine Claude Code settings
 .claude/settings.local.json
+
+# Session log folder (NSPIRE_LOG=1)
+logs/

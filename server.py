@@ -35,6 +35,7 @@ from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, T
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
+import nspire_log as session_log  # noqa: E402
 from nspire_bridge import (  # noqa: E402
     VALUE_MAX_CHARS,
     VALUE_TYPES,
@@ -94,6 +95,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   nspire_check_steps and nspire_plot. It is a likely cause, not a diagnosis.
 - nspire_to_latex turns TI-Nspire text (a result the user pasted from TI-Nspire) into LaTeX without
   TI-Nspire: a text conversion only, nothing is evaluated.
+- A session log (Markdown scratch notes of every solve) is kept only when the user turned it on
+  (NSPIRE_LOG=1 or NSPIRE_LOG_DIR); nspire_log says where it is and reads a day's end.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -456,6 +459,13 @@ def isolated_names(bridge, notes_mod, cmds: list[str], timeout_s: float):
             _undo_all(bridge, notes_mod, iso, t)
 
 
+def _log_note(isolated: bool = False, angle: str | None = None, exact_mode: str | None = None) -> str | None:
+    """The options of a call, for its session-log heading."""
+    parts = [p for p in ("isolated" if isolated else "", f"angle={angle}" if angle else "",
+                         f"exact_mode={exact_mode}" if exact_mode else "") if p]
+    return ", ".join(parts) or None
+
+
 def _eval_result(result: str, warnings: list[str]) -> CallToolResult:
     """nspire_eval's reply: the result as the only text block, as before isolated existed,
     plus a second block when there are warnings. structuredContent is EvalResult."""
@@ -567,10 +577,17 @@ async def nspire_eval(expr: str, timeout_s: float = 5,
             result, mode_warnings = bridge.eval_in_modes(expr, settings, timeout_s)
         return result, mode_warnings + iso.all_warnings()
     log.info("eval %r%s", expr, " (isolated)" if isolated else "")
+    opts = _log_note(isolated, angle, exact_mode)
     try:
         result, warnings = await asyncio.to_thread(bridge.session, work)
     except ValueError as e:
-        raise ValueError(with_explanation(str(e))) from None
+        msg = with_explanation(str(e))
+        session_log.record("nspire_eval", note=opts, command=expr, error=msg)
+        raise ValueError(msg) from None
+    except BridgeTimeout as e:
+        session_log.record("nspire_eval", note=opts, command=expr, error=str(e))
+        raise
+    session_log.record("nspire_eval", note=opts, command=expr, result=result, warnings=warnings)
     return _eval_result(result, warnings)
 
 
@@ -602,7 +619,36 @@ async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5,
                 r.setdefault("warnings", []).extend(hints)
         return res
     log.info("batch of %d%s", len(exprs), " (isolated)" if isolated else "")
-    return await asyncio.to_thread(bridge.session, work)
+    try:
+        res = await asyncio.to_thread(bridge.session, work)
+    except (ValueError, BridgeTimeout) as e:
+        session_log.record("nspire_eval_batch", note=_log_note(isolated), error=str(e),
+                          items=[{"command": x} for x in exprs])
+        raise
+    session_log.record("nspire_eval_batch", note=_log_note(isolated), items=[
+        {"command": x, "result": r.get("result"), "error": None if r["ok"] else r.get("error"),
+         "warnings": r.get("warnings")} for x, r in zip(exprs, res, strict=False)])
+    return res
+
+
+class LogResult(TypedDict):
+    enabled: bool
+    folder: str | None
+    file: str | None
+    exists: bool
+    text: str
+    truncated: bool
+
+
+@mcp.tool(annotations=_hints("Read the session log", readOnlyHint=True, idempotentHint=True))
+async def nspire_log(day: str | None = None, max_chars: int = 6000) -> LogResult:
+    """Where the session log is and the end of a day's notes (default today; day = "2026-11-24").
+
+    The log (Markdown: input as $$ LaTeX, the TI-Nspire command, result, warnings) is off unless
+    the user set NSPIRE_LOG=1 or NSPIRE_LOG_DIR for the server; then enabled is false and file is
+    null. Reading it logs nothing. text is cut from the start to max_chars (truncated).
+    """
+    return cast("LogResult", await asyncio.to_thread(session_log.read_day, day, max_chars))
 
 
 @mcp.tool(annotations=_hints("List stored TI-Nspire variables", readOnlyHint=True, idempotentHint=True))
@@ -779,6 +825,7 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
         # translate first: bad LaTeX fails without touching the clipboard
         p = await asyncio.to_thread(lx.plan, latex, action, var, order, point, constants)
     except lx.LatexError as e:
+        session_log.record("nspire_latex", latex=latex, error=str(e))
         raise ValueError(str(e)) from None
     settings = _mode_settings(angle, exact_mode)
     _check_mode_override(settings, p.command)
@@ -791,16 +838,25 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
             in_modes = _InModes(bridge, settings) if settings else None
             run = lx.run_plan(in_modes or bridge, p, timeout_s)
         return run, warnings + (in_modes.warnings if in_modes else []) + iso.all_warnings()
+    opts = _log_note(isolated, angle, exact_mode)
     try:
         run, warnings = await asyncio.to_thread(bridge.session, work)
     except ValueError as e:
-        raise ValueError(with_explanation(str(e))) from None
+        msg = with_explanation(str(e))
+        session_log.record("nspire_latex", note=opts, latex=latex, command=readable(p.command), error=msg)
+        raise ValueError(msg) from None
+    except BridgeTimeout as e:
+        session_log.record("nspire_latex", note=opts, latex=latex, command=readable(p.command), error=str(e))
+        raise
     if p.parsed.constants:
         warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(p.parsed.constants) + ".")
     # LaTeX conversion after the session, with the user's clipboard already restored
     out = await asyncio.to_thread(lx.format_answer, run)
     if warnings:
         out["warnings"] = warnings
+    session_log.record("nspire_latex", note=opts, latex=latex, command=out["nspire"], result=out["result"],
+                      result_latex=out.get("result_latex"), approx=out.get("approx"),
+                      approx_latex=out.get("approx_latex"), warnings=warnings)
     return out
 
 
@@ -819,7 +875,9 @@ async def nspire_to_latex(text: str) -> ToLatexResult:
     try:
         latex = await asyncio.to_thread(lx.nspire_to_latex, text)
     except lx.LatexError as e:
+        session_log.record("nspire_to_latex", command=text, error=str(e))
         raise ValueError(str(e)) from None
+    session_log.record("nspire_to_latex", result=text, result_latex=latex)
     return {"latex": latex}
 
 
@@ -915,6 +973,11 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
     }
     if warnings:
         out["warnings"] = warnings
+    session_log.record(
+        "nspire_check_steps", latex=[ln.source for ln in spec.lines] if latex else None,
+        summary=out["summary"], warnings=warnings,
+        items=[{"command": f"{spec.lines[s['from_line'] - 1].nspire}  →  {spec.lines[s['to_line'] - 1].nspire}",
+                "result": f"{s['verdict']}: {s.get('reason') or ''}".rstrip(": ")} for s in out_steps])
     return out
 
 
@@ -1137,6 +1200,7 @@ async def nspire_stats(command: StatCommand, csv: str | None = None,
     if not out["notes"]:
         out["notes"] = None
     content.insert(0, TextContent(type="text", text=ns.summary(out)))
+    session_log.record("nspire_stats", command=out.get("nspire"), summary=ns.summary(out), warnings=out["warnings"])
     return CallToolResult(content=content, structuredContent=out)
 
 
