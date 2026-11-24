@@ -63,6 +63,12 @@ log = logging.getLogger("nspire")
 NOTES_MENU_KEY = "6"   # "Add Notes" in the add-page menu of a handheld document
 GRAPHS_MENU_KEY = "2"  # "Add Graphs" in the same menu
 FILE_MENU, NEW_COMPUTER_ITEM = 1, 2  # File > New computer document
+# File > Settings > Document Settings. File: New handheld, New computer, Open, Close, Save, Save As,
+# Save to Handheld, Convert to, Print, Settings; Settings: Change Language, Handheld Type, Document Settings
+SETTINGS_ITEM, DOCUMENT_SETTINGS_ITEM = 10, 3
+# Display Digits, the dialog's first (focused) field, lists Float, Float1 ... Float12, Fix0 ... Fix12
+DIGITS_TOP_KEYS = 20  # Up presses that reach Float from anywhere (the list doesn't wrap)
+MIN_DIGITS, MAX_DIGITS = 1, 12
 INSERT_MENU = 4  # Insert: Problem, Page, Calculator, Graphs, Geometry, Lists & Spreadsheet, Data & Statistics, Notes
 INSERT_PAGE_ITEM, INSERT_GRAPHS_ITEM, INSERT_NOTES_ITEM = 2, 4, 8
 GRAPHS_ENTRY_KEY = "ctrl+g"  # Show Entry Line: Enter graphs a function and closes the entry line
@@ -91,6 +97,7 @@ _DEFINE_RE = re.compile(rf"\bDefine\s+(?:Lib(?:Pub|Priv)\s+)?({_NAME})\s*(\([^()
 _ASSIGN_RE = re.compile(rf"(?<![\w.])({_NAME})\s*(\([^()]*\))?\s*:=")  # a:=5   f(x):=x^2
 _STORE_RE = re.compile(rf"(?:→|=:)\s*({_NAME})")  # 5→a   5=:a
 _STRING_RE = re.compile(r'"[^"]*"')
+_UNIT_RE = re.compile(r"_(?:°[CFK]|[^\W\d_]\w*)")  # _m, _°C, _g: units and constants, not variables
 _IDENT_RE = re.compile(_NAME)
 _VARINFO_ROW = re.compile(r'\[([^\[\]",]+),"([A-Za-z]+)"')  # one row of getVarInfo(): [name,"NUM","",0]
 
@@ -102,7 +109,7 @@ class Names:
 
 
 def scan_names(cmd: str) -> Names:
-    s = _STRING_RE.sub('""', cmd)
+    s = _UNIT_RE.sub(lambda m: " " * len(m.group()), _STRING_RE.sub('""', cmd))
     defines: list[str] = []
     skip: list[tuple[int, int]] = []
     params: set[str] = set()
@@ -123,7 +130,10 @@ def scan_names(cmd: str) -> Names:
 
 # ------------------------------------------------------------ argument checks (offline)
 
-def check_options(title: str | None, page_size: str, timeout_s: float) -> None:
+def check_options(title: str | None, page_size: str, timeout_s: float, digits: int | None = None) -> None:
+    if digits is not None and (isinstance(digits, bool) or not isinstance(digits, int)
+                               or not MIN_DIGITS <= digits <= MAX_DIGITS):
+        raise ValueError(f"digits must be a whole number of significant figures from {MIN_DIGITS} to {MAX_DIGITS}")
     if page_size not in ("computer", "handheld"):
         raise ValueError("page_size must be 'computer' or 'handheld'")
     if title is not None and (not isinstance(title, str) or "\n" in title or "\r" in title):
@@ -144,23 +154,50 @@ def plan_steps(steps: list[dict]) -> list[dict]:
     for i, st in enumerate(steps, 1):
         if not isinstance(st, dict):
             raise ValueError(f'step {i}: must be an object like {{"text": ..., "math": ...}}')
-        for key in ("text", "math", "latex", "action", "var"):
+        for key in ("text", "math", "latex", "action", "var", "to"):
             if st.get(key) is not None and not isinstance(st[key], str):
                 raise ValueError(f"step {i}: {key} must be a string")
+        if st.get("approx") is not None and not isinstance(st["approx"], bool):
+            raise ValueError(f"step {i}: approx must be true or false")
+        consts = st.get("constants")
+        if consts is not None and not (isinstance(consts, bool) or (
+                isinstance(consts, list) and all(isinstance(c, str) for c in consts))):
+            raise ValueError(f'step {i}: constants must be a list of symbols such as ["g", "c"], or true')
         text = (st.get("text") or "").replace("\r", "")
         if "\n" in text:
             raise ValueError(f"step {i}: text must be one line; split it into several steps")
         cmd = None
+        convertible = True  # a quantity to evaluate, so "to" may convert it
         if st.get("latex"):
             import nspire_latex
             try:
-                cmd = nspire_latex.plan(st["latex"], st.get("action") or "auto", st.get("var")).command
+                p = nspire_latex.plan(st["latex"], st.get("action") or "auto", st.get("var"), constants=consts or False)
             except nspire_latex.LatexError as e:
                 raise ValueError(f"step {i}: {e}") from None
+            cmd = p.command
+            convertible = p.action in ("eval", "simplify", "approx") and not p.parsed.convert
         elif st.get("math"):
+            if consts:
+                raise ValueError(f"step {i}: constants is for latex steps; in math write TI-Nspire's names "
+                                 "(_g, _c, _h, _k, _Na, _Rc, _Gc, _ε0, _μ0, _Me, _Mp, _q)")
             cmd = to_cas_chars(st["math"].strip())
+            convertible = "@>" not in cmd
         if cmd is not None and ("\n" in cmd or "\r" in cmd):
             raise ValueError(f"step {i}: math must be a single line")
+        if (st.get("approx") or st.get("to")) and not cmd:
+            raise ValueError(f"step {i}: approx and to need math or latex")
+        if cmd and st.get("approx"):
+            cmd = f"approx({cmd})"
+        if cmd and st.get("to"):
+            import nspire_units
+            if not convertible:
+                raise ValueError(f"step {i}: to converts a quantity to evaluate; this step already converts or "
+                                 "doesn't evaluate a quantity (solve, define ...)")
+            try:
+                unit = nspire_units.unit_command(st["to"])
+            except nspire_units.UnitError as e:
+                raise ValueError(f"step {i}: to: {e}") from None
+            cmd = (f"({cmd})" if "|" in cmd else cmd) + "@>" + unit
         if not cmd and not text:
             raise ValueError(f"step {i}: needs text, math or latex")
         out.append({"text": text, "cmd": cmd, "label": f"step {i}", "result": None, "seconds": 0.0})
@@ -467,23 +504,31 @@ def _new_handheld_notes(guard: _Guard) -> str:
     return name
 
 
-MENU_OPEN_PIXELS = 1000  # sampled pixels that change when a drop-down opens (measured 3000-5600; idle 0)
+# Sampled pixels that clearly change when a drop-down opens, compared with the window just before
+# its Down key: File ~1360-1470, Insert ~950-1350 (measured). Alt alone ~120-245. Wallpaper drift
+# through a translucent window theme: ~100 within MENU_OPEN_WAIT_S, up to ~600 within a second.
+MENU_OPEN_PIXELS = 700
+MENU_OPEN_WAIT_S = 0.6  # a menu shows within ~0.4 s of its Down key; later changes are drift, so try again
 
 
-def _settled_menu_area(hwnd: int, timeout: float = 4.0) -> bytes:
-    """menu_area once the window has stopped redrawing (e.g. a document still opening)."""
+def _settled_menu_area(hwnd: int, timeout: float = 5.0, quiet: int = 3) -> bytes:
+    """menu_area once the window has stopped redrawing (e.g. a document still opening):
+    quiet samples in a row, 0.2 s apart, with (almost) nothing changed. One quiet sample
+    isn't enough: a new document can pause before it paints its page."""
     prev = menu_area(hwnd)
+    still = 0
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.2)
         cur = menu_area(hwnd)
-        if menu_changed(prev, cur) < 50:
+        still = still + 1 if menu_changed(prev, cur) < 50 else 0
+        if still >= quiet:
             return cur
         prev = cur
     return prev
 
 
-def _menu(guard: _Guard, menu_index: int, item_index: int, what: str) -> None:
+def _menu(guard: _Guard, menu_index: int, item_index: int, what: str, sub_item: int | None = None) -> None:
     """Pick a menu-bar item by position (1-based), so any UI language works.
 
     Right after a new document opens TI-Nspire ignores the Alt. Its menus are drawn
@@ -493,17 +538,24 @@ def _menu(guard: _Guard, menu_index: int, item_index: int, what: str) -> None:
     hwnd = guard.hwnd
     for attempt in range(5):
         guard()
-        base = _settled_menu_area(hwnd)
+        _settled_menu_area(hwnd)
         chord("alt", pause=0.15, guard=guard)
         for _ in range(menu_index - 1):
             chord("right", pause=0.05, guard=guard)
+        # Compare with the window just before the menu opens: with a translucent window theme an
+        # animated wallpaper drifts through it, and over seconds that adds up to hundreds of pixels.
+        base = menu_area(hwnd)
         chord("down", pause=0.05, guard=guard)  # opens the menu with its first item highlighted
-        deadline = time.monotonic() + 1.5
+        deadline = time.monotonic() + MENU_OPEN_WAIT_S
         while time.monotonic() < deadline:
             if menu_changed(base, menu_area(hwnd)) > MENU_OPEN_PIXELS:
                 time.sleep(0.1)
                 for _ in range(item_index - 1):
                     chord("down", pause=0.05, guard=guard)
+                if sub_item is not None:  # the item opens a submenu, with its first item highlighted
+                    chord("right", pause=0.15, guard=guard)
+                    for _ in range(sub_item - 1):
+                        chord("down", pause=0.05, guard=guard)
                 chord("enter", pause=0.2, guard=guard)
                 return
             time.sleep(0.05)
@@ -531,6 +583,46 @@ def _new_computer_notes(guard: _Guard) -> str:
     _menu(guard, INSERT_MENU, INSERT_NOTES_ITEM, "Insert > Notes")
     time.sleep(0.8)
     return name
+
+
+# ------------------------------------------------------------ Display Digits
+
+def _set_digits(guard: _Guard, digits: int) -> None:
+    """File > Settings > Document Settings, Display Digits = Float<digits>, then OK.
+
+    Only the new document's settings change (the dialog belongs to the active document).
+    The dialog is a Java one (SunAwtDialog): its fields can't be read from outside, but it
+    opens with Display Digits focused; Down opens its list, where Up/Down move through Float, Float1 ...
+    Float12, Fix0 ... Enter picks the value, a second Enter is OK. Each key is sent only
+    while that dialog is the foreground window; if it doesn't open or close as expected,
+    the run stops (no Esc: if the focus had moved, it would land in another program).
+    """
+    hwnd = guard.hwnd
+    before = process_windows(hwnd)
+    _menu(guard, FILE_MENU, SETTINGS_ITEM, "File > Settings > Document Settings", DOCUMENT_SETTINGS_ITEM)
+    dialog = _wait_dialog(hwnd, before, 6)
+    if dialog is None or window_class(dialog) != "SunAwtDialog":
+        raise NotesAborted("TI-Nspire's Document Settings dialog didn't open, so Display Digits wasn't set and "
+                           "nothing was typed. Check TI-Nspire for an open menu or dialog.")
+    dguard = _DialogGuard(guard, dialog, "Document Settings")
+    dguard()
+    # Down opens the list (and moves one item down); Up does nothing while it's closed, and
+    # keys sent while it opens are dropped, so open it, wait, then move.
+    chord("down", pause=0.6, guard=dguard)
+    for _ in range(DIGITS_TOP_KEYS):
+        chord("up", pause=0.06, guard=dguard)
+    for _ in range(digits):
+        chord("down", pause=0.08, guard=dguard)
+    time.sleep(0.2)
+    chord("enter", pause=0.3, guard=dguard)  # picks Float<digits> and closes the list
+    chord("enter", pause=0.3, guard=dguard)  # OK
+    deadline = time.monotonic() + 4
+    while window_open(dialog) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if window_open(dialog):
+        raise NotesAborted("TI-Nspire's Document Settings dialog didn't close after OK, so the page wasn't typed. "
+                           "Check Display Digits in the dialog and close it in TI-Nspire.")
+    time.sleep(0.4)
 
 
 # ------------------------------------------------------------ Graphs page
@@ -571,16 +663,16 @@ def _type_graphs(guard: _Guard, graphs: list[dict], tick: _Ticker) -> None:
 # ------------------------------------------------------------ saving
 
 class _DialogGuard:
-    """_Guard, and the Save dialog must be the foreground window (not TI-Nspire's main
+    """_Guard, and the dialog must be the foreground window (not TI-Nspire's main
     window or another of its popups)."""
 
-    def __init__(self, guard: _Guard, dialog: int):
-        self.guard, self.dialog = guard, dialog
+    def __init__(self, guard: _Guard, dialog: int, what: str = "Save"):
+        self.guard, self.dialog, self.what = guard, dialog, what
 
     def __call__(self) -> None:
         self.guard()
         if foreground_window() != self.dialog:
-            raise NotesAborted("The Save dialog stopped being the active window, so typing into it stopped; "
+            raise NotesAborted(f"The {self.what} dialog stopped being the active window, so typing into it stopped; "
                                "nothing was typed elsewhere. If the dialog is still open, finish or cancel it "
                                "in TI-Nspire.")
 
@@ -724,7 +816,7 @@ class _Ticker:
 def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, page_size: str = "computer",
                 timeout_s: float = 10, cancel: threading.Event | None = None,
                 graphs: list[str] | None = None, save_as: str | None = None, overwrite: bool = False,
-                progress: Progress | None = None) -> dict:
+                progress: Progress | None = None, digits: int | None = None) -> dict:
     """Validate the steps, then type them into a new document's Notes page.
 
     Call inside bridge.session() (it uses the clipboard to paste math).
@@ -737,10 +829,12 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     save_as: full path of a .tns file to save the new document to (see _save); an
     existing file only with overwrite. progress(done, total, message) is called from
     this thread before each check, page, step, function and the save.
+    digits: significant figures the new document shows (Display Digits Float<digits>),
+    set through its Document Settings before anything is typed.
     """
     if UNSUPPORTED:
         raise RuntimeError(UNSUPPORTED)
-    check_options(title, page_size, timeout_s)
+    check_options(title, page_size, timeout_s, digits)
     items = plan_steps(steps)
     graph_items = plan_graphs(graphs)
     path = check_save(save_as, overwrite)
@@ -754,7 +848,7 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
 
     checks = [it for it in items + graph_items if it["cmd"]]
     tick = _Ticker(progress, len(checks) + 1 + len(items) + (1 + len(graph_items) if graph_items else 0)
-                   + (1 if path else 0))
+                   + (1 if path else 0) + (1 if digits else 0))
     order = {id(it): k for k, it in enumerate(checks, 1)}
     warnings += _prepare(bridge, items + graph_items, timeout_s, cancel,
                          on_check=lambda it: tick(f"Checking {it['label']} on the bridge "
@@ -768,6 +862,9 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         _new_computer_notes(guard)
     else:
         _new_handheld_notes(guard)
+    if digits:
+        tick(f"Setting Display Digits to Float{digits}")
+        _set_digits(guard, digits)
 
     if title:
         type_text(title, guard=guard)
@@ -811,6 +908,9 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         note = f"Built in a new document and saved as {path}."
     else:
         note = "Built in a new, unsaved document; save it from TI-Nspire if you want to keep it."
+    if digits:
+        note += (f" The page shows {digits} significant figures (Display Digits Float{digits}); the results "
+                 "returned here are the bridge's, with more digits.")
     if warnings:
         note += " Warning: " + " ".join(warnings)
     out = {

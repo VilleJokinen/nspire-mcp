@@ -72,6 +72,15 @@ LATEX_CASES = [
     # unit conversions come back as decimals
     (r"\frac{1\,\mathrm{km}}{1\,\mathrm{m}}", "auto", "1000."),
     (r"\frac{2\,\mathrm{kg}}{500\,\mathrm{g}}", "auto", "4."),
+    # physics: ► conversion (sent as @>), units whose TI-Nspire names differ from the symbol
+    # (K is _°K, C is _coul: _K and _C are constants there), µ and Ω, and constants on request
+    (r"90\,\mathrm{km/h} \to \mathrm{m/s}", "auto", "25.*(_m/_s)"),
+    (r"2\,\mathrm{mA}\cdot 4.7\,\mathrm{k}\Omega \to \mathrm{V}", "auto", "9.4*_V"),
+    (r"3\,\mu\mathrm{A} \to \mathrm{nA}", "auto", None),  # TI-Nspire has no _nA: refused before the CAS
+    (r"25^\circ\mathrm{C} \to \mathrm{K}", "auto", "298.15*_°K"),
+    (r"3600\,\mathrm{J} \to \mathrm{kWh}", "auto", "0.001*_kWh"),
+    (r"2\,\mathrm{A}\cdot 3\,\mathrm{s} \to \mathrm{C}", "auto", "6.*_coul"),
+    (r"5\,\mathrm{kg}\cdot g \to \mathrm{N}", "auto", "49.03325*_N", {"constants": ["g"]}),
     # the length of a vector is norm, not the elementwise abs
     (r"\left|\begin{pmatrix}3\\4\end{pmatrix}\right|", "auto", "5"),
     (r"\lVert\begin{pmatrix}3&4\end{pmatrix}\rVert", "auto", "5"),
@@ -232,15 +241,19 @@ def cas_checks(report: Report, plans: list) -> list | None:
 def main() -> int:
     report = Report()
     plans = []  # translated before the session: no clipboard use
-    for latex, action, want in LATEX_CASES:
+    for latex, action, want, *opts in LATEX_CASES:
         try:
-            plans.append((latex, want, plan(latex, action)))
+            plans.append((latex, want, plan(latex, action, **(opts[0] if opts else {}))))
         except Exception as e:
             plans.append((latex, want, e))
     runs = bridge.session(lambda: cas_checks(report, plans))
     if runs is None:
         return 1
     for latex, want, run in runs:  # LaTeX conversion after the session
+        if want is None:  # must be refused by the translator
+            report(isinstance(run, Exception), latex, f"refused as expected: {run}" if isinstance(run, Exception)
+                   else "expected the translator to refuse it")
+            continue
         if isinstance(run, Exception):
             report(False, latex, f"{type(run).__name__}: {run}")
             continue

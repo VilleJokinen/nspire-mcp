@@ -68,6 +68,11 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   tell them not to type or click while it runs.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary.
+- Units are TI-Nspire's: 5_m, 9.81_m/_s^2, 2_mA*4.7_kΩ; convert with @> (5_km@>_m). Their names
+  ignore case, so some aren't what they look like: kelvin is _°K (_K is Boltzmann's constant),
+  coulomb _coul (_C is c), henry _henry (_H is h); TI-Nspire has no _MW, _kN, _mT, _MJ. Constants:
+  _g, _c, _h, _k, _q, _Na, _Rc, _Gc, _ε0, _μ0, _Me, _Mp, _Mn. In LaTeX, units go right after a number
+  (5\\,\\mathrm{m}) and \\to \\mathrm{km/h} converts; constants=["g", ...] reads symbols as constants.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -89,6 +94,12 @@ class NotesStep(TypedDict, total=False):
     latex: Annotated[str, Field(description="LaTeX instead of math, translated like nspire_latex.")]
     action: Annotated[LatexAction, Field(description="With latex: what to do with it, as in nspire_latex.")]
     var: Annotated[str, Field(description="With latex: the variable(s), as in nspire_latex.")]
+    to: Annotated[str, Field(description="Unit to show the result in, e.g. km/h, m/s^2, kΩ or _km/_hr "
+                                         "(TI-Nspire's ► convert, typed @>).")]
+    approx: Annotated[bool, Field(description="Show the result as a decimal: the math box becomes approx(...).")]
+    constants: Annotated[list[str] | bool, Field(
+        description='With latex: symbols to read as physical constants, e.g. ["g", "c", "k_B"] '
+                    "(true: all of g, c, h, k_B, N_A, R, G, \\varepsilon_0, \\mu_0, m_e, m_p, m_n, q_e).")]
 
 
 AngleMode = Literal["radian", "degree", "gradian"]
@@ -336,6 +347,9 @@ _ISOLATED_DOC = Field(description="Scratch work: put back afterwards whatever th
                                   "(a:=5, Define f(x)=..., DelVar a), so the user's document is left as it was.")
 _ANGLE_DOC = Field(description="Angle mode for this call only; the document's setting isn't changed. Not for "
                                "expressions that store or define. Leave out to use the document's.")
+_CONSTANTS_DOC = Field(description='Symbols to read as physical constants (TI-Nspire\'s _g, _c, ...), e.g. '
+                                    '["g", "c", "k_B"]; true for all of g, c, h, k_B, N_A, R, G, \\varepsilon_0, '
+                                    '\\mu_0, m_e, m_p, m_n, q_e. Leave out to keep every symbol a variable.')
 _EXACT_DOC = Field(description="Auto/Exact/Approximate mode for this call only; the document's setting isn't "
                                "changed. Not for expressions that store or define. Leave out to use the document's.")
 
@@ -552,7 +566,8 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
                        timeout_s: float = 10,
                        isolated: Annotated[bool, _ISOLATED_DOC] = False,
                        angle: Annotated[AngleMode | None, _ANGLE_DOC] = None,
-                       exact_mode: Annotated[ExactMode | None, _EXACT_DOC] = None) -> LatexResult:
+                       exact_mode: Annotated[ExactMode | None, _EXACT_DOC] = None,
+                       constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False) -> LatexResult:
     """Solve or evaluate a LaTeX problem on the TI-Nspire CAS; returns the answer as text and LaTeX.
 
     Accepts $…$ / \\[…\\] delimiters, \\frac, \\sqrt[n]{}, \\int (with limits, \\,dx or \\mathrm{d}x),
@@ -565,8 +580,10 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     Accents are separate names (\\bar x -> xbar, x^* -> xstar); T(t)=... with t on the right defines T.
     Subscripts of letters/digits are names (x_{n1} -> xn1; x_{n+1} is refused); \\vec{u}\\cdot\\vec{v} ->
     dotP(u,v) (also \\mathbf), \\times -> crossP (also row/column matrices), |\\vec u| and \\lVert u\\rVert ->
-    norm(u); units after a number (5\\,\\mathrm{m},
-    9.81\\,\\mathrm{m/s^2}) -> 5*_m, 9.81*_m/_s^2. \\Gamma(5), other Greek calls and unknown \\text{...} are refused.
+    norm(u); units after a number (5\\,\\mathrm{m}, 9.81\\,\\mathrm{m/s^2}, 4.7\\,\\mathrm{k}\\Omega,
+    3\\,\\mu\\mathrm{A}, 25^\\circ\\mathrm{C}) -> 5*_m, 9.81*_m/_s^2, 4.7*_kΩ, 3*_µA, 25*_°C (SI units and the
+    prefixed ones TI-Nspire has; others such as MW or kN are refused); a unit after a final \\to,
+    \\rightarrow or \\text{ in } converts the result (90\\,\\mathrm{km/h} \\to \\mathrm{m/s} -> 90*_km/_hr@>_m/_s). \\Gamma(5), other Greek calls and unknown \\text{...} are refused.
     \\log without a base is base 10 and \\ln is natural; e and i are the constants unless they
     are summation/integration variables. "1,5" between digits is a decimal comma, also inside
     {} groups such as \\frac{1,5}{2}, but not inside (), [] or \\{\\} (f(1,5), \\gcd(12,18), lists).
@@ -603,7 +620,7 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     log.info("latex %r action=%s", latex, action)
     try:
         # translate first: bad LaTeX fails without touching the clipboard
-        p = await asyncio.to_thread(lx.plan, latex, action, var, order, point)
+        p = await asyncio.to_thread(lx.plan, latex, action, var, order, point, constants)
     except lx.LatexError as e:
         raise ValueError(str(e)) from None
     settings = _mode_settings(angle, exact_mode)
@@ -618,6 +635,8 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
             run = lx.run_plan(in_modes or bridge, p, timeout_s)
         return run, warnings + (in_modes.warnings if in_modes else []) + iso.all_warnings()
     run, warnings = await asyncio.to_thread(bridge.session, work)
+    if p.parsed.constants:
+        warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(p.parsed.constants) + ".")
     # LaTeX conversion after the session, with the user's clipboard already restored
     out = await asyncio.to_thread(lx.format_answer, run)
     if warnings:
@@ -685,7 +704,7 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
 async def nspire_notes(steps: list[NotesStep], title: str | None = None,
                        page_size: Literal["computer", "handheld"] = "computer",
                        graphs: list[str] | None = None, save_as: str | None = None, overwrite: bool = False,
-                       timeout_s: float = 10, ctx: Context | None = None) -> dict:
+                       timeout_s: float = 10, digits: int | None = None, ctx: Context | None = None) -> dict:
     """Write a worked solution onto a new TI-Nspire Notes page, with live math boxes.
 
     Use this when the user wants the solution shown *in TI-Nspire* (e.g. "write this up
@@ -698,6 +717,12 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
       {"text": "so the solutions are"}                       (text only)
       {"text": "Area:", "latex": "\\int_0^1 x^2\\,dx"}         (LaTeX, translated like nspire_latex;
                                                               optional "action"/"var" as there)
+      {"text": "Speed:", "math": "90_km/_hr", "to": "m/s"}     (physics: units, result in m/s)
+      {"text": "Weight:", "latex": "5\\,\\mathrm{kg}\\cdot g", "constants": ["g"], "approx": true}
+    Physics: write each quantity with its unit (inline numbers: 12_m/_s*3_s, or LaTeX
+    12\\,\\mathrm{m/s}); "to" shows the result in that unit (km/h, kΩ, m/s^2, °C), "approx": true
+    shows a decimal, "constants" (latex steps) reads g, c, k_B ... as TI-Nspire's constants
+    (in math write _g, _c, _k). Kelvin is _°K and coulomb _coul in math: TI-Nspire's unit names ignore case.
     math uses TI-Nspire syntax (as in nspire_eval). Put Define f(x)=... in an early step to
     use f later. Keep text to one line per step; plan the steps from the actual math, and
     check results with nspire_eval first if unsure.
@@ -725,6 +750,10 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
     save is checked (dialog open, file name box focused and holding the path, file written); if
     one can't be, it stops, leaves the dialog for the user and says so in save.message and
     warnings. Without save_as the new document is unsaved.
+    digits: significant figures (1-12) the new document shows, e.g. 3 for physics answers: its
+    Display Digits is set to Float<digits> in File > Settings > Document Settings before typing.
+    Values stay exact inside TI-Nspire; only their display is rounded. Without it, the default
+    (Float6) is kept.
     """
     nb = await asyncio.to_thread(importlib.import_module, "nspire_notes")
     cancel = threading.Event()  # set when the client cancels the call: the worker stops typing
@@ -741,7 +770,8 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
 
     def work():
         return nb.build_notes(bridge, steps, title, page_size, timeout_s, cancel=cancel,
-                              graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress)
+                              graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress,
+                              digits=digits)
     log.info("notes: %d steps, %d graphs%s", len(steps), len(graphs or ()), ", save" if save_as else "")
     try:
         out = await asyncio.to_thread(bridge.session, work)

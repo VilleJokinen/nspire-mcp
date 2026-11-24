@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import sympy as sp
@@ -29,6 +30,20 @@ from sympy.printing.latex import LatexPrinter
 from sympy.printing.str import StrPrinter
 
 from nspire_chars import NS_C, NS_E, NS_EXP, NS_I, NS_N, readable
+from nspire_units import (
+    CONSTANT_SPELLING,
+    CONSTANTS,
+    DEGREE_TEMP,
+    UNIT_WRAPPERS,
+    UnitError,
+    decode_unit,
+    encode_unit,
+    unit_latex,
+    unit_spellings,
+)
+from nspire_units import UNIT_NAME as _UNIT_NAME
+from nspire_units import unit_command as _unit_command
+from nspire_units import unit_parts as _raw_unit_parts
 
 
 class LatexError(ValueError):
@@ -62,20 +77,6 @@ _UNICODE = {"−": "-", "·": r"\cdot ", "×": r"\times ", "÷": r"\div ", "≤"
 # isn't either: \vec{u}\cdot\vec{v} is dotP(u,v), not u*v (see _Pre._vectors).
 _STYLE_WRAPPERS = ["mathbf", "boldsymbol", "mathit", "mathsf", "mathtt", "underline",
                    "mathbb", "mathcal", "bm"]
-# Units written \mathrm{...} or \text{...} right after a number, and their TI-Nspire
-# names (TI-Nspire guide, Appendix A "Conversion Categories and Units"; gram is _gm,
-# hour _hr, liter _l). Any other name in that position is refused, not read as a variable.
-_UNITS = {
-    "m": "_m", "cm": "_cm", "mm": "_mm", "km": "_km", "dm": "_dm", "nm": "_nm",
-    "s": "_s", "ms": "_ms", "ns": "_ns", "min": "_min", "h": "_hr", "hr": "_hr", "yr": "_yr",
-    "kg": "_kg", "g": "_gm", "mg": "_mg",
-    "l": "_l", "L": "_l", "ml": "_ml", "mL": "_ml",
-    "N": "_N", "J": "_J", "kJ": "_kJ", "eV": "_eV", "cal": "_cal", "kcal": "_kcal", "kWh": "_kWh",
-    "W": "_W", "kW": "_kW",
-    "Pa": "_Pa", "kPa": "_kPa", "bar": "_bar", "mbar": "_mbar", "atm": "_atm",
-    "K": "_K",
-}
-_UNIT_WRAPPERS = r"\\(?:mathrm|text|textrm|textnormal|mbox)\s*\{"
 _TEXT_WORDS = {"and", "ja", "or", "tai"}  # \text{...} connectives handled by _Pre._text
 _ACCENTS = {"bar": "bar", "overline": "bar", "hat": "hat", "widehat": "hat", "tilde": "tilde",
             "widetilde": "tilde"}
@@ -127,6 +128,8 @@ class Parsed:
     placeholders: dict = field(default_factory=dict)
     constraints: list = field(default_factory=list)  # conditions from \text{for ...}, joined with "|"
     assign: bool = False          # written with :=, e.g. a:=5
+    convert: str | None = None    # unit to convert the result to (TI-Nspire syntax), from \to \mathrm{km/h}
+    constants: list[str] = field(default_factory=list)  # symbols read as physical constants, e.g. ["g"]
 
 
 def _match_brace(s: str, i: int) -> int:
@@ -268,6 +271,44 @@ def _decimal_commas(s: str) -> str:
     return "".join(out)
 
 
+# ---------------------------------------------------------------- units (nspire_units.py)
+
+def _unit_parts(content: str) -> list[tuple[str, str]]:
+    try:
+        return _raw_unit_parts(content)
+    except UnitError as e:
+        raise LatexError(str(e)) from None
+
+
+def unit_command(text: str) -> str:
+    """A unit to convert to (km/h, \\mathrm{m}/\\mathrm{s}^2, _km/_hr) -> TI-Nspire syntax, e.g. '_km/_hr'."""
+    try:
+        return _unit_command(text)
+    except UnitError as e:
+        raise LatexError(str(e)) from None
+
+
+def _constant_names(constants: Iterable[str] | bool) -> set[str]:
+    """constants=True: every symbol in CONSTANTS; a list: just those (as written: g, c, k_B, N_A,
+    \\varepsilon_0 or ε0, m_e ...); False or empty: none."""
+    if constants is True:
+        return set(CONSTANTS)
+    if not constants:
+        return set()
+    if isinstance(constants, str):
+        constants = [constants]
+    out = set()
+    for c in constants:
+        n = c.strip().lstrip("\\")
+        n = _GREEK.get(n.split("_")[0], n.split("_")[0]) + "".join(n.split("_")[1:]).strip("{}")
+        n = n.replace("ϵ", "ε").replace("µ", "μ")
+        if n not in CONSTANTS:
+            raise LatexError(f"{c!r} isn't a physical constant the LaTeX translator knows; it knows "
+                             f"{', '.join(CONSTANT_SPELLING[k] for k in CONSTANTS)}.")
+        out.add(n)
+    return out
+
+
 class _Pre:
     def __init__(self) -> None:
         self.placeholders: dict[str, tuple[str, object]] = {}  # name -> (kind, payload)
@@ -275,6 +316,7 @@ class _Pre:
         self.constraints: list[str] = []  # LaTeX of the conditions after \text{for ...}
         self.assign = False                # the input used :=
         self.subnames: dict[str, str] = {}  # Omega_{8NN} -> subscripted name such as x_n1
+        self.convert: str | None = None      # \to \mathrm{km/h}: the target unit, in TI-Nspire syntax
 
     def ph(self, kind: str, payload) -> str:
         key = f"9{len(self.placeholders):02d}"
@@ -322,6 +364,7 @@ class _Pre:
         s = self._vectors(s)
         for w in _STYLE_WRAPPERS:
             s = _unwrap_cmd(s, w, lambda a: "{" + a + "}")
+        s = self._conversion(s)  # before _units: the target unit has no number in front
         s = self._units(s)  # before \text and \mathrm are unwrapped
         for t in ("text", "textrm", "textit", "textbf", "textnormal", "mbox"):
             s = _unwrap_cmd(s, t, self._text)
@@ -908,20 +951,51 @@ class _Pre:
             raise LatexError("A cross product needs vectors of length 2 or 3.")
         return known[0] if known else ("sym", None)
 
+    # -- conversion: 90\,\mathrm{km/h} \to \mathrm{m/s}
+
+    def _conversion(self, s: str) -> str:
+        r"""A unit after the last top-level \to, \rightarrow, \text{in} or ► is the unit to show
+        the result in (TI-Nspire's ► convert, written @> in commands). \lim_{x\to 0} is inside
+        braces, so it stays; \to followed by anything other than a unit stays too."""
+        sep = re.compile(r"\\(?:to|rightarrow|longrightarrow)(?![A-Za-z])|►|▸|@>"
+                         r"|\\(?:text|textrm|textnormal|mbox|mathrm)\s*\{\s*(?:in|to|into)\s*\}")
+        last = None
+        for m in sep.finditer(s):
+            depth = s[:m.start()].count("{") - s[:m.start()].count("}")
+            if depth == 0:
+                last = m
+        if last is None:
+            return s
+        tail = s[last.end():].strip().rstrip(".,; ")
+        sure = not last.group().startswith(("\\to", "\\rightarrow", "\\longrightarrow"))
+        if not sure and not re.match(UNIT_WRAPPERS + r"|\\(?:mu|Omega)(?![A-Za-z])|[µΩ]", tail):
+            return s  # x \to 0 or a \to b: not a unit conversion
+        try:
+            self.convert = unit_command(tail)
+        except LatexError as e:
+            raise LatexError(f"After {last.group().strip()} comes the unit to convert to: {e}") from None
+        head = s[:last.start()]
+        if not head.strip():
+            raise LatexError("Nothing to convert: write the quantity before the unit, e.g. "
+                             "90\\,\\mathrm{km/h} \\to \\mathrm{m/s}.")
+        return head
+
     # -- units: 5\,\mathrm{m} -> 5*_m
 
     def _units(self, s: str) -> str:
         r"""\mathrm{...} or \text{...} right after a number (or after such a unit) is a unit.
 
         Without this, 5\,\mathrm{m} + 3\,\mathrm{cm} would be 5*m + 3*cm (variables) and
-        5\text{ m} just 5. The units in _UNITS become TI-Nspire units; any other name
+        5\text{ m} just 5. The units in nspire_units.UNITS become TI-Nspire units; any other name
         there is refused. \mathrm{d}x, \mathrm{e}, \mathrm{i} and the condition words
-        of \text{for ...} aren't units.
+        of \text{for ...} aren't units. 5\,\Omega, 3\,\mu\mathrm{A}, \mathrm{k}\Omega and
+        25^\circ\mathrm{C} are written as units first.
         """
-        if re.search(r"\^\s*\{?\s*\\circ\s*\}?\s*(?:" + _UNIT_WRAPPERS + r"\s*[CF]\s*\}|[CF](?![A-Za-z]))", s):
-            raise LatexError("Temperatures (°C, °F) aren't supported by the LaTeX translator; write them in TI-Nspire "
-                             "syntax (_°C, tmpCnv) and use nspire_eval.")
-        pat = re.compile(_UNIT_WRAPPERS)
+        s = unit_spellings(s)
+        if re.search(DEGREE_TEMP, s):
+            raise LatexError("°C and °F need a number in front (25^\\circ\\mathrm{C}); write other uses in "
+                             "TI-Nspire syntax (_°C, tmpCnv) and use nspire_eval.")
+        pat = re.compile(UNIT_WRAPPERS)
         ends: set[int] = set()
         i = 0
         while (m := pat.search(s, i)):
@@ -932,6 +1006,8 @@ class _Pre:
             if (not content or content in ("d", "e", "i") or words[0] in _CONDITION_WORDS | _TEXT_WORDS
                     or content in (",", "&") or re.fullmatch(r"[.;:!?]+", content) or called
                     or not self._unit_place(before, ends)):
+                if content in ("°C", "°F", "Ω"):
+                    raise LatexError(f"{content} needs a number in front of it (5\\,\\mathrm{{{content}}}).")
                 i = end + 1
                 continue
             unit = self._unit_tex(content)
@@ -954,39 +1030,14 @@ class _Pre:
 
     def _unit_tex(self, content: str) -> str:
         """m/s^2, kg\\cdot m, km/h ... -> LaTeX over unit placeholders."""
-        tok = re.compile(r"\s+|\\(?:cdot|times)(?![A-Za-z])|[/*()]|\^\s*(?:\{\s*-?\d+\s*\}|\d)|[A-Za-z]+|\S")
         out: list[str] = []
-        last_unit = False
-        for m in tok.finditer(content):
-            t = m.group()
-            if t.isspace():
-                continue
-            if re.fullmatch(r"[A-Za-z]+", t):
-                if t not in _UNITS:
-                    raise LatexError(
-                        f"'{t}' after a number isn't a unit the LaTeX translator knows (it knows "
-                        f"{', '.join(sorted(_UNITS, key=str.lower))}). Write units in TI-Nspire syntax (5_m) and use "
-                        "nspire_eval, or put \\cdot between the number and a variable.")
-                if last_unit:
-                    out.append(r"\cdot")
-                out.append(self.ph("unit", _UNITS[t]).strip())
-                last_unit = True
-            elif t.startswith("^"):
-                if not last_unit:
-                    raise LatexError(f"Couldn't read the unit {content!r}.")
-                out[-1] = "{" + out[-1] + "}^{" + re.sub(r"[\^{}\s]", "", t) + "}"
-            elif t in ("(", ")"):
-                if t == "(" and last_unit:
-                    out.append(r"\cdot")
-                out.append(t)
-                last_unit = t == ")"
-            elif t in ("/", "*", r"\cdot", r"\times"):
-                out.append("/" if t == "/" else r"\cdot")
-                last_unit = False
+        for kind, v in _unit_parts(content):
+            if kind == "unit":
+                out.append(self.ph("unit", v).strip())
+            elif kind == "pow":
+                out[-1] = out[-1] + "^{" + v + "}" if out[-1] == ")" else "{" + out[-1] + "}^{" + v + "}"
             else:
-                raise LatexError(f"Couldn't read the unit {content!r}; write it in TI-Nspire syntax and use nspire_eval.")
-        if not out or not last_unit:
-            raise LatexError(f"Couldn't read the unit {content!r}.")
+                out.append(r"\cdot" if v == "*" else v)
         body = " ".join(out)
         return body if len(out) == 1 else f"({body})"
 
@@ -1165,7 +1216,9 @@ def _plain_names(e, out: set[str], vecs: set[str]) -> None:
             _plain_names(a, out, vecs)
 
 
-def parse(latex: str) -> Parsed:
+def parse(latex: str, constants: Iterable[str] | bool = False) -> Parsed:
+    consts = _constant_names(constants)
+    used: list[str] = []
     pre = _Pre()
     pieces = pre.run(latex)
     if not pieces:
@@ -1253,6 +1306,9 @@ def parse(latex: str) -> Parsed:
                         return sp.E
                     if n == "i":
                         return sp.I
+                    if _clean_name(n) in consts:  # g -> _g: a physical constant, when asked for
+                        used.append(_clean_name(n))
+                        return TiUnit(CONSTANTS[_clean_name(n)])
                 if n == "pi":
                     return sp.pi
                 return node
@@ -1347,7 +1403,8 @@ def parse(latex: str) -> Parsed:
     if ode_dep and not indep:
         indep = _ode_indep(raw, ode_dep, all_syms)
     return Parsed(exprs=exprs, ode_dep=ode_dep, ode_indep=indep if ode_dep else None,
-                  placeholders=pre.placeholders, constraints=conds, assign=pre.assign)
+                  placeholders=pre.placeholders, constraints=conds, assign=pre.assign,
+                  convert=pre.convert, constants=sorted(set(used)))
 
 
 # ================================================================ print (sympy -> TI-Nspire)
@@ -1670,15 +1727,21 @@ def _free_names(exprs) -> list[str]:
 
 
 def plan(latex: str, action: str = "auto", var: str | None = None, order: int | None = None,
-         point: str | None = None) -> Plan:
+         point: str | None = None, constants: Iterable[str] | bool = False) -> Plan:
     action = (action or "auto").lower().replace(" ", "").replace("_", "")
     if action != "auto" and action not in ACTIONS:
         raise LatexError(f"Unknown action {action!r}. Use auto or one of: {', '.join(ACTIONS)}.")
-    p = parse(latex)
+    p = parse(latex, constants)
     pl = _plan(p, action, var, order, point)
     if p.constraints:
         # \text{for } x>0: TI-Nspire's "with" operator, applied to the result
         pl.command += "|" + " and ".join(to_nspire(c, p) for c in p.constraints)
+    if p.convert:
+        if pl.action not in ("eval", "simplify", "approx"):
+            raise LatexError(f"A unit to convert to (\\to \\mathrm{{...}}) works with a quantity to evaluate, "
+                             f"not with {pl.description}; convert the result in a step of its own.")
+        pl.command = (f"({pl.command})" if p.constraints else pl.command) + "@>" + p.convert
+        pl.description += f", in {readable(p.convert)}"
     return pl
 
 
@@ -1908,8 +1971,8 @@ class _ResultLatex(LatexPrinter):
         return ("- " if neg else "") + s
 
     def _print_Symbol(self, expr, style="plain"):
-        if expr.name.startswith("_"):  # a TI-Nspire unit: _m -> \mathrm{m}
-            return r"\mathrm{" + expr.name[1:] + "}"
+        if expr.name.startswith("_"):  # a TI-Nspire unit or constant: _m -> \mathrm{m}
+            return unit_latex(decode_unit(expr.name))
         return super()._print_Symbol(expr, style)
 
 
@@ -1992,7 +2055,7 @@ def result_to_latex(text: str) -> str | None:
     if not t or low == "done":
         return None
     try:
-        norm = _norm_result(t)
+        norm = _norm_result(_UNIT_NAME.sub(encode_unit, t))
         if _UNSAFE.search(norm) or any(ord(c) > 127 and not c.isalpha() for c in norm):
             return None  # e.g. a symbol the conversion doesn't know
         ld: dict = {}
