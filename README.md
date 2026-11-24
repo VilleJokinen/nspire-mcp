@@ -116,7 +116,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | --- | --- |
 | `nspire_status()` | ping: `alive`, `api_level`, `cas`, `protocol` (2 = current bridge script, 1 = older `.tns`), and the document's `modes` (angle, auto or approx, real or complex, …) |
 | `nspire_eval(expr, timeout_s=5, isolated=False, angle, exact_mode)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)`. The result text is the first content block; if anything couldn't be put back (see below), a second block starts `Warnings:` (structured output: `{result, warnings?}`) |
-| `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | several in order: `[{expr, ok, result \| error, warnings?}]`; stops at the first timeout. One request with the current `.tns`, so much faster than separate calls |
+| `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | several in order: `[{expr, ok, result \| error, warnings?}]`; stops at the first timeout; a failed item's `warnings` explain the error code (cause and likely fix, here and in the other tools). One request with the current `.tns`, so much faster than separate calls |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and saved to a file (see below) |
 | `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200, timeout_s=20)` | graph up to 8 functions: a PNG image plus a summary (y range, gaps, asymptotes, `warnings`). The CAS computes every point with `seq(approx(f),x,…)`; matplotlib only draws them. Undefined or non-real points are gaps, and lines aren't drawn across asymptotes. Stores nothing |
@@ -571,6 +571,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_latex.py` | LaTeX → TI-Nspire syntax → result → LaTeX (SymPy) |
 | `nspire_notes.py` | builds a Notes page of text and math boxes |
 | `nspire_plot.py` | samples functions on the CAS and draws them (`nspire_plot`) |
+| `nspire_errors.py` | cause and likely fix for TI-Nspire error codes; added to error text and `warnings` |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |
 | `hotkey.py` | clipboard hotkey, answer popup, action picker and tray icon |

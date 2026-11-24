@@ -153,6 +153,12 @@ hotkey.
   keys be `None` (FastMCP fills them with null). `nspire_eval` returns a
   `CallToolResult` so its first content block stays the bare result text; warnings go
   in a second block. `check_solution` is an MCP prompt.
+- `nspire_errors.py`: plain-language cause and fix per TI-Nspire error code (`explain()`,
+  `explain_all()`, `with_explanation()`), stdlib only. Codes and names must match `bridge.lua`'s `ERRORS`
+  (a test checks); only add a code that is in that list, and say what you saw on the real CAS if you confirm it.
+  server.py appends the explanation to `nspire_eval`/`nspire_latex` error text, and puts it in `warnings` for
+  `nspire_eval_batch` failed items, `nspire_check_steps` (from each step's `cas`) and `nspire_plot` (sampled errors).
+  Unknown codes get nothing.
 - `nspire_plot.py`: the `nspire_plot` tool's work, without pywin32 or matplotlib at import.
   `prepare()` checks arguments offline (no `:=`/`Define`/`DelVar`: plotting stores nothing),
   `sample()` runs inside `bridge.session()`: one batch with a `seq(approx(f),x,a,b,h)` per
