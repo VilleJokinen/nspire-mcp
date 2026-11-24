@@ -78,7 +78,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as)` | The user wants the worked solution written into TI-Nspire itself. |
-| `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200)` | The user wants to see a graph. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. |
+| `nspire_plot(exprs, latex, var, x_min, x_max, y_min, y_max, samples, kind="function", t_min, t_max)` | The user wants to see a graph: functions, or `kind="parametric"`, `"polar"` or `"implicit"` curves. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. |
 | `nspire_stats(command, csv, columns, x_column, y_column, freq_column, plot)` | The user has data: summary statistics (`OneVar`, `TwoVar`) or a regression fit (`LinRegMx`, `QuadReg`, `ExpReg`, ...). Returns `stat.results`, the fitted `equation`, `r2`/`r`, and with `plot=True` an image of the data and the fit. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
@@ -185,6 +185,17 @@ summary lists each function's y range, its gaps and where it jumps: base what yo
 about the graph on it, not on guesses from the picture. If the automatic y range cuts off
 spikes, pass `y_min`/`y_max`. It stores nothing: `Define` a function with `nspire_eval`
 first if you want to plot `f(x)`. Every other name needs a stored value.
+
+Curves take `kind`:
+- `"parametric"`: each item is `"x(t), y(t)"`, e.g. `exprs=["cos(3*t), sin(2*t)"]` or
+  `latex=["\cos t, \sin t"]`; `t_min`/`t_max` default to 0 and 2π.
+- `"polar"`: each item is r(θ), e.g. `exprs=["2*sin(4*θ)"]`; θ from 0 to 2π by default and
+  always in radians (the summary says so), even when the document is in degrees.
+- `"implicit"`: each item is an equation in x and y, e.g. `exprs=["x^2/9+y^2/4=1"]`; the window
+  is `x_min`..`y_max` (default -10..10 each) and `samples` is grid points per axis (default 60,
+  up to 120). The curve is drawn where the CAS's values of lhs−rhs change sign, so a curve that
+  only touches zero, like `(x-y)^2=0`, isn't found: write it as `x-y=0`.
+Up to 4 curves per call. For parametric and polar, `x_min`..`y_max` only set the view.
 
 ### `nspire_stats`
 

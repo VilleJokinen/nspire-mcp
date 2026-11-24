@@ -17,7 +17,7 @@ import sys
 import threading
 import types
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import Any, get_args, get_type_hints
 
 import pytest
 
@@ -349,6 +349,10 @@ def test_output_schemas():
     assert props(ts["nspire_latex"].outputSchema) == (
         {"action", "nspire", "result", "result_latex", "approx", "approx_latex", "warnings"},
         {"action", "nspire", "result", "result_latex"})
+    plot = ts["nspire_plot"].outputSchema
+    assert props(plot) == ({"kind", "var", "range", "samples", "summary", "curves", "warnings"},
+                           {"kind", "var", "range", "samples", "summary", "curves"})
+    assert props(plot, "PlotCurve") == ({"label", "nspire", "points", "total", "x_range", "y_range"},) * 2
 
 
 def test_latex_result_declares_every_key():
@@ -777,9 +781,12 @@ def text_of(res) -> str:
 def test_plot_schema():
     schema = tools()["nspire_plot"].inputSchema
     props = schema["properties"]
-    assert set(props) == {"exprs", "latex", "var", "x_min", "x_max", "y_min", "y_max", "samples", "timeout_s"}
-    assert props["var"]["default"] == "x" and props["samples"]["default"] == 200
-    assert props["x_min"]["default"] == -10 and props["x_max"]["default"] == 10
+    assert set(props) == {"exprs", "latex", "var", "x_min", "x_max", "y_min", "y_max", "samples", "timeout_s",
+                          "kind", "t_min", "t_max"}
+    # defaults depend on the kind (function: x, -10..10, 200 samples), so they are None here
+    assert props["var"]["default"] is None and props["samples"]["default"] is None
+    assert props["x_min"]["default"] is None and props["kind"]["default"] == "function"
+    assert set(props["kind"]["enum"]) == {"function", "parametric", "polar", "implicit"}
     assert not schema.get("required")
 
 
@@ -909,6 +916,162 @@ def test_plot_latex_input(monkeypatch):
     assert f"1. \\frac{{1}}{{x^2+1}}  (TI-Nspire: {cmd}): y from 0.00990099 to 1" in text
     with pytest.raises(ValueError, match="frac"):
         plot(monkeypatch, SeqBridge({}), latex=[r"\frac{1}"])
+
+
+_HELPER_CALL_RE = re.compile(r"^(mcpplotp\d+)\(([^,]+),([^,]+),([^,]+)\)$")
+_POLAR_DEF_RE = re.compile(r"^Define (mcpplotp\d+)\(mcpa,mcpb,mcph\)=Func:Local mcpm,(\w+):mcpm:=setMode\(2,1\)"
+                           r":Return seq\(approx\(\((.*)\)\*(cos|sin)\(\w+\)\),\w+,mcpa,mcpb,mcph\):EndFunc$")
+_IMPLICIT_DEF_RE = re.compile(r"^Define (mcpplotf\d+)\(x,y\)=(.*)$")
+_IMPLICIT_CALL_RE = re.compile(r"^(mcpplotf\d+)\(x,([^,]+)\)$")
+
+
+class CurveBridge(SeqBridge):
+    """SeqBridge plus the temporary functions: polar maps r (as written) to r(θ), implicit
+    maps F (as defined, e.g. '(x^2+y^2)-(25)') to F(x, y). Defines and DelVars are recorded."""
+
+    def __init__(self, funcs: dict | None = None, polar: dict | None = None, implicit: dict | None = None,
+                 replies: dict | None = None, **kw):
+        super().__init__(dict(funcs or {}), replies, **kw)
+        self.polar, self.implicit = polar or {}, implicit or {}
+        self.defined: dict[str, Any] = {}
+        self.deleted: list[str] = []
+
+    def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+        if not any(e.startswith(("Define mcpplot", "DelVar mcpplot")) or _HELPER_CALL_RE.match(e) for e in exprs):
+            return super().eval_batch(exprs, timeout_s, raw)
+        self.batches.append(list(exprs))
+        self.last_timeout = None
+        return [self._item(e) for e in exprs]
+
+    def _item(self, e: str) -> dict:
+        self.calls.append(e)
+        if e.startswith("DelVar "):
+            self.deleted += e[len("DelVar "):].split(",")
+            return {"expr": e, "ok": True, "result": "Done"}
+        m = _POLAR_DEF_RE.match(e)
+        if m:
+            name, _var, r, trig = m.groups()
+            if r not in self.polar:
+                return {"expr": e, "ok": False, "error": "error 910 (syntax error)"}
+            f, g = self.polar[r], math.cos if trig == "cos" else math.sin
+            self.defined[name] = lambda t, f=f, g=g: f(t) * g(t)
+            return {"expr": e, "ok": True, "result": "Done"}
+        m = _IMPLICIT_DEF_RE.match(e)
+        if m:
+            name, F = m.groups()
+            if F not in self.implicit:
+                return {"expr": e, "ok": False, "error": "error 910 (syntax error)"}
+            self.defined[name] = self.implicit[F]
+            # rows become ordinary seq channels: mcpplotf1(x,Y) -> F(x, Y)
+            return {"expr": e, "ok": True, "result": "Done"}
+        m = _HELPER_CALL_RE.match(e)
+        if m:
+            name, a, b, h = m.groups()
+            self.funcs[e] = self.defined[name]  # reuse SeqBridge's seq answer over θ
+            return self._seq(f"seq(approx({e}),θ,{a},{b},{h})")
+        return {"expr": e, "ok": False, "error": "error 910 (syntax error)"}
+
+    def _seq(self, expr: str) -> dict:
+        m = _SEQ_RE.match(expr)
+        if m:
+            call = _IMPLICIT_CALL_RE.match(m.group(1))
+            if call and call.group(1) in self.defined and m.group(1) not in self.funcs:
+                F, y = self.defined[call.group(1)], float(call.group(2))
+                self.funcs[m.group(1)] = lambda x, F=F, y=y: F(x, y)
+        return super()._seq(expr)
+
+
+def test_plot_parametric_samples_x_and_y_in_one_batch(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = CurveBridge({"cos(t)": math.cos, "sin(2*t)": lambda t: math.sin(2 * t)},
+                       replies={"getVarInfo()": NOTHING, "getMode(2)": RADIAN})
+    res = plot(monkeypatch, fake, kind="parametric", exprs=["x=cos(t), y=sin(2*t)"], samples=50)
+    assert fake.sessions == 1
+    assert len(fake.batches) == 2 and len(fake.batches[1]) == 2  # x and y in one batch
+    assert fake.batches[1][0].startswith("seq(approx(cos(t)),t,0.0,")
+    text = text_of(res)
+    assert "Plotted 1 parametric curve for t from 0 to 6.28319: 50 points each" in text
+    assert "x from −0.997945 to 1, y from −0.999486 to 0.999486." in text
+    out = res.structuredContent
+    assert out["kind"] == "parametric" and out["var"] == "t" and out["samples"] == 50
+    assert out["curves"][0]["nspire"] == ["cos(t)", "sin(2*t)"] and out["curves"][0]["points"] == 50
+    assert out["warnings"] is None
+    assert base64.b64decode(res.content[1].data).startswith(b"\x89PNG")
+
+
+def test_plot_parametric_split_and_gaps(monkeypatch):
+    pytest.importorskip("matplotlib")
+    # √ fails for t<0 (error 800 for the whole seq): split down to single points, which become gaps
+    fake = CurveBridge({"t": lambda t: t, "√(t)": math.sqrt}, max_len=30)
+    text = text_of(plot(monkeypatch, fake, kind="parametric", exprs=["t, √(t)"], t_min=-1, t_max=1, samples=41))
+    assert "undefined or non-real at 20 of 41 points (t in [−1, −0.05]" in text
+    assert len(fake.batches) > 3  # split
+
+
+def test_plot_polar_runs_in_radian_helpers_and_deletes_them(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = CurveBridge(polar={"1+cos(θ)": lambda t: 1 + math.cos(t)},
+                       replies={"getVarInfo()": NOTHING, "getMode(2)": DEGREE})
+    res = plot(monkeypatch, fake, kind="polar", exprs=["r=1+cos(θ)"], samples=100)
+    assert fake.batches[1][0].startswith("Define mcpplotp1(mcpa,mcpb,mcph)=Func:Local mcpm,θ:mcpm:=setMode(2,1)")
+    assert fake.batches[2] == [b for b in fake.batches[2] if b.startswith("mcpplotp")] and len(fake.batches[2]) == 2
+    assert fake.batches[-1] == ["DelVar mcpplotp1,mcpplotp2"] and fake.deleted == ["mcpplotp1", "mcpplotp2"]
+    text = text_of(res)
+    assert "angle mode" not in text  # degree document, but polar is always radians
+    assert "θ is in radians" in text
+    assert "x from −0.25 to 2, y from −1.29" in text  # the cardioid
+    assert res.structuredContent["var"] == "θ"
+
+
+def test_plot_polar_error_still_deletes_helpers(monkeypatch):
+    fake = CurveBridge(polar={}, replies={"getVarInfo()": NOTHING, "getMode(2)": RADIAN})
+    with pytest.raises(ValueError, match="syntax error"):
+        plot(monkeypatch, fake, kind="polar", exprs=["sin(θ"])
+    assert fake.deleted == ["mcpplotp1", "mcpplotp2"]
+
+
+def test_plot_implicit_grid_rows(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = CurveBridge(implicit={"(x^2+y^2)-(25)": lambda x, y: x * x + y * y - 25},
+                       replies={"getVarInfo()": (True, '[["y","NUM","none",0]]'), "getMode(2)": RADIAN})
+    res = plot(monkeypatch, fake, kind="implicit", exprs=["x^2+y^2=25"], samples=21)
+    assert fake.batches[1] == ["Define mcpplotf1(x,y)=(x^2+y^2)-(25)"]
+    rows = fake.batches[2]
+    assert len(rows) == 21 and rows[0].startswith("seq(approx(mcpplotf1(x,-10.0)),x,-10.0,")
+    assert fake.deleted == ["mcpplotf1"]
+    text = text_of(res)
+    assert "on a 21×21 grid" in text and "passes through" in text
+    assert "y is stored" not in text  # x and y are the helper's own parameters
+    out = res.structuredContent
+    assert out["var"] == "x,y" and out["curves"][0]["total"] == 441
+    assert out["curves"][0]["x_range"] == [-6.0, 6.0]
+
+
+def test_plot_implicit_latex(monkeypatch):
+    pytest.importorskip("matplotlib")
+    import nspire_latex
+    cmd = nspire_latex.plan("y^2=x^3-x", "eval").command
+    F = f"({cmd.split('=')[0]})-({cmd.split('=')[1]})"
+    fake = CurveBridge(implicit={F: lambda x, y: y * y - x ** 3 + x})
+    text = text_of(plot(monkeypatch, fake, kind="implicit", latex=["y^2=x^3-x"], samples=15,
+                        x_min=-2, x_max=3, y_min=-3, y_max=3))
+    assert "1. y^2=x^3-x: passes through" in text  # same as the TI-Nspire command, so not repeated
+
+
+def test_plot_parametric_latex(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = CurveBridge({"cos(t)": math.cos, "sin(t)": math.sin})
+    text = text_of(plot(monkeypatch, fake, kind="parametric", latex=[r"\left(\cos t, \sin t\right)"], samples=20))
+    assert "parametric curve" in text and "(TI-Nspire: (cos(t), sin(t)))" in text
+
+
+def test_plot_kinds_through_the_handler(monkeypatch):
+    pytest.importorskip("matplotlib")
+    monkeypatch.setattr(server, "bridge", CurveBridge({"x": lambda x: x}, polar={"2": lambda t: 2.0}))
+    for args in ({"exprs": ["x"], "samples": 20}, {"kind": "polar", "exprs": ["2"], "samples": 20}):
+        r = call("nspire_plot", args)
+        assert not r.isError, r.content
+        assert [b.type for b in r.content] == ["text", "image"] and r.structuredContent["curves"]
 
 
 # ------------------------------------------------------------ error explanations

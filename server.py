@@ -76,7 +76,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   probably_ok, broken or undecided; report broken steps with the CAS output it gives. It stores
   nothing. To test whether two expressions are equal, pass them as two lines.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
-  its summary.
+  its summary. kind="parametric" (["cos(t), sin(t)"]), "polar" (["1+cos(θ)"], always in radians)
+  and "implicit" (["x^2+y^2=25"], drawn where the CAS's grid values change sign) plot curves.
 - nspire_stats runs TI-Nspire's statistics on data (CSV text or columns): OneVar, TwoVar and the
   regressions (LinRegMx, QuadReg, ExpReg, ...), returning stat.results, the fitted equation and
   r²/r, and with plot=True the data with the fitted curve. The data lists are put back afterwards;
@@ -299,6 +300,28 @@ class StatsResult(_StatsResult, total=False):
     r: str | None
     plot: str | None
     notes: list[str] | None
+    warnings: list[str] | None
+
+
+class PlotCurve(TypedDict):
+    label: str
+    nspire: list[str]
+    points: int
+    total: int
+    x_range: list[float] | None
+    y_range: list[float] | None
+
+
+class _PlotResult(TypedDict):
+    kind: str
+    var: str
+    range: list[float]
+    samples: int
+    summary: str
+    curves: list[PlotCurve]
+
+
+class PlotResult(_PlotResult, total=False):
     warnings: list[str] | None
 
 
@@ -857,50 +880,83 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
     return out
 
 
+PlotKind = Literal["function", "parametric", "polar", "implicit"]
+
+
 @mcp.tool(annotations=_hints("Plot functions with the TI-Nspire CAS", destructiveHint=False, idempotentHint=True))
-async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = None, var: str = "x",
-                      x_min: float = -10, x_max: float = 10, y_min: float | None = None,
-                      y_max: float | None = None, samples: int = 200, timeout_s: float = 20) -> CallToolResult:
-    """Graph functions of one variable: returns a PNG image and a short text summary.
+async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = None, var: str | None = None,
+                      x_min: float | None = None, x_max: float | None = None, y_min: float | None = None,
+                      y_max: float | None = None, samples: int | None = None, timeout_s: float = 20,
+                      kind: PlotKind = "function", t_min: float | None = None,
+                      t_max: float | None = None) -> Annotated[CallToolResult, PlotResult]:
+    """Graph functions or curves: returns a PNG image and a short text summary.
 
-    exprs: functions in TI-Nspire syntax, e.g. ["sin(x)", "x^2-2", "f(x)"] ("y=..." is fine too).
-    latex: or LaTeX, e.g. ["\\frac{1}{x}"], translated like nspire_latex. Up to 8 functions in
-    all, one colour each. var: the variable (default x). x_min, x_max: the range. y_min, y_max:
-    the y range to show (automatic if left out; spikes next to asymptotes are then cut off).
-    samples: points per function, 10 to 1000.
+    kind "function" (default): y = f(x). exprs in TI-Nspire syntax, e.g. ["sin(x)", "x^2-2",
+    "f(x)"] ("y=..." is fine too), up to 8. var: the variable (default x). x_min, x_max: the
+    range (default -10 to 10). y_min, y_max: the y range to show (automatic if left out; spikes
+    next to asymptotes are then cut off). samples: points per function, 10 to 1000 (default 200).
+    kind "parametric": each item "x(t), y(t)", e.g. ["cos(t), sin(2*t)"] (also "(x, y)" or
+    "x=..., y=..."), up to 4. var default t; t_min, t_max default 0 to 2π; samples default 400.
+    kind "polar": each item r(θ), e.g. ["1+cos(θ)"] ("r=..." is fine), up to 4. var default θ;
+    t_min, t_max: the θ range, default 0 to 2π. θ is always in radians: the CAS computes
+    x = r·cos θ and y = r·sin θ in radian mode for this plot (the document's angle setting isn't
+    changed). For parametric and polar, x_min..y_max are the view (automatic if left out).
+    kind "implicit": each item an equation in x and y, e.g. ["x^2+y^2=25", "y^2=x^3-x"] (an
+    expression F means F=0), up to 4. x_min..y_max: the window, default -10 to 10 each.
+    samples: grid points per axis, 10 to 120 (default 60): the CAS computes F at every grid
+    point and the curve is drawn where F changes sign (a contour at 0).
+    latex: instead of exprs (or as well), LaTeX translated like nspire_latex, e.g.
+    ["\\frac{1}{x}"], ["\\cos t, \\sin t"], ["r=1+\\cos\\theta"], ["x^2+y^2=1"].
 
-    Every value comes from the CAS: one seq(approx(f),x,...) request per function; the image is
-    only drawn from them. Points where a function is undefined or non-real are gaps, and lines
-    aren't drawn across asymptotes. The summary gives each function's y range, gaps and jumps:
+    Every value comes from the CAS (seq(approx(...)) requests); the image is only drawn from
+    them. Points where a value is undefined or non-real are gaps, and lines aren't drawn across
+    asymptotes (implicit: across poles). The summary gives each curve's ranges, gaps and jumps:
     describe the graph from it. Variables and functions stored in the open document are
     substituted (a*x^2 uses a stored a; the summary warns), and trig functions follow the
-    document's angle mode (a warning if it isn't radian). Other names without a value are an
-    error. Nothing is stored or changed: define functions with nspire_eval first.
-    timeout_s: per request (one request holds every function's points, or a piece of them).
+    document's angle mode (a warning if it isn't radian), except in polar plots. Other names
+    without a value are an error. Nothing is kept in the document: polar and implicit plots
+    define temporary functions (mcpplot...) and delete them again. Define functions with
+    nspire_eval first. timeout_s: per request (one request holds every curve's points, or a
+    piece of them). Structured result: {kind, var, range, samples, summary, curves: [{label,
+    nspire, points, total, x_range, y_range}], warnings}.
     """
     pl = await asyncio.to_thread(importlib.import_module, "nspire_plot")
-    funcs = []
+    items: list[tuple[str, str]] = []
     for e in exprs or []:
         if not isinstance(e, str):
             raise ValueError("exprs must be strings")
-        funcs.append(pl.Func(e, e))
+        items.append((e, e))
     if latex:
         # SymPy only for LaTeX input
         lx = await asyncio.to_thread(importlib.import_module, "nspire_latex")
-        for src in latex:
+
+        async def tr(src: str, whole: str) -> str:
             try:
-                p = await asyncio.to_thread(lx.plan, src, "eval")
+                return (await asyncio.to_thread(lx.plan, src, "eval")).command
             except lx.LatexError as err:
-                raise ValueError(f"{src!r}: {err}") from None
-            funcs.append(pl.Func(src, p.command))
-    spec = pl.prepare(funcs, var, x_min, x_max, samples, y_min, y_max)  # bad arguments fail before the bridge
+                raise ValueError(f"{whole!r}: {err}") from None
+        for src in latex:
+            if not isinstance(src, str):
+                raise ValueError("latex must be strings")
+            if kind == "parametric":
+                a, b = pl.split_pair(src)
+                items.append((src, f"{await tr(a, src)},{await tr(b, src)}"))
+            else:
+                items.append((src, await tr(src, src)))
+    # bad arguments fail before the bridge
+    spec = pl.prepare_kind(kind, items, var, t_min, t_max, samples, x_min, x_max, y_min, y_max)
     notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")
+    if spec.kind == "function":
+        watched = ",".join(f.command for f in spec.funcs)
+    else:
+        watched = ",".join(p for c in spec.curves for p in c.parts)
+    bound = {"x", "y"} if spec.kind == "implicit" else {spec.var.lower()}
 
     def work():
-        both = ",".join(f.command for f in spec.funcs)
-        warnings = doc_warnings(bridge, both, timeout_s, notes_mod, ignore={spec.var.lower()})
+        warnings = doc_warnings(bridge, watched, timeout_s, notes_mod, angle_override=spec.kind == "polar",
+                                ignore=bound)
         return pl.sample(bridge, spec, timeout_s), warnings
-    log.info("plot %d function(s), %d samples", len(spec.funcs), spec.grid.n)
+    log.info("plot %s: %d channel(s), %d samples", spec.kind, len(spec.funcs), spec.grid.n)
     try:
         got, warnings = await asyncio.to_thread(bridge.session, work)
     except ValueError as e:
@@ -911,10 +967,20 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
         raise ValueError(text)
     # drawn after the session, with the user's clipboard already restored
     png = await asyncio.to_thread(pl.render_png, spec, got)
+    all_warnings = got.warnings + warnings
+    out: PlotResult = {
+        "kind": spec.kind,
+        "var": "x,y" if spec.kind == "implicit" else spec.var,
+        "range": [spec.grid.x_min, spec.grid.x_max],
+        "samples": spec.grid.n,
+        "summary": text,
+        "curves": cast("list[PlotCurve]", pl.curve_info(spec, got)),
+        "warnings": all_warnings or None,
+    }
     return CallToolResult(content=[
         TextContent(type="text", text=text),
         ImageContent(type="image", data=base64.b64encode(png).decode("ascii"), mimeType="image/png"),
-    ])
+    ], structuredContent=cast("dict[str, Any]", out))
 
 
 _ColumnRef = Annotated[int | str | None, Field(description="A column by number (1 = first) or header name.")]

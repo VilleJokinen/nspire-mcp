@@ -170,6 +170,23 @@ hotkey.
   `breaks()` finds asymptote jumps (not drawn), and `render_png()` imports matplotlib and
   draws after the session. The CAS computes every value: never compute points in Python.
   The tool reuses `doc_warnings` with `ignore={var}` (seq binds the plot variable).
+  `kind=` "parametric", "polar" and "implicit" (`prepare_kind()`; "function" calls `prepare()`) reuse
+  the same sampler: `PlotSpec.funcs` are *channels*, each one seq over one grid, and `PlotSpec.curves`
+  say which channels make a curve. Parametric: x(t) and y(t), two plain channels. Polar: two channels
+  that call temporary functions `mcpplotp1(a,b,h)`, ... (`Func.call`), each
+  `Define mcpplotpN(mcpa,mcpb,mcph)=Func:Local mcpm,θ:mcpm:=setMode(2,1):Return seq(approx((r)*cos(θ)),θ,mcpa,mcpb,mcph):EndFunc`
+  (sin for y), so the CAS computes x and y in radian mode whatever the document's angle setting (setMode
+  inside a Func is put back by TI-Nspire on return). Implicit: `Define mcpplotf1(x,y)=(lhs)-(rhs)` and one
+  channel per grid row, `seq(approx(mcpplotf1(x,yj)),x,...)` (x and y are the helper's own parameters,
+  so stored x/y don't interfere); `GRID_MAX` per axis keeps each row reply small. `sample()` sends the
+  `helpers` first and DelVars `helper_names` in a `finally` (a failed cleanup is a warning in
+  `Sampled.warnings`). Python only reads the CAS values: `curve_xy()` pairs x and y (a gap unless both
+  are real), `curve_breaks()` applies `breaks()` to both, `pole_points()` drops grid points around a
+  sign change that jumps against the neighbouring steps (F through ±∞, not 0) and `crossing_cells()`
+  finds where the contour runs; `render_png()` draws implicit curves with matplotlib `contour` at 0.
+  `plot_view()` is the one window shared by `summary()` and `render_png()` (add markers there).
+  Checked on the real CAS by `selftest.py` (Func + setMode + Local θ, Define f(x,y), DelVar), with the
+  document in Radian mode only.
 - `nspire_data.py`: data for TI-Nspire, standard library only: `parse_table(csv_text, columns, headers, header)`
   reads CSV text (delimiter: tab, then `;`, then `,` if any line has one, else spaces; decimal commas only
   with `;`/tab; a header row when a first-row cell isn't a number) or a list of columns into a `Table`

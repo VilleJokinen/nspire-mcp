@@ -7,7 +7,7 @@
 #     "antlr4-python3-runtime==4.11.*",
 # ]
 # ///
-"""Check the bridge, the LaTeX translator, plot sampling and statistics end to end:  uv run --script selftest.py
+"""Check the bridge, the LaTeX translator, plot sampling (all kinds) and statistics end to end:  uv run --script selftest.py
 
 Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
@@ -29,7 +29,7 @@ import nspire_stats  # noqa: E402
 import nspire_steps  # noqa: E402
 from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
-from nspire_plot import Func, prepare, sample  # noqa: E402
+from nspire_plot import Func, curve_xy, implicit_rows, prepare, prepare_kind, sample  # noqa: E402
 
 bridge = Bridge()
 
@@ -121,6 +121,55 @@ def plot_check(report: "Report") -> None:
             if (e is None) != (y is None) or (e is not None and abs(y - e) > 1e-5 * max(1, abs(e))):
                 bad.append(f"{f.command} at x={x:g}: got {y}, want {e}")
     report(not bad, "nspire_plot sampling", "; ".join(bad[:3]) or f"{got.requests} request(s), gaps where expected")
+
+
+# nspire_plot kinds: (name, kind, items, keyword arguments, expected (x, y) or F per grid point)
+PLOT_KIND_CASES = [
+    ("parametric", "parametric", [("c", "cos(t), 2*sin(t)")], {"t_min": 0, "t_max": 3, "samples": 10},
+     lambda t: (math.cos(t), 2 * math.sin(t))),
+    # r = θ: the spiral; in radians even when the document is in degrees
+    ("polar", "polar", [("s", "θ")], {"t_min": 0, "t_max": 6, "samples": 10},
+     lambda t: (t * math.cos(t), t * math.sin(t))),
+    ("implicit", "implicit", [("c", "x^2+y^2=4")], {"x_min": -3, "x_max": 3, "y_min": -2, "y_max": 2, "samples": 10},
+     lambda x, y: x * x + y * y - 4),
+]
+
+
+def plot_kinds_check(report: "Report") -> None:
+    """Parametric, polar and implicit sampling on the CAS (inside the session), and that the
+    temporary functions are gone afterwards."""
+    for name, kind, items, kw, want in PLOT_KIND_CASES:
+        label = f"nspire_plot {name}"
+        spec = prepare_kind(kind, items, **kw)
+        try:
+            got = sample(bridge, spec, 10)
+        except BridgeTimeout:
+            raise
+        except Exception as e:
+            report(False, label, f"{type(e).__name__}: {e}")
+            continue
+        bad = []
+        if kind == "implicit":
+            assert spec.ygrid is not None
+            for j, row in enumerate(implicit_rows(got, spec.curves[0])):
+                for i, v in enumerate(row):
+                    x, y = spec.grid.x(i), spec.ygrid.x(j)
+                    e = want(x, y)
+                    if v is None or abs(v - e) > 1e-5 * max(1, abs(e)):
+                        bad.append(f"F({x:g},{y:g}): got {v}, want {e}")
+        else:
+            px, py = curve_xy(got, spec.curves[0])
+            for i, (gx, gy) in enumerate(zip(px, py, strict=True)):
+                t = spec.grid.x(i)
+                ex, ey = want(t)
+                if gx is None or gy is None or abs(gx - ex) > 1e-5 * max(1, abs(ex))                         or abs(gy - ey) > 1e-5 * max(1, abs(ey)):
+                    bad.append(f"at {spec.var}={t:g}: got ({gx}, {gy}), want ({ex:g}, {ey:g})")
+        for h in spec.helper_names:
+            kept = bridge.eval_one(f"getType({h})", 5)
+            if "NONE" not in kept:
+                bad.append(f"{h} left in the document ({kept})")
+        bad += got.warnings
+        report(not bad, label, "; ".join(bad[:3]) or f"{got.requests} request(s), {len(spec.funcs)} channel(s)")
 
 
 # nspire_check_steps: (lines, latex?, var, expected verdict of each step)
@@ -301,6 +350,11 @@ def cas_checks(report: Report, plans: list, step_specs: list) -> list | None:
         plot_check(report)
     except BridgeTimeout as e:
         report(False, "nspire_plot sampling", str(e))
+        return None
+    try:
+        plot_kinds_check(report)
+    except BridgeTimeout as e:
+        report(False, "nspire_plot kinds", str(e))
         return None
 
     try:
