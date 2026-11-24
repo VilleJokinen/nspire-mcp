@@ -21,3 +21,13 @@ if _missing("lupa"):
     collect_ignore.append("test_transport.py")
 if _missing("mcp"):
     collect_ignore.append("test_server.py")
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _session_log_off(monkeypatch):
+    """No test writes a session log unless it turns one on (and then into tmp_path)."""
+    monkeypatch.delenv("NSPIRE_LOG", raising=False)
+    monkeypatch.delenv("NSPIRE_LOG_DIR", raising=False)

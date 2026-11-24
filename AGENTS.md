@@ -162,6 +162,16 @@ hotkey.
   keys be `None` (FastMCP fills them with null). `nspire_eval` returns a
   `CallToolResult` so its first content block stays the bare result text; warnings go
   in a second block. `check_solution` is an MCP prompt.
+- `nspire_log.py`: the session log, standard library only. Off unless `NSPIRE_LOG=1` (`<repo>/logs`, in
+  `.gitignore`) or `NSPIRE_LOG_DIR` is set (`NSPIRE_LOG=0` wins); `log_dir()` reads the environment on every
+  call. Opt-in because it writes the user's homework to disk. `record(source, **fields)` appends one Markdown
+  entry (`format_entry`: input LaTeX as `$$` blocks, the command, the result as text and LaTeX, `items` for
+  batches and step lists, warnings, error) to `YYYY-MM-DD.md` under a `.lock` file (`msvcrt`/`fcntl`:
+  "ab" alone loses entries between processes on Windows, a test showed it) and **never raises**. server.py
+  imports it as `session_log` (the `nspire_log` tool is `read_day`) and logs after each result and on failure;
+  hotkey.py does the same for solves and conversions. Log only what the tool already handles: never read the
+  clipboard for the log. A new tool that evaluates should call `session_log.record`. tests/conftest.py
+  switches it off for every test; tests that want it set `NSPIRE_LOG_DIR` to `tmp_path`.
 - `nspire_errors.py`: plain-language cause and fix per TI-Nspire error code (`explain()`,
   `explain_all()`, `with_explanation()`), stdlib only. Codes and names must match `bridge.lua`'s `ERRORS`
   (a test checks); only add a code that is in that list, and say what you saw on the real CAS if you confirm it.

@@ -82,11 +82,11 @@ def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
                        "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps", "nspire_stats",
-                       "nspire_to_latex"}
+                       "nspire_to_latex", "nspire_log"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
-    for name in ("nspire_status", "nspire_vars", "nspire_check_steps", "nspire_to_latex"):
+    for name in ("nspire_status", "nspire_vars", "nspire_check_steps", "nspire_to_latex", "nspire_log"):
         assert ts[name].annotations.readOnlyHint is True and ts[name].annotations.idempotentHint is True
     assert ts["nspire_clear"].annotations.destructiveHint is True
     for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
@@ -120,7 +120,7 @@ def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
                    "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats",
-                   "nspire_to_latex"):
+                   "nspire_to_latex", "nspire_log", "NSPIRE_LOG"):
         assert needle in text
 
 
@@ -1348,3 +1348,91 @@ def test_stats_twovar_plot_shows_only_the_data(monkeypatch):
     assert not r.isError, r.content
     assert r.structuredContent["plot"].startswith("The data points only")
     assert len(r.content) == 2 and not any(c.startswith("seq(") for c in fake.calls)
+
+
+# ------------------------------------------------------------ session log
+
+def log_text(folder: Path) -> str:
+    files = list(folder.glob("*.md"))
+    assert len(files) == 1
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_log_off_by_default_writes_nothing(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    use(monkeypatch, CasBridge())
+    run(server.nspire_eval("2+2"))
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_eval_and_batch_are_logged(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    use(monkeypatch, FakeBridge({"2+2": (True, "4"), "3+3": (True, "6")}))
+    run(server.nspire_eval("2+2"))
+    assert server._log_note(True, "degree") == "isolated, angle=degree"
+    run(server.nspire_eval_batch(["3+3", "not valid ("]))
+    text = log_text(tmp_path)
+    assert "· nspire_eval\n" in text and "`2+2`" in text
+    assert "nspire_eval_batch" in text and "1. `3+3`\n   - Result: `6`" in text
+    assert "2. `not valid (`\n   - Error:" in text
+
+
+def test_eval_error_is_logged_and_still_raised(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    use(monkeypatch, FakeBridge({}))
+    with pytest.raises(ValueError, match="910"):
+        run(server.nspire_eval("1+"))
+    text = log_text(tmp_path)
+    assert "**Error:**" in text and "910" in text and "`1+`" in text
+
+
+def test_latex_is_logged_with_math_blocks(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    out, fake, cmd = latex_call(monkeypatch, "$x^2=4$", {
+        "getVarInfo()": NOTHING, "getMode(2)": RADIAN, "CMD": (True, "x=−2 or x=2")})
+    text = log_text(tmp_path)
+    assert "nspire_latex" in text and "$$\nx^2=4\n$$" in text  # delimiters normalised to a block
+    assert f"`{out['nspire']}`" in text and "x=−2 or x=2" in text
+    assert "$$\n" + out["result_latex"] + "\n$$" in text
+
+
+def test_latex_error_is_logged(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    use(monkeypatch, FakeBridge({}))
+    with pytest.raises(ValueError):
+        run(server.nspire_latex(r"\unknowncommand{x}"))
+    assert "**Error:**" in log_text(tmp_path)
+
+
+def test_to_latex_and_check_steps_are_logged(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    use(monkeypatch, FakeBridge({
+        "getVarInfo()": NOTHING, "getMode(2)": RADIAN,
+        "expand(((x+1)^2)-(x^2+2x+1))": (True, "0"),
+        "expand((x^2+2x+1)-(x^2+1))": (True, "2*x"),
+    }))
+    run(server.nspire_to_latex("√(2)/2"))
+    run(server.nspire_check_steps(["(x+1)^2", "=x^2+2x+1", "=x^2+1"], latex=False))
+    text = log_text(tmp_path)
+    assert "nspire_to_latex" in text and r"\frac{\sqrt{2}}{2}" in text
+    assert "nspire_check_steps" in text and "broken" in text
+
+
+def test_logging_failure_never_breaks_a_tool(monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(blocker / "sub"))  # a folder can't be made under a file
+    use(monkeypatch, CasBridge())
+    assert run(server.nspire_eval("2+2")).structuredContent == {"result": "<2+2>"}
+
+
+def test_log_tool_reads_the_day(monkeypatch, tmp_path):
+    use(monkeypatch, CasBridge())
+    off = call("nspire_log", {}).structuredContent
+    assert off["enabled"] is False and off["file"] is None
+    monkeypatch.setenv("NSPIRE_LOG_DIR", str(tmp_path))
+    run(server.nspire_eval("2+2"))
+    got = call("nspire_log", {}).structuredContent
+    assert got["enabled"] and got["exists"] and "`2+2`" in got["text"] and got["file"].endswith(".md")
+    assert call("nspire_log", {"day": "2001-01-01"}).structuredContent["exists"] is False
+    assert call("nspire_log", {"day": "yesterday"}).isError
