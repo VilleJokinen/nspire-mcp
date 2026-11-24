@@ -16,7 +16,8 @@ NS_C = ""    # prefix of deSolve's arbitrary constants c1, c2, ...
 NS_N = ""    # prefix of arbitrary integers n1, n2, ...
 
 _TO_READABLE = str.maketrans({NS_E: "ℯ", NS_I: "𝑖", NS_EXP: "ᴇ", NS_C: "c", NS_N: "n"})
-_FROM_READABLE = str.maketrans({"ℯ": NS_E, "𝑖": NS_I, "ᴇ": NS_EXP})
+# ► (convert units) is written @> in what the bridge evaluates: the character itself is a syntax error there
+_FROM_READABLE = str.maketrans({"ℯ": NS_E, "𝑖": NS_I, "ᴇ": NS_EXP, "►": "@>", "▸": "@>"})
 
 
 def readable(text: str) -> str:

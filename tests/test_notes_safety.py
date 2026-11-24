@@ -325,6 +325,27 @@ class _Focus:
             raise notes.NotesAborted("focus lost")
 
 
+def _opening_menu():
+    """menu_area as _menu sees it: the base read just before Down, then the open menu."""
+    frames = iter([b"\0" * 6000])
+    return lambda hwnd: next(frames, b"\xff" * 6000)
+
+
+class MenuChanged(unittest.TestCase):
+    """menu_changed counts only clear changes: a wallpaper showing through a translucent
+    window shifts every pixel a little, which must not look like an open menu."""
+
+    def test_small_shifts_are_noise(self):
+        before = bytes([200, 100, 50]) * 1000
+        after = bytes([200 + 20, 100 - 20, 50 + keys.MENU_PIXEL_DELTA]) * 1000
+        self.assertEqual(keys.menu_changed(before, after), 0)
+
+    def test_clear_changes_count(self):
+        before = bytes([240, 240, 240]) * 1000
+        after = bytes([240, 240, 240]) * 400 + bytes([0, 0, 0]) * 600
+        self.assertEqual(keys.menu_changed(before, after), 600)
+
+
 class KeysGuard(unittest.TestCase):
     def setUp(self):
         p = mock.patch("time.sleep")
@@ -457,7 +478,7 @@ class NotesGuard(unittest.TestCase):
         rec = KeyRecorder(after)
         with mock.patch.object(keys, "_send", rec), \
                 mock.patch.object(notes, "_settled_menu_area", return_value=b"\0" * 6000), \
-                mock.patch.object(notes, "menu_area", return_value=b"\1" * 6000):
+                mock.patch.object(notes, "menu_area", side_effect=_opening_menu()):
             try:
                 notes._menu(notes._Guard(300), 4, 3, "Insert > Notes")
                 return rec, None
@@ -468,6 +489,16 @@ class NotesGuard(unittest.TestCase):
         rec, err = self.menu_run()
         self.assertIsNone(err)
         self.assertEqual(rec.events, ["alt", "right", "right", "right", "down", "down", "down", "enter"])
+
+    def test_submenu_item_is_reached_with_right_then_down(self):
+        rec = KeyRecorder()
+        with mock.patch.object(keys, "_send", rec), \
+                mock.patch.object(notes, "_settled_menu_area", return_value=b"\0" * 6000), \
+                mock.patch.object(notes, "menu_area", side_effect=_opening_menu()):
+            notes._menu(notes._Guard(300), notes.FILE_MENU, notes.SETTINGS_ITEM, "Settings",
+                        notes.DOCUMENT_SETTINGS_ITEM)
+        self.assertEqual(rec.events, ["alt", "down"] + ["down"] * (notes.SETTINGS_ITEM - 1)
+                         + ["right"] + ["down"] * (notes.DOCUMENT_SETTINGS_ITEM - 1) + ["enter"])
 
     def test_menu_stops_when_focus_is_lost(self):
         rec, err = self.menu_run(after=self.lose_focus_after("alt"))

@@ -272,10 +272,22 @@ def menu_area(hwnd: int, step: int = 6) -> bytes:
     return b"".join(bits[(y * w + x) * 4:(y * w + x) * 4 + 3] for y in range(0, h, step) for x in range(0, w, step))
 
 
+# A sampled pixel counts as changed when a colour channel moved by more than this. Smaller
+# changes are noise: with a translucent window theme an animated wallpaper shows through
+# TI-Nspire's window, shifting pixels by up to ~20 several times a second, which
+# counted as an open menu and sent the menu keys blind.
+MENU_PIXEL_DELTA = 24  # measured: wallpaper noise 0 pixels above 24, Alt alone ~120-245, open menus 820-1470
+
+
 def menu_changed(before: bytes, after: bytes) -> int:
-    """How many sampled pixels differ (a caret blink is a few, an open menu hundreds)."""
+    """How many sampled pixels clearly differ (a caret blink is a few, an open menu hundreds)."""
     n = min(len(before), len(after)) // 3
-    return sum(before[i * 3:i * 3 + 3] != after[i * 3:i * 3 + 3] for i in range(n))
+    count = 0
+    for i in range(0, n * 3, 3):
+        if (abs(before[i] - after[i]) > MENU_PIXEL_DELTA or abs(before[i + 1] - after[i + 1]) > MENU_PIXEL_DELTA
+                or abs(before[i + 2] - after[i + 2]) > MENU_PIXEL_DELTA):
+            count += 1
+    return count
 
 
 def foreground_is(hwnd: int) -> bool:

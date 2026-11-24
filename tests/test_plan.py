@@ -2,7 +2,7 @@
 import pytest
 
 from nspire_chars import readable
-from nspire_latex import LatexError, _decimal_commas, plan
+from nspire_latex import LatexError, _decimal_commas, plan, unit_command
 
 
 def cmd(latex: str, action: str = "auto", **kw) -> str:
@@ -595,12 +595,122 @@ def test_units(latex, want):
 
 @pytest.mark.parametrize("latex,what", [
     (r"5\text{ apples}", "'apples'"),
-    (r"5\,\mathrm{V}", "'V'"),
     (r"5\,\mathrm{m}/\mathrm{foo}", "'foo'"),
-    (r"25^\circ\mathrm{C}", "Temperatures"),
-    (r"25°C", "Temperatures"),
     (r"5\,\mathrm{m/}", "unit"),
+    # TI-Nspire's names ignore case: _MW would be a milliwatt-like unknown, _nA Avogadro's
+    # number, _mT unknown. Refused, not passed on.
+    (r"4\,\mathrm{MW}", "'MW'"),
+    (r"4\,\mathrm{mW}", "'mW'"),
+    (r"2\,\mathrm{kN}", "'kN'"),
+    (r"3\,\mathrm{nA}", "'nA'"),
+    (r"3\,\mathrm{mT}", "'mT'"),
+    (r"3\,\mathrm{\mu C}", "'µC'"),
+    (r"3\,\mathrm{MJ}", "'MJ'"),
+    (r"T^\circ\mathrm{C}", "number in front"),
 ])
 def test_units_refused(latex, what):
     with pytest.raises(LatexError, match=what):
         plan(latex)
+
+
+PHYSICS_UNITS = [
+    (r"5\,\mathrm{K}", "5*_°K"),            # _K is Boltzmann's constant in TI-Nspire
+    (r"2\,\mathrm{mol}\cdot 300\,\mathrm{K}", "2*_mol*300*_°K"),
+    (r"5\,\mathrm{C}", "5*_coul"),          # _C is the speed of light
+    (r"5\,\mathrm{H}", "5*_henry"),         # _H is Planck's constant
+    (r"5\,\mathrm{V}", "5*_V"),
+    (r"5\,\Omega", "5*_Ω"),
+    (r"5\,\mathrm{\Omega}", "5*_Ω"),
+    (r"4.7\,\mathrm{k}\Omega", "4.7*_kΩ"),
+    (r"4.7\,\mathrm{k\Omega}", "4.7*_kΩ"),
+    (r"3\,\mu\mathrm{A}", "3*_µA"),
+    (r"3\,\mathrm{\mu A}", "3*_µA"),
+    (r"3\,\mathrm{µA}", "3*_µA"),
+    (r"3\,\mathrm{μA}", "3*_µA"),
+    (r"2\,\mathrm{mA}\cdot 4.7\,\mathrm{k\Omega}", "2*_mA*4.7*_kΩ"),
+    (r"25^\circ\mathrm{C}", "25*_°C"),
+    (r"25^{\circ}C", "25*_°C"),
+    (r"25°C", "25*_°C"),
+    (r"100\,\mathrm{MHz}", "100*_MHz"),
+    (r"2\,\mathrm{nF}", "2*_nF"),
+    (r"1.5\,\mathrm{T}", "1.5*_T"),
+    (r"1\,\mathrm{t}", "_mton"),             # metric ton; _t would be a tesla
+    (r"3\,\mathrm{eV}", "3*_eV"),
+    (r"1013\,\mathrm{mbar}", "1013*_mbar"),
+    (r"2\,\mathrm{(m/s)^2}", "2*(_m/_s)^2"),
+    (r"30^\circ", "30*π/180"),               # a bare degree sign is still an angle
+]
+
+
+@pytest.mark.parametrize("latex,want", PHYSICS_UNITS)
+def test_physics_units(latex, want):
+    assert cmd(latex) == want
+
+
+CONVERSIONS = [
+    (r"90\,\mathrm{km/h} \to \mathrm{m/s}", "90*_km/_hr@>_m/_s"),
+    (r"90\,\mathrm{km/h} \rightarrow \mathrm{m}/\mathrm{s}", "90*_km/_hr@>_m/_s"),
+    (r"90\,\mathrm{km/h}\text{ in }\mathrm{m/s}", "90*_km/_hr@>_m/_s"),
+    (r"2\,\mathrm{mA}\cdot 4.7\,\mathrm{k\Omega} \to \mathrm{V}", "2*_mA*4.7*_kΩ@>_V"),
+    (r"20\,\mathrm{mA}\cdot 50\,\Omega \to \mathrm{mV}", "20*_mA*50*_Ω@>_mV"),
+    (r"3600\,\mathrm{J} \to \mathrm{kWh}", "3600*_J@>_kWh"),
+    (r"25^\circ\mathrm{C} \to \mathrm{K}", "25*_°C@>_°K"),
+    (r"x \text{ for } x=5\,\mathrm{km} \to \mathrm{m}", "(x|x=5*_km)@>_m"),
+    # not conversions
+    (r"\lim_{x\to 0} \frac{\sin x}{x}", "limit(sin(x)/x,x,0)"),
+]
+
+
+@pytest.mark.parametrize("latex,want", CONVERSIONS)
+def test_conversions(latex, want):
+    assert cmd(latex) == want
+
+
+@pytest.mark.parametrize("latex,what", [
+    (r"5\,\mathrm{km} \to \mathrm{foo}", "'foo'"),
+    (r"x^2=4 \to \mathrm{m}", "convert the result in a step of its own"),
+    (r"\to \mathrm{m}", "Nothing to convert"),
+])
+def test_conversions_refused(latex, what):
+    with pytest.raises(LatexError, match=what):
+        plan(latex)
+
+
+@pytest.mark.parametrize("text,want", [
+    ("km/h", "_km/_hr"), ("m/s^2", "_m/_s^2"), (r"\mathrm{m}/\mathrm{s}^{-1}", "_m/_s^(-1)"),
+    (r"k\Omega", "_kΩ"), ("µA", "_µA"), (r"\mu A", "_µA"), ("_km/_hr", "_km/_hr"), (" _m / _s^2 ", "_m/_s^2"),
+    (r"^\circ C", "_°C"), ("K", "_°K"), ("kg*m^2", "_kg*_m^2"),
+])
+def test_unit_command(text, want):
+    assert unit_command(text) == want
+
+
+@pytest.mark.parametrize("text", ["", "MW", "m/", "_km/hr", "km+h", "_m; DelVar a"])
+def test_unit_command_refused(text):
+    with pytest.raises(LatexError):
+        unit_command(text)
+
+
+CONSTANTS = [
+    (r"m g h", ["g"], "m*_g*h", ["g"]),       # only the constants asked for: h stays a height
+    (r"m g h", True, "m*_g*_h", ["g", "h"]),
+    (r"k_B T", ["k_B"], "_k*T", ["kB"]),
+    (r"m_e c^2", ["m_e", "c"], "_Me*_c^2", ["c", "me"]),
+    (r"\frac{q_e^2}{4\pi\varepsilon_0 r^2}", ["q_e", r"\varepsilon_0"], "_q^2/(4*π*_ε0*r^2)", ["qe", "ε0"]),
+    (r"N_A k_B", ["N_A", "k_B"], "_Na*_k", ["NA", "kB"]),
+    (r"\sum_{g=1}^{3} g", ["g"], "Σ(g,g,1,3)", []),   # a bound g is the summation index
+    (r"5\,\mathrm{kg}\cdot g \to \mathrm{N}", ["g"], "5*_kg*_g@>_N", ["g"]),
+    (r"m g", [], "m*g", []),
+]
+
+
+@pytest.mark.parametrize("latex,consts,want,used", CONSTANTS)
+def test_constants(latex, consts, want, used):
+    p = plan(latex, constants=consts)
+    assert p.command == want
+    assert p.parsed.constants == used
+
+
+def test_constants_unknown_refused():
+    with pytest.raises(LatexError, match="isn't a physical constant"):
+        plan("m g", constants=["gee"])

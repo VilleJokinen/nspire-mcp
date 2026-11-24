@@ -25,7 +25,7 @@ import nspire_keys as keys  # noqa: E402
 import nspire_notes as notes  # noqa: E402
 
 WIN = NotesGuard.WIN
-HWND, DIALOG, BOX, PROMPT = WIN.hwnd, 900, 901, 950
+HWND, DIALOG, BOX, PROMPT, SETTINGS = WIN.hwnd, 900, 901, 950, 960
 
 
 # ------------------------------------------------------------ plan_graphs (no bridge)
@@ -63,6 +63,66 @@ def test_plan_graphs_error_names_the_graph():
 
 def test_comparisons_inside_brackets_are_allowed():
     assert exprs(["when(x<0,-x,x)", "piecewise(x,x>0,0,x<=0)"]) == ["when(x<0,-x,x)", "piecewise(x,x>0,0,x<=0)"]
+
+
+# ------------------------------------------------------------ physics steps (no bridge)
+
+def cmds(steps):
+    return [s["cmd"] for s in notes.plan_steps(steps)]
+
+
+def test_physics_math_steps():
+    assert cmds([
+        {"math": "90_km/_hr", "to": "m/s"},
+        {"math": "2_mA*4.7_kΩ", "to": "V"},
+        {"math": "1/3*_m", "approx": True},
+        {"math": "5_kg*_g", "approx": True, "to": "N"},
+        {"math": "x|x=5_km", "to": "_m"},
+        {"math": "5_km►_m"},                      # ► is sent as @>
+        {"math": "25_°C", "to": "K"},             # kelvin is _°K
+        {"text": "Done."},
+    ]) == ["90_km/_hr@>_m/_s", "2_mA*4.7_kΩ@>_V", "approx(1/3*_m)", "approx(5_kg*_g)@>_N", "(x|x=5_km)@>_m",
+           "5_km@>_m", "25_°C@>_°K", None]
+
+
+def test_physics_latex_steps():
+    pytest.importorskip("sympy")
+    assert cmds([
+        {"latex": r"5\,\mathrm{kg}\cdot g", "constants": ["g"], "approx": True},
+        {"latex": r"90\,\mathrm{km/h}", "to": "m/s"},
+        {"latex": r"90\,\mathrm{km/h} \to \mathrm{m/s}"},
+        {"latex": r"m g h", "constants": ["g"]},
+    ]) == ["approx(5*_kg*_g)", "90*_km/_hr@>_m/_s", "90*_km/_hr@>_m/_s", "m*_g*h"]
+
+
+@pytest.mark.parametrize("step,what", [
+    ({"math": "5_km", "to": "MW"}, "MW"),
+    ({"math": "5_km", "to": 5}, "to must be a string"),
+    ({"math": "5_km", "approx": "yes"}, "approx must be"),
+    ({"math": "5_km", "constants": ["g"]}, "constants is for latex"),
+    ({"math": "5_km", "constants": "g"}, "constants must be"),
+    ({"math": "5_km@>_m", "to": "cm"}, "already converts"),
+    ({"text": "Speed", "to": "m/s"}, "need math or latex"),
+])
+def test_physics_steps_refused(step, what):
+    with pytest.raises(ValueError, match=what):
+        notes.plan_steps([step])
+
+
+@pytest.mark.parametrize("step,what", [
+    ({"latex": r"x^2=4", "to": "m"}, "already converts or"),
+    ({"latex": r"5\,\mathrm{km} \to \mathrm{m}", "to": "cm"}, "already converts"),
+    ({"latex": r"m g", "constants": ["gee"]}, "isn't a physical constant"),
+])
+def test_physics_latex_steps_refused(step, what):
+    pytest.importorskip("sympy")
+    with pytest.raises(ValueError, match=what):
+        notes.plan_steps([step])
+
+
+def test_units_and_constants_are_not_variable_uses():
+    names = notes.scan_names("v:=90_km/_hr*_g+x+_°C+_µA")
+    assert names.defines == ("v",) and names.uses == {"x"}
 
 
 # ------------------------------------------------------------ check_save (no bridge)
@@ -150,17 +210,30 @@ class Sim:
     typed characters go into the box; Enter closes it and writes the file."""
 
     def __init__(self, path=None, dialog_cls=keys.FILE_DIALOG_CLASS, opens=True, focus_box=True,
-                 garble=False, prompt=False, writes=True, steal_focus_on=None):
+                 garble=False, prompt=False, writes=True, steal_focus_on=None, settings_cls="SunAwtDialog",
+                 settings_opens=True, settings_closes=True):
         self.path, self.dialog_cls, self.opens, self.focus_box = path, dialog_cls, opens, focus_box
         self.garble, self.prompt, self.writes, self.steal_focus_on = garble, prompt, writes, steal_focus_on
         self.dialog_open = self.prompt_open = False
         self.text, self.selected = "", False
         self.focused = True
         self.pasted: list[str] = []
+        # Document Settings: opened by the File > Settings menu, closed by its second Enter
+        self.settings_cls, self.settings_opens, self.settings_closes = settings_cls, settings_opens, settings_closes
+        self.settings_open, self.settings_enters = False, 0
+
+    def open_settings(self):
+        self.settings_open = self.settings_opens
 
     def after(self, ev):
         if ev == self.steal_focus_on:
             self.focused = False
+        if self.settings_open:
+            if ev == "enter":
+                self.settings_enters += 1
+                if self.settings_enters == 2 and self.settings_closes:
+                    self.settings_open = False
+            return
         if ev == "ctrl+s" and self.opens:
             self.dialog_open, self.text = True, "Document1.tns"
         elif self.dialog_open and ev == "shift+home":
@@ -180,7 +253,7 @@ class Sim:
 
     def dialogs(self, hwnd, before):
         out = [DIALOG] if self.dialog_open else []
-        return out + ([PROMPT] if self.prompt_open else [])
+        return out + ([PROMPT] if self.prompt_open else []) + ([SETTINGS] if self.settings_open else [])
 
     def patches(self):
         return [
@@ -196,12 +269,13 @@ class Sim:
             mock.patch.object(notes, "new_dialogs", side_effect=self.dialogs),
             mock.patch.object(notes, "window_open",
                               side_effect=lambda h: (h == DIALOG and self.dialog_open)
-                              or (h == PROMPT and self.prompt_open)),
+                              or (h == PROMPT and self.prompt_open) or (h == SETTINGS and self.settings_open)),
             mock.patch.object(notes, "window_class",
-                              side_effect=lambda h: self.dialog_cls if h == DIALOG else "#32770"),
+                              side_effect=lambda h: self.dialog_cls if h == DIALOG
+                              else self.settings_cls if h == SETTINGS else "#32770"),
             mock.patch.object(notes, "foreground_window",
-                              side_effect=lambda: (PROMPT if self.prompt_open else DIALOG if self.dialog_open
-                                                   else HWND) if self.focused else 1),
+                              side_effect=lambda: (SETTINGS if self.settings_open else PROMPT if self.prompt_open
+                                                   else DIALOG if self.dialog_open else HWND) if self.focused else 1),
             mock.patch.object(notes, "focused_control", side_effect=lambda h: BOX if self.focus_box else 0),
             mock.patch.object(notes, "is_file_name_box", side_effect=lambda d, c: d == DIALOG and c == BOX),
             mock.patch.object(notes, "control_text", side_effect=lambda h: self.text),
@@ -209,18 +283,20 @@ class Sim:
 
 
 def build(sim, steps=({"text": "Area:", "math": "1+1"},), graphs=None, save_as=None, overwrite=False,
-          progress=None, cancel=None, bridge=None, page_size="computer"):
+          progress=None, cancel=None, bridge=None, page_size="computer", digits=None):
     rec = KeyRecorder(sim.after)
     menus = []
     with mock.patch.object(keys, "_send", rec), \
             mock.patch.object(notes, "_new_computer_notes", return_value="Document1"), \
             mock.patch.object(notes, "_new_handheld_notes", return_value="Document1"), \
-            mock.patch.object(notes, "_menu", side_effect=lambda g, m, i, what: g() or menus.append((m, i))):
+            mock.patch.object(notes, "_menu", side_effect=lambda g, m, i, what, sub=None: g() or menus.append(
+                (m, i) if sub is None else (m, i, sub)) or (sim.open_settings() if sub else None)):
         for p in sim.patches():
             p.start()
         try:
             out = notes.build_notes(bridge or FakeBridge(), list(steps), None, page_size, 5, cancel=cancel,
-                                    graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress)
+                                    graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress,
+                                    digits=digits)
             return rec.events, out, menus
         except notes.NotesAborted as e:
             return rec.events, e, menus
@@ -506,3 +582,42 @@ def test_is_file_name_box():
         assert not keys.is_file_name_box(1, 0)
         assert not keys.is_file_name_box(9, 10)  # a Java dialog's box can't be checked
         assert not keys.is_file_name_box(1, 10)  # in another window
+
+
+# ------------------------------------------------------------ Display Digits (Document Settings)
+
+def test_digits_sets_display_digits_before_typing():
+    sim = Sim()
+    events, out, menus = build(sim, steps=[{"text": "a"}], digits=3)
+    assert menus == [(notes.FILE_MENU, notes.SETTINGS_ITEM, notes.DOCUMENT_SETTINGS_ITEM)]
+    assert events == ["down"] + ["up"] * notes.DIGITS_TOP_KEYS + ["down"] * 3 + ["enter", "enter", "a", "enter"]
+    assert "3 significant figures" in out["note"]
+
+
+def test_digits_dialog_that_does_not_open_stops_before_typing():
+    events, out, _ = build(Sim(settings_opens=False), steps=[{"text": "a"}], digits=3)
+    assert isinstance(out, notes.NotesAborted) and "didn't open" in str(out)
+    assert events == []
+
+
+def test_digits_dialog_of_another_kind_gets_no_keys():
+    events, out, _ = build(Sim(settings_cls="#32770"), steps=[{"text": "a"}], digits=3)
+    assert isinstance(out, notes.NotesAborted) and events == []
+
+
+def test_digits_dialog_that_stays_open_stops_before_typing():
+    events, out, _ = build(Sim(settings_closes=False), steps=[{"text": "a"}], digits=4)
+    assert isinstance(out, notes.NotesAborted) and "didn't close" in str(out)
+    assert "a" not in events
+
+
+def test_digits_focus_lost_in_the_dialog_stops():
+    events, out, _ = build(Sim(steal_focus_on="up"), steps=[{"text": "a"}], digits=4)
+    assert isinstance(out, notes.NotesAborted)
+    assert events == ["down", "up"]
+
+
+@pytest.mark.parametrize("digits", [0, 13, 2.5, True, "3"])
+def test_digits_refused(digits):
+    with pytest.raises(ValueError, match="digits"):
+        notes.check_options(None, "computer", 10, digits)

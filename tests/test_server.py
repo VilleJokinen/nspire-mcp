@@ -106,7 +106,7 @@ def test_notes_schema():
     assert props["page_size"]["enum"] == ["computer", "handheld"]
     ref = props["steps"]["items"]["$ref"].rsplit("/", 1)[1]
     step = schema["$defs"][ref]
-    assert set(step["properties"]) == {"text", "math", "latex", "action", "var"}
+    assert set(step["properties"]) == {"text", "math", "latex", "action", "var", "to", "approx", "constants"}
     assert not step.get("required")
     assert all(p.get("description") for p in step["properties"].values())
     assert step["properties"]["action"]["enum"] == list(get_args(server.LatexAction))

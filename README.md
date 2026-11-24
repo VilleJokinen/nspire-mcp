@@ -258,8 +258,9 @@ equations separated by `\\`, commas or `;`, conditions (`\text{for } x>0`, also 
 `\Im`, `\operatorname{sgn}`, `a \bmod b`, `:=` (`a:=5` stores, `f(x):=…` defines), Greek letters,
 subscripts (`x_1`, `a_{ij}`, `\alpha_2` become `x1`, `aij`, `α2`), vectors (`\vec{u}\cdot\vec{v}` is
 `dotP(u,v)`, `\times` is `crossP`, also between row or column matrices; `\mathbf{u}\cdot\mathbf{v}` too, and the lengths `|\vec u|`, `\|\vec u\|`, `\lVert u\rVert` are `norm(u)`, while `|x|` stays `abs(x)`), and units after a number
-(`5\,\mathrm{m}`, `9.81\,\mathrm{m/s^2}`, `3\text{ kg}` become `5*_m`, `9.81*_m/_s^2`, `3*_kg`: m, cm,
-mm, km, s, min, h, kg, g, N, J, W, Pa, l and a few more; gram is TI-Nspire's `_gm`, hour `_hr`).
+(`5\,\mathrm{m}`, `9.81\,\mathrm{m/s^2}`, `3\text{ kg}`, `4.7\,\mathrm{k}\Omega`, `3\,\mu\mathrm{A}`,
+`25^\circ\mathrm{C}` become `5*_m`, `9.81*_m/_s^2`, `3*_kg`, `4.7*_kΩ`, `3*_µA`, `25*_°C`). See
+[Physics: units, conversions, constants](#physics-units-conversions-constants).
 
 Anything else that starts with a backslash (`\in`, `\implies`, `\forall`…) is an error
 rather than a guess, and so is input the parser can't read to the end: translate those
@@ -271,8 +272,51 @@ product; `\phi(x)=x^2` still defines `φ`), two vectors multiplied without `\cdo
 chained vector products without parentheses (`\vec u\cdot\vec v\times\vec w`), `\vec{v}`
 or `\mathbf{v}` next to `\cdot`/`\times` together with plain `v`, a bold name with an index there
 (`\mathbf{v}_1\cdot\mathbf{v}_2`), the norm of a matrix that isn't one row or column, unknown units after a
-number (`5\text{ apples}`, `5\,\mathrm{V}`), temperatures (`25^\circ\mathrm{C}`), and any other `\text{...}`
+number (`5\text{ apples}`, `4\,\mathrm{MW}`), `°C` without a number in front, and any other `\text{...}`
 (`\text{area} = 5`; only `and`/`ja`, empty text, punctuation, units and condition words are understood).
+
+### Physics: units, conversions, constants
+
+Units are TI-Nspire's own, and the CAS does all unit arithmetic. In TI-Nspire syntax
+(`nspire_eval`, Notes `math` steps) write `5_m`, `9.81_m/_s^2`, `2_mA*4.7_kΩ`, and convert
+with `@>` (TI-Nspire's ►; `►` is accepted too and sent as `@>`): `90_km/_hr@>_m/_s` is
+`25.*(_m/_s)`.
+
+TI-Nspire's unit names ignore case, which makes some of them traps: `_K` is Boltzmann's
+constant (kelvin is `_°K`), `_C` the speed of light (coulomb is `_coul`), `_H` Planck's
+constant (henry is `_henry`), `_nA` Avogadro's number, `_t` a tesla (metric ton is `_mton`),
+`_Mm` a millimeter, and `_MW`, `_mW`, `_kN`, `_MJ`, `_mT`, `_MPa`, `_µV`, `_µC` don't exist. The
+LaTeX translator knows this: it maps `\mathrm{K}`, `\mathrm{C}`, `\mathrm{H}`, `\mathrm{t}` to
+the right units and refuses a prefixed unit TI-Nspire doesn't have (write `5\cdot 10^{6}\,\mathrm{W}`)
+instead of passing on a name that means something else. It knows the SI units (m, g, s, A, K,
+mol, cd, N, J, W, Pa, Hz, V, Ω, C, F, H, T, Wb, S), eV, cal, kWh, bar, atm, mmHg, L, min, h,
+yr, Å, au, ly, pc, u, ha, rad, °C, °F, and the prefixed ones TI-Nspire has (km … nm, mg, µs, kA … µA,
+kV, mV, kΩ, MΩ, µF, nF, pF, mH, µH, kHz … GHz, kJ, kW, kPa, mbar, kcal). `µ` can be `\mu`, `µ` or `μ`,
+and `Ω` `\Omega`, also outside `\mathrm{}` (`5\,\Omega`, `\mathrm{k}\Omega`).
+
+A unit after a final `\to`, `\rightarrow` or `\text{ in }` is the unit to show the result in:
+`90\,\mathrm{km/h} \to \mathrm{m/s}` runs `90*_km/_hr@>_m/_s` (only for a quantity to evaluate,
+not with solve). `\lim_{x\to 0}` is unaffected.
+
+Physical constants are opt-in, because `g`, `c` and `h` are often plain variables:
+`nspire_latex(..., constants=["g"])` (or a Notes step's `"constants"`) reads `g` as TI-Nspire's
+`_g`, so `m g h` becomes `m*_g*h`. `constants=true` reads all of `g`, `c`, `h`, `k_B`, `N_A`,
+`R`, `G`, `\varepsilon_0`, `\mu_0`, `m_e`, `m_p`, `m_n` and `q_e` (the elementary charge;
+TI-Nspire's `_g`, `_c`, `_h`, `_k`, `_Na`, `_Rc`, `_Gc`, `_ε0`, `_μ0`, `_Me`, `_Mp`, `_Mn`, `_q`).
+The result's `warnings` lists the symbols read as constants.
+
+A Notes step takes `"to": "km/h"` (a unit as text, LaTeX or `_km/_hr`) to convert its result,
+and `"approx": true` to show a decimal (`approx(...)` in the math box):
+
+```json
+{"text": "Speed:", "math": "90_km/_hr", "to": "m/s"}
+{"text": "Weight:", "latex": "5\\,\\mathrm{kg}\\cdot g", "constants": ["g"], "approx": true}
+```
+
+`nspire_notes(..., digits=3)` shows every result on the page with 3 significant figures: it sets
+the new document's Display Digits to Float3 (File > Settings > Document Settings) before typing.
+Only the display is rounded; the values inside TI-Nspire stay exact, and the bridge document's
+settings don't change.
 
 With `action="auto"` (what the hotkey uses):
 

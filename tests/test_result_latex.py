@@ -63,6 +63,19 @@ CASES = [
     # units
     ("5.03*_m", r"5.03 \mathrm{m}"),
     ("10*_m/_s^2", r"\frac{10 \mathrm{m}}{\mathrm{s}^{2}}"),
+    # units whose names aren't ASCII or aren't the symbol, and constants
+    ("9.4*_V", r"9.4 \mathrm{V}"),
+    ("1000.*_µA", r"1000.0 \mu\mathrm{A}"),
+    ("4.7*_kΩ", r"4.7 \mathrm{k}\Omega"),
+    ("50*_Ω", r"50 \Omega"),
+    ("298.15*_°K", r"298.15 \mathrm{K}"),
+    ("−272.15*_°C", r"- 272.15 {}^{\circ}\mathrm{C}"),
+    ("54.*(_km/_hr)", r"\frac{54.0 \mathrm{km}}{\mathrm{h}}"),
+    (f"1.602176634{NS_EXP}−19*_coul", r"1.602176634 \cdot 10^{-19} \mathrm{C}"),
+    ("2*_henry", r"2 \mathrm{H}"),
+    ("10000000000.*_Å", r"10000000000.0 \mathring{\mathrm{A}}"),
+    ("m*_g", r"m g"),
+    ("_q^2/(4*π*_ε0*r^2)", r"\frac{e^{2}}{4 \pi \varepsilon_{0} r^{2}}"),
     ("1.41421356237", "1.41421356237"),
     # TI-Nspire's private-use characters
     (f"1.23{NS_EXP}−5", r"1.23 \cdot 10^{-5}"),

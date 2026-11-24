@@ -116,8 +116,14 @@ hotkey.
   still within `LATE_WINDOW_S` says that request is probably still being computed
   (`Bridge._busy_hint`): `math.evalStr` blocks bridge.lua until it returns.
 - `nspire_chars.py`: TI-Nspire's private-use characters (`NS_*`), `readable()`,
-  `to_cas_chars()`. No pywin32, so the translator imports on any OS;
-  `nspire_bridge` re-exports them.
+  `to_cas_chars()` (which also turns ► into `@>`: the bridge's `math.evalStr` rejects ►).
+  No pywin32, so the translator imports on any OS; `nspire_bridge` re-exports them.
+- `nspire_units.py`: the unit table (`UNITS`, LaTeX symbol to TI-Nspire name), the physical
+  constants, `unit_command()` (unit text such as `km/h` or `_km/_hr` to TI-Nspire syntax, used by
+  Notes steps' `to`) and `unit_latex()`, without SymPy. TI-Nspire's unit names ignore case (`_K` is
+  Boltzmann's constant, `_C` the speed of light, `_nA` Avogadro's number, `_MW` doesn't exist):
+  add a unit only after checking `1_name` on the real CAS, and add a case to `tests/test_plan.py`.
+  Unknown units aren't errors in TI-Nspire (`1_mt` stays `1.*_mt`), so nothing would catch a wrong entry.
 - `nspire_latex.py`: `plan()` turns LaTeX into a TI-Nspire command without touching
   the bridge, so you can test translation offline. `run_plan()` evaluates a plan
   inside `bridge.session()`, and `format_answer()` converts the result to LaTeX
@@ -175,7 +181,10 @@ hotkey.
   opens TI-Nspire ignores the Alt, so each menu step checks that the menu opened
   and retries. TI-Nspire is a Java app whose menus are drawn inside its window
   (no menu window, no Windows menu mode), so the check compares sampled pixels of
-  the window's top-left area before and after (`menu_area` in `nspire_keys.py`). Never send Esc to back out: if focus
+  the window's top-left area just before the menu's Down key and after it (`menu_area`/`menu_changed` in
+  `nspire_keys.py`; only channel changes above `MENU_PIXEL_DELTA` count, and only within
+  `MENU_OPEN_WAIT_S`: with a translucent window theme an animated wallpaper drifts through the window,
+  which once made every check pass, so the keys went out blind). Never send Esc to back out: if focus
   has moved, it lands in another program (in Claude it cancels the command).
   The window is chosen once per run by its process (`is_nspire_image`,
   `pick_nspire_window` in `nspire_keys.py`), never by title, and that hwnd is used
@@ -192,6 +201,9 @@ hotkey.
   box back (`control_text`) before Enter, and reports success only once the dialog
   closed and the file appeared or changed on disk. Anything else (a Java dialog, a
   replace-file question, an error) stops with the dialog left for the user.
+  `digits=n` sets the new document's Display Digits to Float n before typing (`_set_digits`: File >
+  Settings > Document Settings, a `SunAwtDialog` that opens with Display Digits focused; Down opens
+  its list (Up does nothing while it's closed), then Up x20 to Float, Down x n, Enter, Enter = OK).
   `build_notes(..., progress=cb)` calls `cb(done, total, message)` from the worker
   thread; server.py forwards it with `ctx.report_progress` through
   `asyncio.run_coroutine_threadsafe` and drops it once the call is cancelled.
