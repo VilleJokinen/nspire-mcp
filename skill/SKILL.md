@@ -156,10 +156,13 @@ Force a specific operation with `action`: `approx`, `solve`, `csolve`,
 e.g. `"t"` or `"x,y"`.
 
 Conventions: `\log` without a base is base 10, `\ln` is natural; `e` and `i`
-are constants unless used as a summation or integration variable; `1,5`
-between digits is a decimal comma, also inside `{}` groups such as
-`\frac{1,5}{2}`, but not inside `()`, `[]` or `\{\}` (`f(1,5)` and
-`\gcd(12,18)` keep their commas).
+are constants unless used as a summation or integration variable; `3{,}5` is
+always the decimal 3.5, and `1,5` between digits is a decimal comma at top level and
+inside `{}` groups such as `\frac{1,5}{2}`, but not inside `()`, `[]` or `\{\}` (`f(1,5)` and
+`\gcd(12,18)` keep their commas). For a user who writes European notation pass
+`decimal_comma=true` (`nspire_latex`, `nspire_check_steps`): `1,5` is a decimal anywhere, `;`
+separates arguments and list items (`f(1;5)`), `1,2,3` is refused as ambiguous, and the answer
+comes back with decimal commas (`1,5`, LaTeX `1{,}5`, lists `{1,5;2}`).
 
 The LaTeX is sent as written and the CAS does all the arithmetic, so `nspire`
 (the command run) mirrors the input: `\sqrt{8}` runs as `√(8)`, not `2*√(2)`.

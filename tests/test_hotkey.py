@@ -651,3 +651,11 @@ def test_nothing_logged_when_off(tmp_path, monkeypatch):
     app, clip, bridge = make_app()
     run_job(app)
     assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_decimal_comma_setting_reads_and_writes_decimal_commas():
+    app, clip, _ = make_app(clip_text="1,5*2", replies={"1.5*2": "3.5"}, copy="text")
+    app.args.decimal_comma = True
+    _, _, r, _, _ = run_job(app)
+    assert r["result"] == "3,5"
+    assert clip.copies == ["3,5"]

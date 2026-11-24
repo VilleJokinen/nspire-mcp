@@ -714,3 +714,87 @@ def test_constants(latex, consts, want, used):
 def test_constants_unknown_refused():
     with pytest.raises(LatexError, match="isn't a physical constant"):
         plan("m g", constants=["gee"])
+
+
+# ---- decimal comma: 3{,}5 always, plain 3,5 by mode (None default, True = decimal-comma mode, False = off)
+
+@pytest.mark.parametrize("latex,want", [
+    (r"3{,}5+1", "3.5 + 1"),
+    (r"-0{,}25", "-0.25"),
+    (r"1{,}5\cdot10^{3}", "1.5*10^3"),
+    (r"f(1{,}5, 2)", "f(1.5,2)"),
+    (r"\{1{,}5, 2\}", "{1.5,2}"),
+    (r"\frac{1{,}5}{2}", "1.5/2"),
+    (r"x=2{,}5", "solve(x=2.5,x)"),
+])
+@pytest.mark.parametrize("mode", [None, False, True])
+def test_braced_comma_is_a_decimal_in_every_mode(latex, want, mode):
+    assert cmd(latex, decimal_comma=mode) == want
+
+
+@pytest.mark.parametrize("latex", [r"{,}5", r"3{,}x", r"3{,}", r"x{,}2"])
+def test_braced_comma_needs_digits_on_both_sides(latex):
+    with pytest.raises(LatexError, match=r"\{,\}"):
+        plan(latex)
+
+
+@pytest.mark.parametrize("latex,want", [
+    (r"1,5+2", "1.5 + 2"),
+    (r"f(1,5)", "f(1.5)"),                    # a decimal, not two arguments
+    (r"f(1;5)", "f(1,5)"),                    # ';' separates
+    (r"\gcd(12;18)", "gcd(12,18)"),
+    (r"\max(1,5; 2)", "max(1.5,2)"),
+    (r"\{1;2;3\}", "{1,2,3}"),
+    (r"\{1,5; 2,5\}", "{1.5,2.5}"),
+    (r"x=2, x=3", "solve(x=2 and x=3,{x})"),  # comma followed by a space: a separator
+    (r"x=1,5; x=2", "solve(x=1.5 and x=2,{x})"),
+    (r"x=1,5", "solve(x=1.5,x)"),
+    (r"-0,25", "-0.25"),
+    (r"1,5\cdot10^{3}", "1.5*10^3"),
+    (r"\begin{pmatrix}1,5&2\\3&4\end{pmatrix}", "[[1.5,2][3,4]]"),
+    (r"\sqrt{2,25}+\frac{1,5}{2}", "√(2.25) + 1.5/2"),
+])
+def test_decimal_comma_mode(latex, want):
+    assert cmd(latex, decimal_comma=True) == want
+
+
+@pytest.mark.parametrize("latex", [r"1,2,3", r"1,500,000", r"1.5,2", r"f(1,2,3)", r"\{1,2,3\}"])
+def test_decimal_comma_mode_refuses_ambiguous_runs(latex):
+    with pytest.raises(LatexError, match="decimal-comma mode"):
+        plan(latex, decimal_comma=True)
+
+
+def test_decimal_comma_off_never_reads_plain_commas_as_decimals():
+    assert cmd(r"\{1,2,3\}", decimal_comma=False) == "{1,2,3}"
+    assert cmd(r"1,2,3", decimal_comma=False) == "{1,2,3}"
+    assert cmd(r"f(1,5)", decimal_comma=False) == "f(1,5)"
+    assert cmd(r"\max(a,b)", decimal_comma=True) == "max(a,b)"
+    assert cmd(r"\binom{5}{2}", decimal_comma=True) == "nCr(5,2)"
+
+
+def test_default_mode_is_unchanged():
+    assert cmd(r"1,5+2") == "1.5 + 2"
+    assert cmd(r"f(1,5)") == "f(1,5)"
+
+
+def test_to_decimal_comma():
+    from nspire_latex import to_decimal_comma as t
+    assert t("1.5") == "1,5"
+    assert t("{1.5,2}") == "{1,5;2}"
+    assert t("x=1.5 or x=2.25") == "x=1,5 or x=2,25"
+    assert t("f(x)=x.") == "f(x)=x."
+    assert t("3.ᴇ-4") == "3.ᴇ-4"
+    assert t(r"x=1.5,\quad y=2.5", latex=True) == r"x=1{,}5,\quad y=2{,}5"
+    assert t(r"\left\{1.5, 2\right\}", latex=True) == r"\left\{1{,}5; 2\right\}"
+    assert t(r"\frac{1}{2}", latex=True) == r"\frac{1}{2}"
+
+
+def test_format_answer_decimal_comma():
+    from nspire_latex import CasRun, format_answer
+    p = plan("1.5+1")
+    run = CasRun(p, "2.5", "3.5")
+    out = format_answer(run, True)
+    assert out["result"] == "2,5" and out["approx"] == "3,5"
+    assert out["result_latex"] == "2{,}5" and out["approx_latex"] == "3{,}5"
+    assert out["nspire"] == readable(p.command)       # the command keeps decimal points
+    assert format_answer(run)["result"] == "2.5"

@@ -14,6 +14,9 @@ Ctrl+Alt+Shift+J   pick an action (factor, expand, solve, integrate, ...) for it
 Ctrl+Alt+Shift+T   the other way: TI-Nspire text on the clipboard becomes LaTeX
 Ctrl+Alt+Shift+Q   quit
 
+--decimal-comma (or NSPIRE_DECIMAL_COMMA=1) reads 1,5 as a decimal and ';' as the separator in the
+LaTeX, and writes answers (and the Ctrl+Alt+Shift+T conversion) with decimal commas.
+
 The answer replaces the clipboard (as LaTeX, see --copy) and shows in a popup
 in the bottom-right corner, drawn as math when matplotlib can draw it; click
 the popup to close it. The tray icon's menu lists the last answers: click one
@@ -48,7 +51,7 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")  # noqa: SIM115
 
 import nspire_log  # noqa: E402
-from nspire_latex import ACTIONS, LatexError, format_answer, nspire_to_latex, plan, run_plan  # noqa: E402
+from nspire_latex import ACTIONS, LatexError, format_answer, nspire_to_latex, plan, run_plan, to_decimal_comma  # noqa: E402
 
 # The Windows parts (hotkeys, tray icon, clipboard) load only on Windows, so the
 # rest of this module (history, action list, math rendering) imports anywhere
@@ -213,7 +216,7 @@ def filter_actions(query: str, actions: list[str] | None = None) -> list[str]:
     return first + rest
 
 
-def picker_defaults(latex: str) -> dict[str, str]:
+def picker_defaults(latex: str, decimal_comma: bool | None = None) -> dict[str, str]:
     """The variable(s) each picker action that needs one would use, as plan() picks them.
 
     '' where plan() finds none. Two plans cover them all: solve-like actions
@@ -221,7 +224,7 @@ def picker_defaults(latex: str) -> dict[str, str]:
     """
     def variables(action: str) -> str:
         try:
-            return ", ".join(plan(latex, action).variables)
+            return ", ".join(plan(latex, action, decimal_comma=decimal_comma).variables)
         except LatexError:
             return ""
     many, one = variables("solve"), variables("diff")
@@ -875,6 +878,10 @@ class App:
     ("copied", text).
     """
 
+    @property
+    def decimal_comma(self) -> bool:
+        return bool(getattr(self.args, "decimal_comma", False))
+
     def __init__(self, args, root, popup, bridge, events: queue.Queue, clipboard: Clipboard,
                  renderer: MathRenderer | None = None):
         self.args, self.root, self.popup, self.bridge = args, root, popup, bridge
@@ -997,9 +1004,10 @@ class App:
             if not latex or self.clip.is_traffic(latex):
                 self.events.put(("error", "Clipboard has no text", "Copy some LaTeX first.", ""))
                 return
-            p = plan(latex, job.action, job.var, **(job.extra or {}))  # bad LaTeX fails here
+            dc = self.decimal_comma
+            p = plan(latex, job.action, job.var, decimal_comma=dc or None, **(job.extra or {}))  # bad LaTeX fails here
             run = self.bridge.session(lambda: run_plan(self.bridge, p, self.args.timeout))
-            r = format_answer(run)  # after the session: the user's clipboard is back meanwhile
+            r = format_answer(run, dc)  # after the session: the user's clipboard is back meanwhile
             if job.numeric and r.get("approx"):
                 r = {**r, "exact": r["result"], "result": r["approx"], "result_latex": r.get("approx_latex"),
                      "approx": None}
@@ -1054,6 +1062,8 @@ class App:
                 self.events.put(("error", "Clipboard has no text", "Copy a result from TI-Nspire first.", ""))
                 return
             tex = nspire_to_latex(text)
+            if self.decimal_comma:
+                tex = to_decimal_comma(tex, latex=True)
             self.clip.set(tex)
             png = self.renderer.render(tex) if self.renderer is not None else None
             self.events.put(("converted", text, tex, png))
@@ -1100,8 +1110,9 @@ class App:
             if not latex or self.clip.is_traffic(latex):
                 self.events.put(("error", "Clipboard has no text", "Copy some LaTeX first.", ""))
                 return
-            plan(latex, "auto")  # unreadable LaTeX: say so now, not after an action is picked
-            self.events.put(("picker", latex, picker_defaults(latex)))
+            dc = self.decimal_comma or None
+            plan(latex, "auto", decimal_comma=dc)  # unreadable LaTeX: say so now, not after an action is picked
+            self.events.put(("picker", latex, picker_defaults(latex, dc)))
         except LatexError as e:
             self.events.put(("error", "Couldn't read the LaTeX", str(e), latex))
         except Exception as e:
@@ -1157,6 +1168,10 @@ def main():
     ap.add_argument("--timeout", type=float, default=15, help="CAS timeout in seconds")
     ap.add_argument("--no-tray", action="store_true", help="no notification-area icon")
     ap.add_argument("--plain", action="store_true", help="show answers as text, not drawn as math")
+    ap.add_argument("--decimal-comma", action="store_true",
+                    default=os.environ.get("NSPIRE_DECIMAL_COMMA", "").strip().lower() in ("1", "true", "yes", "on"),
+                    help="European notation: 1,5 in the LaTeX is a decimal, ';' separates items, and answers "
+                         "are written with decimal commas (also NSPIRE_DECIMAL_COMMA=1)")
     args = ap.parse_args()
 
     if sys.platform != "win32":

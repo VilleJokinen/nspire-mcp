@@ -149,7 +149,7 @@ def _clean(src: str, latex: bool) -> str:
 
 
 def prepare(lines: list[str], latex: bool = True, var: str | None = None,
-            constants: list[str] | bool = False) -> Spec:
+            constants: list[str] | bool = False, decimal_comma: bool | None = None) -> Spec:
     """Translate every line, without touching the bridge. Raises ValueError (naming the line)
     for input that can't be checked."""
     if not isinstance(lines, list) or len(lines) < 2:
@@ -168,7 +168,7 @@ def prepare(lines: list[str], latex: bool = True, var: str | None = None,
         if not s:
             raise ValueError(f"Line {n} ({src!r}) has no math in it.")
         cleaned.append(s)
-    out = _prepare_latex(lines, cleaned, var, constants) if latex else _prepare_raw(lines, cleaned, var)
+    out = _prepare_latex(lines, cleaned, var, constants, decimal_comma) if latex else _prepare_raw(lines, cleaned, var)
     for n, ln in enumerate(out.lines, 1):
         if _STORES_RE.search(ln.nspire):
             raise ValueError(f"Line {n} ({ln.source!r}) stores or deletes something ({ln.nspire}); "
@@ -203,7 +203,8 @@ def _alternatives(p) -> bool:
         and all(isinstance(x, sp.Symbol) and x == lhs[0] for x in lhs)
 
 
-def _prepare_latex(sources: list[str], cleaned: list[str], var: str | None, constants) -> Spec:
+def _prepare_latex(sources: list[str], cleaned: list[str], var: str | None, constants,
+                   decimal_comma: bool | None = None) -> Spec:
     from sympy.core.relational import Relational
 
     import nspire_latex as lx  # SymPy: only for LaTeX input
@@ -216,7 +217,7 @@ def _prepare_latex(sources: list[str], cleaned: list[str], var: str | None, cons
         pieces = []
         for piece in (x.strip() for x in _OR_LATEX_RE.split(s)):
             try:
-                p = lx.parse(piece, constants)
+                p = lx.parse(piece, constants, decimal_comma)
             except lx.LatexError as e:
                 raise fail(n, str(e)) from None
             if p.ode_dep:
@@ -241,7 +242,7 @@ def _prepare_latex(sources: list[str], cleaned: list[str], var: str | None, cons
         pieces, _, alts = lines[first_eq]
         src = pieces[0][0] if not alts or len(pieces) > 1 else cleaned[first_eq].split(",")[0]
         try:
-            v = ",".join(lx.plan(src, "solve", constants=constants).variables) or None
+            v = ",".join(lx.plan(src, "solve", constants=constants, decimal_comma=decimal_comma).variables) or None
         except lx.LatexError as e:
             raise fail(first_eq + 1, str(e)) from None
     vt = _var_text(v) if v else None
@@ -254,7 +255,7 @@ def _prepare_latex(sources: list[str], cleaned: list[str], var: str | None, cons
         else:
             try:
                 cmd = lx.plan(s, "solve" if kind == EQUATION else "eval", v if kind == EQUATION else None,
-                              constants=constants).command
+                              constants=constants, decimal_comma=decimal_comma).command
             except lx.LatexError as e:
                 raise fail(n, str(e)) from None
         out.append(Line(sources[n - 1], cmd, kind))

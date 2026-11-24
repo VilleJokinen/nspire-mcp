@@ -271,6 +271,75 @@ def _decimal_commas(s: str) -> str:
     return "".join(out)
 
 
+_BRACED_COMMA = re.compile(r"(?<=\d)\s*\{\s*,\s*\}\s*(?=\d)")
+_NUM_RUN_BEFORE = re.compile(r"[\d.,]+$")
+_NUM_RUN_AFTER = re.compile(r"[\d.,]*\d")
+
+
+def _braced_commas(s: str) -> str:
+    """3{,}5 -> 3.5 wherever it stands (it is how LaTeX writes a decimal comma, never a separator)."""
+    s = _BRACED_COMMA.sub(".", s)
+    if re.search(r"\{\s*,\s*\}", s):
+        raise LatexError("'{,}' is a decimal comma and must stand between two digits (3{,}5).")
+    return s
+
+
+def _decimal_commas_strict(s: str) -> str:
+    """Decimal-comma mode: digit,digit with nothing between is a decimal anywhere (f(1,5) is f(1.5)).
+
+    Separators are ';' (inside brackets too: f(1;5), \\{1;2;3\\}) and a comma that
+    has a space or a non-digit next to it (x=2, x=3). Runs such as 1,2,3 or 1,500,000 and
+    mixes such as 1.5,2 could be read two ways, so they are refused.
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            pair = s[i:i + 2]
+            if pair == r"\{":
+                stack.append(pair)
+            elif pair == r"\}" and stack:
+                stack.pop()
+            out.append(pair)
+            i += 2
+            continue
+        if c in "([{":
+            stack.append(c)
+        elif c in ")]}" and stack:
+            stack.pop()
+        elif c == ";" and stack:
+            c = ","
+        elif c == "," and i > 0 and s[i - 1].isdigit() and s[i + 1:i + 2].isdigit():
+            before = _NUM_RUN_BEFORE.search(s, 0, i)
+            after = _NUM_RUN_AFTER.match(s, i + 1)
+            run = (before.group() if before else "") + "," + (after.group() if after else "")
+            if re.search(r"[.,]", run.replace(",", "", 1)):
+                raise LatexError(
+                    f"'{run}' could be a decimal or a list in decimal-comma mode. Write one decimal "
+                    "as 1,5, separate list items and arguments with ';' (1;2;3), or write 1{,}5.")
+            c = "."
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+_DECIMAL_POINT = re.compile(r"(?<=\d)\.(?=\d)")
+
+
+def to_decimal_comma(text: str, latex: bool = False) -> str:
+    """A CAS answer written with decimal commas: 1.5 -> 1,5 (1{,}5 in LaTeX).
+
+    Separators become ';' (a list {1.5,2} reads {1,5;2}), so the text reads back in
+    decimal-comma mode. Formatting only; the value is the CAS's.
+    """
+    if latex:
+        text = re.sub(r"(?<!\\),(?!\\quad)", ";", text)
+        return _DECIMAL_POINT.sub("{,}", text)
+    return _DECIMAL_POINT.sub(",", text.replace(",", ";"))
+
+
 # ---------------------------------------------------------------- units (nspire_units.py)
 
 def _unit_parts(content: str) -> list[tuple[str, str]]:
@@ -310,7 +379,8 @@ def _constant_names(constants: Iterable[str] | bool) -> set[str]:
 
 
 class _Pre:
-    def __init__(self) -> None:
+    def __init__(self, decimal_comma: bool | None = None) -> None:
+        self.decimal_comma = decimal_comma  # None: the conservative default; False: only 3{,}5; True: full mode
         self.placeholders: dict[str, tuple[str, object]] = {}  # name -> (kind, payload)
         self.ode_indep: str | None = None
         self.constraints: list[str] = []  # LaTeX of the conditions after \text{for ...}
@@ -330,6 +400,7 @@ class _Pre:
         # math delimiters and display environments
         s = re.sub(r"^\$\$?|\$\$?$", "", s.strip())
         s = re.sub(r"^\\\[|\\\]$|^\\\(|\\\)$", "", s.strip())
+        s = _braced_commas(s)
         s = re.sub(r"\\(begin|end)\{(equation|align|aligned|alignedat|gather|gathered|multline|eqnarray|split)"
                    r"\*?\}(\{\d+\})?", "", s)
         s = re.sub(r"\\(label|tag)\{[^}]*\}", "", s)
@@ -380,7 +451,11 @@ class _Pre:
         # A script without braces is one character, as LaTeX renders it: \sum_{k=1}^5 2k has
         # the upper limit 5 (the parser would read ^52), x^12 is x^1*2
         s = re.sub(r"([\^_])\s*(\d)", r"\1{\2}", s)
-        s = _decimal_commas(s)  # before matrices, so cells such as 1,5 are converted too
+        # before matrices, so cells such as 1,5 are converted too
+        if self.decimal_comma is None:
+            s = _decimal_commas(s)
+        elif self.decimal_comma:
+            s = _decimal_commas_strict(s)
         s = self._det(s)
         s = self._matrices(s)
         s = self._vector_ops(s)
@@ -1216,10 +1291,10 @@ def _plain_names(e, out: set[str], vecs: set[str]) -> None:
             _plain_names(a, out, vecs)
 
 
-def parse(latex: str, constants: Iterable[str] | bool = False) -> Parsed:
+def parse(latex: str, constants: Iterable[str] | bool = False, decimal_comma: bool | None = None) -> Parsed:
     consts = _constant_names(constants)
     used: list[str] = []
-    pre = _Pre()
+    pre = _Pre(decimal_comma)
     pieces = pre.run(latex)
     if not pieces:
         raise LatexError("The LaTeX is empty.")
@@ -1727,11 +1802,15 @@ def _free_names(exprs) -> list[str]:
 
 
 def plan(latex: str, action: str = "auto", var: str | None = None, order: int | None = None,
-         point: str | None = None, constants: Iterable[str] | bool = False) -> Plan:
+         point: str | None = None, constants: Iterable[str] | bool = False,
+         decimal_comma: bool | None = None) -> Plan:
+    """decimal_comma: None reads 1,5 as a decimal only where a comma can't separate (top level, {} groups);
+    True is decimal-comma mode (digit,digit anywhere is a decimal, ';' separates); False never reads
+    a plain comma as a decimal. 3{,}5 is a decimal in every mode."""
     action = (action or "auto").lower().replace(" ", "").replace("_", "")
     if action != "auto" and action not in ACTIONS:
         raise LatexError(f"Unknown action {action!r}. Use auto or one of: {', '.join(ACTIONS)}.")
-    p = parse(latex, constants)
+    p = parse(latex, constants, decimal_comma)
     pl = _plan(p, action, var, order, point)
     if p.constraints:
         # \text{for } x>0: TI-Nspire's "with" operator, applied to the result
@@ -2204,28 +2283,36 @@ def run_plan(bridge, p: Plan, timeout_s: float = 10) -> CasRun:
     return run
 
 
-def format_answer(run: CasRun) -> dict:
-    """{action, nspire, result, result_latex, approx?, approx_latex?} for a CasRun. No bridge use."""
+def format_answer(run: CasRun, decimal_comma: bool = False) -> dict:
+    """{action, nspire, result, result_latex, approx?, approx_latex?} for a CasRun. No bridge use.
+
+    decimal_comma writes result, result_latex, approx and approx_latex with decimal commas
+    (1,5; 1{,}5 in LaTeX) and ';' between list items; `nspire` stays the command that ran."""
     p, raw = run.plan, run.raw
+
+    def fmt(text: str | None, latex: bool = False) -> str | None:
+        return to_decimal_comma(text, latex) if decimal_comma and text else text
+
     out = {
         "action": p.description,
         "nspire": readable(p.command),
-        "result": readable(raw) or ("Done" if p.action == "define" else ""),
-        "result_latex": result_to_latex(raw),
+        "result": fmt(readable(raw) or ("Done" if p.action == "define" else "")),
+        "result_latex": fmt(result_to_latex(raw), True),
     }
     if run.approx_raw is not None:
-        out["approx"] = readable(run.approx_raw)
-        out["approx_latex"] = result_to_latex(run.approx_raw)
+        out["approx"] = fmt(readable(run.approx_raw))
+        out["approx_latex"] = fmt(result_to_latex(run.approx_raw), True)
     return out
 
 
 def solve_latex(bridge, latex: str, action: str = "auto", var: str | None = None,
-                order: int | None = None, point: str | None = None, timeout_s: float = 10) -> dict:
+                order: int | None = None, point: str | None = None, timeout_s: float = 10,
+                decimal_comma: bool | None = None) -> dict:
     """plan(), then run_plan() in a bridge.session() of its own, then format_answer().
 
     Opens the session itself: don't call it inside bridge.session() (the
     session lock isn't reentrant). Inside one, use run_plan() instead.
     """
-    p = plan(latex, action, var, order, point)
+    p = plan(latex, action, var, order, point, decimal_comma=decimal_comma)
     run = bridge.session(lambda: run_plan(bridge, p, timeout_s))
-    return format_answer(run)
+    return format_answer(run, bool(decimal_comma))
