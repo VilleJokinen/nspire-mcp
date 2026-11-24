@@ -350,9 +350,10 @@ def test_output_schemas():
         {"action", "nspire", "result", "result_latex", "approx", "approx_latex", "warnings"},
         {"action", "nspire", "result", "result_latex"})
     plot = ts["nspire_plot"].outputSchema
-    assert props(plot) == ({"kind", "var", "range", "samples", "summary", "curves", "warnings"},
+    assert props(plot) == ({"kind", "var", "range", "samples", "summary", "curves", "marks", "warnings"},
                            {"kind", "var", "range", "samples", "summary", "curves"})
     assert props(plot, "PlotCurve") == ({"label", "nspire", "points", "total", "x_range", "y_range"},) * 2
+    assert props(plot, "PlotMark") == ({"type", "functions", "x", "y", "x_approx", "y_approx", "method"},) * 2
 
 
 def test_latex_result_declares_every_key():
@@ -782,7 +783,7 @@ def test_plot_schema():
     schema = tools()["nspire_plot"].inputSchema
     props = schema["properties"]
     assert set(props) == {"exprs", "latex", "var", "x_min", "x_max", "y_min", "y_max", "samples", "timeout_s",
-                          "kind", "t_min", "t_max"}
+                          "kind", "t_min", "t_max", "annotate"}
     # defaults depend on the kind (function: x, -10..10, 200 samples), so they are None here
     assert props["var"]["default"] is None and props["samples"]["default"] is None
     assert props["x_min"]["default"] is None and props["kind"]["default"] == "function"
@@ -905,6 +906,80 @@ def test_plot_warns_about_degree_mode(monkeypatch):
                      {"getVarInfo()": NOTHING, "getMode(2)": DEGREE})
     text = text_of(plot(monkeypatch, fake, exprs=["sin(x)"], x_min=0, x_max=360, samples=37))
     assert "angle mode is Degree" in text
+
+
+def test_plot_annotation_names_match():
+    import nspire_plot as pl
+    assert list(get_args(server.PlotAnnotation)) == list(pl.ANNOTATIONS)
+    items = tools()["nspire_plot"].inputSchema["properties"]["annotate"]["anyOf"][0]["items"]
+    assert items["enum"] == list(pl.ANNOTATIONS)
+
+
+_CUBIC_ANNOT = {
+    "zeros((x^3-3*x),x)|x>=-3.0 and x<=3.0": (True, "{−√(3),0,√(3)}"),
+    "zeros(derivative((x^3-3*x),x),x)|x>=-3.0 and x<=3.0": (True, "{−1,1}"),
+    "{(x^3-3*x),approx(x),approx((x^3-3*x))}|x=(−√(3))": (True, "{0,−1.7320508075689,0.}"),
+    "{(x^3-3*x),approx(x),approx((x^3-3*x))}|x=(0)": (True, "{0,0.,0.}"),
+    "{(x^3-3*x),approx(x),approx((x^3-3*x))}|x=(√(3))": (True, "{0,1.7320508075689,0.}"),
+    "{(x^3-3*x),approx(x),approx((x^3-3*x)),approx(derivative((x^3-3*x),x,2))}|x=(−1)": (True, "{2,−1.,2.,−6.}"),
+    "{(x^3-3*x),approx(x),approx((x^3-3*x)),approx(derivative((x^3-3*x),x,2))}|x=(1)": (True, "{−2,1.,−2.,6.}"),
+    "approx(derivative((x^3-3*x),x)|x=(−1)-0.025)": (True, "0.3"),
+    "approx(derivative((x^3-3*x),x)|x=(−1)+0.025)": (True, "−0.3"),
+    "approx(derivative((x^3-3*x),x)|x=(1)-0.025)": (True, "−0.3"),
+    "approx(derivative((x^3-3*x),x)|x=(1)+0.025)": (True, "0.3"),
+}
+
+
+def test_plot_annotate_zeros_and_extrema(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"x^3-3*x": lambda x: x ** 3 - 3 * x},
+                     {"getVarInfo()": NOTHING, "getMode(2)": RADIAN, **_CUBIC_ANNOT})
+    res = plot(monkeypatch, fake, exprs=["x^3-3*x"], x_min=-3, x_max=3, samples=61,
+               annotate=["zeros", "extrema"])
+    assert fake.sessions == 1
+    # warnings check, sampling, then zeros() for both, then every point's values in one batch
+    assert len(fake.batches) == 4 and len(fake.batches[2]) == 2 and len(fake.batches[3]) == 9
+    text = text_of(res)
+    assert "- zeros of 1: x = −√(3) ≈ −1.73205; x = 0; x = √(3) ≈ 1.73205" in text
+    assert "- maximum of 1: (−1, 2)" in text and "- minimum of 1: (1, −2)" in text
+    assert "Warnings" not in text
+    marks = res.structuredContent["marks"]
+    assert [m["type"] for m in marks] == ["zero", "zero", "zero", "max", "min"]
+    assert marks[0] == {"type": "zero", "functions": [1], "x": "−√(3)", "y": "0",
+                        "x_approx": pytest.approx(-1.7320508075689), "y_approx": 0.0, "method": "exact"}
+    assert base64.b64decode(res.content[1].data).startswith(b"\x89PNG")
+
+
+def test_plot_without_annotate_has_no_marks(monkeypatch):
+    pytest.importorskip("matplotlib")
+    res = plot(monkeypatch, SeqBridge({"x": lambda x: x}), exprs=["x"], samples=20)
+    assert res.structuredContent["marks"] is None
+
+
+def test_plot_annotate_errors_are_explained_and_the_plot_kept(monkeypatch):
+    pytest.importorskip("matplotlib")
+    fake = SeqBridge({"x^2+1": lambda x: x * x + 1},
+                     {"zeros((x^2+1),x)|x>=-2.0 and x<=2.0": (False, "error 800 (Non-real result)")})
+    res = plot(monkeypatch, fake, exprs=["x^2+1"], x_min=-2, x_max=2, samples=20, annotate=["zeros"])
+    text = text_of(res)
+    assert "zeros of 1 (x^2+1): error 800 (Non-real result); none marked." in text
+    assert "800" in " ".join(res.structuredContent["warnings"]) and res.structuredContent["marks"] == []
+    assert res.content[1].type == "image"
+
+    class Broken(SeqBridge):
+        def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+            if exprs[0].startswith("zeros("):
+                raise RuntimeError("bridge fell over")
+            return super().eval_batch(exprs, timeout_s, raw)
+    res = plot(monkeypatch, Broken({"x": lambda x: x}), exprs=["x"], samples=20, annotate=["zeros"])
+    assert "couldn't be found (bridge fell over)" in text_of(res)
+
+
+def test_plot_annotate_refused_for_curves_before_the_bridge(monkeypatch):
+    fake = SeqBridge({})
+    with pytest.raises(ValueError, match="function plots"):
+        plot(monkeypatch, fake, kind="polar", exprs=["1+cos(θ)"], annotate=["zeros"])
+    assert fake.calls == [] and fake.sessions == 0
 
 
 def test_plot_latex_input(monkeypatch):

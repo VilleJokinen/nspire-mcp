@@ -78,7 +78,7 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | Several expressions in order, e.g. Define then use. With the current bridge document the whole list is one request: much faster than many single calls. |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | The user's problem is LaTeX. Returns `{action, nspire, result, result_latex, approx?, warnings?}`. Pass any `warnings` on to the user. |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as)` | The user wants the worked solution written into TI-Nspire itself. |
-| `nspire_plot(exprs, latex, var, x_min, x_max, y_min, y_max, samples, kind="function", t_min, t_max)` | The user wants to see a graph: functions, or `kind="parametric"`, `"polar"` or `"implicit"` curves. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. |
+| `nspire_plot(exprs, latex, var, x_min, x_max, y_min, y_max, samples, kind="function", t_min, t_max, annotate)` | The user wants to see a graph: functions, or `kind="parametric"`, `"polar"` or `"implicit"` curves. Returns a PNG plus a summary; describe the graph from the summary and pass on its warnings. `annotate=["zeros", "extrema", "intersections"]` marks those points, found by the CAS. |
 | `nspire_stats(command, csv, columns, x_column, y_column, freq_column, plot)` | The user has data: summary statistics (`OneVar`, `TwoVar`) or a regression fit (`LinRegMx`, `QuadReg`, `ExpReg`, ...). Returns `stat.results`, the fitted `equation`, `r2`/`r`, and with `plot=True` an image of the data and the fit. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
@@ -196,6 +196,18 @@ Curves take `kind`:
   up to 120). The curve is drawn where the CAS's values of lhs−rhs change sign, so a curve that
   only touches zero, like `(x-y)^2=0`, isn't found: write it as `x-y=0`.
 Up to 4 curves per call. For parametric and polar, `x_min`..`y_max` only set the view.
+
+`annotate` (function plots only) takes any of `"zeros"`, `"extrema"`, `"intersections"`. The CAS
+finds them inside `x_min`..`x_max`: zeros with `zeros(f,x)`, extrema as zeros of `derivative(f,x)`
+(maximum, minimum, or "stationary" when the slope doesn't change sign, as for x^3 at 0) and
+intersections as zeros of f−g for every pair. They are marked on the image (○ zero, ▲ maximum,
+▼ minimum, ◇ stationary, ✕ intersection) and listed in the summary and in `marks`, each with the
+CAS's own form (`x: "−√(3)"`) and decimals (`x_approx`). Quote those, not values read off the
+picture. `method: "numeric"` means `zeros` couldn't answer and `nSolve` found the point between
+two samples where the values change sign, so a zero where the graph only touches the axis can be
+missed. Corners (abs(x) at 0) and the window's ends are not reported as extrema. At most 12 per
+function (or pair) and kind, 40 in all; a search that fails or times out is a warning and the
+plot is still returned. For curves, find points with `nspire_eval` (`solve`) instead.
 
 ### `nspire_stats`
 

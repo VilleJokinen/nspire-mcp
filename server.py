@@ -78,6 +78,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary. kind="parametric" (["cos(t), sin(t)"]), "polar" (["1+cos(θ)"], always in radians)
   and "implicit" (["x^2+y^2=25"], drawn where the CAS's grid values change sign) plot curves.
+  annotate=["zeros", "extrema", "intersections"] (function plots) has the CAS find those points in
+  the window, marks them and returns them exact and as decimals in marks; quote those, not the image.
 - nspire_stats runs TI-Nspire's statistics on data (CSV text or columns): OneVar, TwoVar and the
   regressions (LinRegMx, QuadReg, ExpReg, ...), returning stat.results, the fitted equation and
   r²/r, and with plot=True the data with the fitted curve. The data lists are put back afterwards;
@@ -321,7 +323,18 @@ class _PlotResult(TypedDict):
     curves: list[PlotCurve]
 
 
+class PlotMark(TypedDict):
+    type: str              # zero, max, min, stationary, intersection
+    functions: list[int]   # 1-based: which functions (two for an intersection)
+    x: str                 # as the CAS gave it: exact (−√(2)) or a decimal when found numerically
+    y: str
+    x_approx: float
+    y_approx: float
+    method: str            # exact (zeros) or numeric (nSolve)
+
+
 class PlotResult(_PlotResult, total=False):
+    marks: list[PlotMark] | None
     warnings: list[str] | None
 
 
@@ -881,6 +894,8 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
 
 
 PlotKind = Literal["function", "parametric", "polar", "implicit"]
+# nspire_plot.ANNOTATIONS (tests/test_server.py checks that they match)
+PlotAnnotation = Literal["zeros", "extrema", "intersections"]
 
 
 @mcp.tool(annotations=_hints("Plot functions with the TI-Nspire CAS", destructiveHint=False, idempotentHint=True))
@@ -888,7 +903,8 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
                       x_min: float | None = None, x_max: float | None = None, y_min: float | None = None,
                       y_max: float | None = None, samples: int | None = None, timeout_s: float = 20,
                       kind: PlotKind = "function", t_min: float | None = None,
-                      t_max: float | None = None) -> Annotated[CallToolResult, PlotResult]:
+                      t_max: float | None = None,
+                      annotate: list[PlotAnnotation] | None = None) -> Annotated[CallToolResult, PlotResult]:
     """Graph functions or curves: returns a PNG image and a short text summary.
 
     kind "function" (default): y = f(x). exprs in TI-Nspire syntax, e.g. ["sin(x)", "x^2-2",
@@ -917,8 +933,22 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
     without a value are an error. Nothing is kept in the document: polar and implicit plots
     define temporary functions (mcpplot...) and delete them again. Define functions with
     nspire_eval first. timeout_s: per request (one request holds every curve's points, or a
-    piece of them). Structured result: {kind, var, range, samples, summary, curves: [{label,
-    nspire, points, total, x_range, y_range}], warnings}.
+    piece of them).
+
+    annotate (kind "function" only): any of "zeros", "extrema", "intersections". The CAS finds
+    them in the plotted x range: zeros(f,x)|x>=x_min and x<=x_max (exact when it can, e.g. −√(2),
+    π/4), extrema as zeros of derivative(f,x) classified by the sign of the second derivative
+    there (or of the first derivative on either side when that is 0: "stationary" if it doesn't
+    change sign), intersections as zeros of f−g for each pair. Where zeros() can't answer, nSolve
+    looks between neighbouring samples whose values change sign ("found numerically"). Only
+    points where f has a derivative: a corner such as abs(x) at 0, or the end of the range, isn't
+    an extremum here. Marked on the image (○ zero, ▲ max, ▼ min, ◇ stationary, ✕ intersection,
+    with rounded coordinates) and listed in the summary; at most 12 per function (or pair) and
+    kind, 40 in all. A failed or timed-out search is a warning; the plot is still returned.
+
+    Structured result: {kind, var, range, samples, summary, curves: [{label, nspire, points,
+    total, x_range, y_range}], marks: [{type, functions (1-based), x, y (as the CAS gave them),
+    x_approx, y_approx, method ("exact" or "numeric")}], warnings}.
     """
     pl = await asyncio.to_thread(importlib.import_module, "nspire_plot")
     items: list[tuple[str, str]] = []
@@ -945,6 +975,7 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
                 items.append((src, await tr(src, src)))
     # bad arguments fail before the bridge
     spec = pl.prepare_kind(kind, items, var, t_min, t_max, samples, x_min, x_max, y_min, y_max)
+    which = pl.prepare_annotations(spec, annotate)
     notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")
     if spec.kind == "function":
         watched = ",".join(f.command for f in spec.funcs)
@@ -955,19 +986,29 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
     def work():
         warnings = doc_warnings(bridge, watched, timeout_s, notes_mod, angle_override=spec.kind == "polar",
                                 ignore=bound)
-        return pl.sample(bridge, spec, timeout_s), warnings
+        got = pl.sample(bridge, spec, timeout_s)
+        ann = None
+        if which:
+            try:
+                ann = pl.annotate(bridge, spec, got, which, timeout_s)
+            except Exception as e:  # the plot is still worth returning
+                log.info("annotations failed: %s", e)
+                ann = pl.Annotations(warnings=[f"The points to mark couldn't be found ({e})."])
+        return got, ann, warnings
     log.info("plot %s: %d channel(s), %d samples", spec.kind, len(spec.funcs), spec.grid.n)
     try:
-        got, warnings = await asyncio.to_thread(bridge.session, work)
+        got, ann, warnings = await asyncio.to_thread(bridge.session, work)
     except ValueError as e:
         raise ValueError(with_explanation(str(e))) from None
     warnings += explain_all(k for errs in got.errors for k in errs)
-    text = pl.summary(spec, got, warnings)
+    if ann is not None:
+        warnings += explain_all(ann.errors)
+    text = pl.summary(spec, got, warnings, ann)
     if not any(v is not None for ys in got.ys for v in ys):
         raise ValueError(text)
     # drawn after the session, with the user's clipboard already restored
-    png = await asyncio.to_thread(pl.render_png, spec, got)
-    all_warnings = got.warnings + warnings
+    png = await asyncio.to_thread(pl.render_png, spec, got, marks=ann.marks if ann else None)
+    all_warnings = got.warnings + (ann.warnings if ann else []) + warnings
     out: PlotResult = {
         "kind": spec.kind,
         "var": "x,y" if spec.kind == "implicit" else spec.var,
@@ -975,6 +1016,7 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
         "samples": spec.grid.n,
         "summary": text,
         "curves": cast("list[PlotCurve]", pl.curve_info(spec, got)),
+        "marks": cast("list[PlotMark]", [m.as_dict() for m in ann.marks]) if ann is not None else None,
         "warnings": all_warnings or None,
     }
     return CallToolResult(content=[

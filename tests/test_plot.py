@@ -5,6 +5,7 @@ run on every OS. The sampling loop and the tool itself are tested in test_server
 from __future__ import annotations
 
 import math
+import re
 from decimal import Decimal
 
 import pytest
@@ -391,3 +392,268 @@ def test_implicit_summary_and_render():
     assert info[2]["x_range"] is None and info[0]["total"] == 900
     pytest.importorskip("matplotlib")
     assert pl.render_png(s, got).startswith(b"\x89PNG")
+
+
+# ------------------------------------------------------------ annotations
+
+_ZEROS_RE = re.compile(r"^zeros\((.*),x\)\|x>=(\S+) and x<=(\S+)$")
+_NSOLVE_RE = re.compile(r"^nSolve\((.*)=0,x,([^,]+),([^,]+)\)$")
+_POINT_RE = re.compile(r"^\{(\(.*?\)),approx\(x\),approx\(\1\)(,approx\(derivative\(\1,x,2\)\))?\}\|x=\((.*)\)$")
+_SLOPE_RE = re.compile(r"^approx\(derivative\((\(.*\)),x\)\|x=\((.*)\)([+-])(.+)\)$")
+
+
+def _cas(v: float) -> str:
+    v = 0.0 if abs(v) < 1e-12 else v  # the CAS's exact 0 where floats leave noise
+    return f"{v + 0.0:.14g}".replace("e", NS_EXP).replace("-", "−")
+
+
+class AnnotBridge:
+    """Answers annotate()'s requests like the CAS would. zeros: {expr: reply text, or
+    (False, error)}; funcs: {"(f)": (f, f', f'')} as Python functions; exact: {"−√(2)": value}
+    for the exact forms the zeros replies use. nSolve bisects f, f' or f−g in its bracket.
+    From batch dead_at + 1 on, every batch times out."""
+
+    def __init__(self, zeros: dict, funcs: dict, exact: dict | None = None, dead_at: int | None = None):
+        self.zeros, self.funcs, self.exact = zeros, funcs, exact or {}
+        self.batches: list[list[str]] = []
+        self.last_timeout: str | None = None
+        self.dead_at = dead_at
+
+    def _x(self, s: str) -> float:
+        if s in self.exact:
+            return self.exact[s]
+        return float(s.replace("−", "-").replace(NS_EXP, "e"))
+
+    def _target(self, expr: str):
+        if expr in self.funcs:
+            return self.funcs[expr][0]
+        m = re.fullmatch(r"derivative\((\(.*\)),x\)", expr)
+        if m:
+            return self.funcs[m.group(1)][1]
+        a, b = expr.split(")-(")
+        f, g = self.funcs[a + ")"][0], self.funcs["(" + b][0]
+        return lambda x: f(x) - g(x)
+
+    def _one(self, e: str) -> dict:
+        m = _ZEROS_RE.match(e)
+        if m:
+            r = self.zeros.get(m.group(1), (False, "error 910 (syntax error)"))
+            if isinstance(r, str):
+                return {"expr": e, "ok": True, "result": r}
+            return {"expr": e, "ok": False, "error": r[1]}
+        m = _NSOLVE_RE.match(e)
+        if m:
+            f, lo, hi = self._target(m.group(1)), float(m.group(2)), float(m.group(3))
+            if f(lo) * f(hi) > 0:
+                return {"expr": e, "ok": True, "result": '"No solution found"'}
+            for _ in range(80):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if f(lo) * f(mid) > 0 else (lo, mid)
+            return {"expr": e, "ok": True, "result": _cas((lo + hi) / 2)}
+        m = _POINT_RE.match(e)
+        if m:
+            f, _, f2 = self.funcs[m.group(1)]
+            x = self._x(m.group(3))
+            y = f(x)
+            if y is None:
+                return {"expr": e, "ok": True, "result": "{undef,undef,undef}"}
+            items = [_cas(y), _cas(x), _cas(y)] + ([_cas(f2(x))] if m.group(2) else [])
+            return {"expr": e, "ok": True, "result": "{" + ",".join(items) + "}"}
+        m = _SLOPE_RE.match(e)
+        if m:
+            x = self._x(m.group(2)) + (1 if m.group(3) == "+" else -1) * float(m.group(4))
+            return {"expr": e, "ok": True, "result": _cas(self.funcs[m.group(1)][1](x))}
+        return {"expr": e, "ok": False, "error": "error 910 (syntax error)"}
+
+    def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+        self.batches.append(list(exprs))
+        if self.dead_at is not None and len(self.batches) > self.dead_at:
+            self.last_timeout = dead = "No reply from the TI-Nspire bridge within 5 s."
+            return [{"expr": e, "ok": False, "error": dead if k == 0 else "skipped: " + dead}
+                    for k, e in enumerate(exprs)]
+        return [self._one(e) for e in exprs]
+
+
+def _sampled(s: pl.PlotSpec, *fs) -> pl.Sampled:
+    from collections import Counter
+    return pl.Sampled([_ys(f, s) for f in fs], [Counter() for _ in fs], 1)
+
+
+CUBIC = ("(x^3-3*x)", (lambda x: x ** 3 - 3 * x, lambda x: 3 * x * x - 3, lambda x: 6 * x))
+LINE = ("(x)", (lambda x: x, lambda x: 1.0, lambda x: 0.0))
+
+
+def test_prepare_annotations():
+    s = spec("x^2", "x")
+    assert pl.prepare_annotations(s, None) == [] and pl.prepare_annotations(s, []) == []
+    assert pl.prepare_annotations(s, ["zeros", "extrema", "zeros"]) == ["zeros", "extrema"]
+    assert pl.prepare_annotations(s, "intersections") == ["intersections"]
+    with pytest.raises(ValueError, match="isn't one of zeros, extrema, intersections"):
+        pl.prepare_annotations(s, ["roots"])
+    one = spec("x^2")
+    assert pl.prepare_annotations(one, ["zeros", "intersections"]) == ["zeros"]
+    assert "Intersections need two or more functions" in one.notes[0]
+    curve = pl.prepare_kind("parametric", [("c", "cos(t), sin(t)")])
+    with pytest.raises(ValueError, match="function plots"):
+        pl.prepare_annotations(curve, ["zeros"])
+    assert pl.prepare_annotations(curve, None) == []
+
+
+def test_annotation_commands():
+    s = spec("x^3-3*x", "x", x_min=-2.5, x_max=3)
+    tasks = pl.annotation_tasks(s, ["zeros", "extrema", "intersections"])
+    assert [(t.kind, t.funcs) for t in tasks] == [("zeros", (0,)), ("extrema", (0,)), ("zeros", (1,)),
+                                                  ("extrema", (1,)), ("intersections", (0, 1))]
+    assert pl.exact_command(s, tasks[0]) == "zeros((x^3-3*x),x)|x>=-2.5 and x<=3.0"
+    # derivative(), not d(): the bridge leaves d() unevaluated
+    assert pl.exact_command(s, tasks[1]) == "zeros(derivative((x^3-3*x),x),x)|x>=-2.5 and x<=3.0"
+    assert pl.exact_command(s, tasks[4]) == "zeros((x^3-3*x)-(x),x)|x>=-2.5 and x<=3.0"
+    assert pl.numeric_command(s, tasks[0], 1.5, 1.75) == "nSolve((x^3-3*x)=0,x,1.5,1.75)"
+    assert pl.point_command(s, tasks[0], "−√(3)") == "{(x^3-3*x),approx(x),approx((x^3-3*x))}|x=(−√(3))"
+    assert pl.point_command(s, tasks[1], "1") == \
+        "{(x^3-3*x),approx(x),approx((x^3-3*x)),approx(derivative((x^3-3*x),x,2))}|x=(1)"
+    assert pl.slope_command(s, tasks[1], "0", -0.25) == "approx(derivative((x^3-3*x),x)|x=(0)-0.25)"
+    st = pl.prepare([pl.Func("t^2", "t^2")], "t", -1, 1, 20)
+    assert pl.exact_command(st, pl.annotation_tasks(st, ["zeros"])[0]) == "zeros((t^2),t)|t>=-1.0 and t<=1.0"
+
+
+def test_exact_points():
+    def ok(text):
+        return {"ok": True, "result": text}
+    assert pl.exact_points(ok("{−√(2),√(2)}")) == ["−√(2)", "√(2)"]
+    assert pl.exact_points(ok("{}")) == []
+    assert pl.exact_points(ok("{0.73908513321517}")) == ["0.73908513321517"]
+    assert pl.exact_points(ok("{−11*π/4,π/4}")) == ["−11*π/4", "π/4"]
+    assert pl.exact_points(ok("{n6*π}")) is None           # every multiple: not points
+    assert pl.exact_points(ok("x=1 or x=2")) is None
+    assert pl.exact_points(ok("{x>0 and x<1}")) is None
+    assert pl.exact_points({"ok": False, "error": "error 800"}) is None
+
+
+def test_number():
+    assert pl.number("−1.4142135623731") == pytest.approx(-1.4142135623731)
+    assert pl.number(f"3.{NS_EXP}−4") == pytest.approx(3e-4)
+    assert pl.number('"No solution found"') is None and pl.number("undef") is None and pl.number("π") is None
+
+
+def test_brackets():
+    s = spec("x^3-3*x", "1/x", x_min=-3, x_max=3, samples=61)
+    got = _sampled(s, CUBIC[1][0], lambda x: 1 / x)
+    view = pl.plot_view(s, got)
+    t = pl.annotation_tasks(s, ["zeros", "extrema"])
+    zero_br = pl.brackets(s, got, t[0], view)
+    # x = −√3, √3 between samples, and x = 0 on a sample
+    assert len(zero_br) == 3 and any(lo < 0 < hi for lo, hi in zero_br)
+    assert any(lo < -math.sqrt(3) < hi for lo, hi in zero_br)
+    assert [(round(lo, 6), round(hi, 6)) for lo, hi in pl.brackets(s, got, t[1], view)] == [(-1.1, -0.9), (0.9, 1.1)]
+    # 1/x changes sign at 0 through ±∞ (and 0 itself is a gap): no bracket there
+    assert pl.brackets(s, got, t[2], view) == []
+
+
+def test_classify():
+    assert pl._classify(-6.0, []) == "max" and pl._classify(6.0, []) == "min"
+    assert pl._classify(0.0, [-1e-4, 1e-4]) == "min"    # x^4 at 0
+    assert pl._classify(None, [2.0, -2.0]) == "max"
+    assert pl._classify(0.0, [3e-4, 3e-4]) == "stationary"   # x^3 at 0
+    assert pl._classify(0.0, [None, None]) == "stationary"
+
+
+def test_annotate_exact():
+    s = spec("x^3-3*x", "x", x_min=-3, x_max=3, samples=61)
+    got = _sampled(s, CUBIC[1][0], LINE[1][0])
+    b = AnnotBridge({"(x^3-3*x)": "{−√(3),0,√(3)}", "derivative((x^3-3*x),x)": "{−1,1}", "(x)": "{0}",
+                     "derivative((x),x)": "{}", "(x^3-3*x)-(x)": "{−2,0,2}"},
+                    dict([CUBIC, LINE]), {"−√(3)": -math.sqrt(3), "√(3)": math.sqrt(3)})
+    ann = pl.annotate(b, s, got, ["zeros", "extrema", "intersections"], 5)
+    assert ann.requests == 2 and len(b.batches) == 2    # no nSolve round
+    assert len(b.batches[0]) == 5
+    by = [(m.type, m.funcs, m.x, m.y) for m in ann.marks]
+    assert by == [("zero", [0], "−√(3)", "0"), ("zero", [0], "0", "0"), ("zero", [0], "√(3)", "0"),
+                  ("zero", [1], "0", "0"), ("max", [0], "−1", "2"), ("min", [0], "1", "−2"),
+                  ("intersection", [0, 1], "−2", "−2"), ("intersection", [0, 1], "0", "0"),
+                  ("intersection", [0, 1], "2", "2")]
+    assert ann.marks[0].x_approx == pytest.approx(-1.7320508) and ann.marks[0].method == "exact"
+    assert ann.warnings == [] and ann.notes == []
+    d = ann.marks[4].as_dict()
+    assert d == {"type": "max", "functions": [1], "x": "−1", "y": "2", "x_approx": -1.0, "y_approx": 2.0,
+                 "method": "exact"}
+    text = pl.summary(s, got, None, ann)
+    assert "Marked points (every coordinate computed by the TI-Nspire CAS):" in text
+    assert "- zeros of 1: x = −√(3) ≈ −1.73205; x = 0; x = √(3) ≈ 1.73205" in text
+    assert "- maximum of 1: (−1, 2)" in text and "- minimum of 1: (1, −2)" in text
+    assert "- intersections of 1 and 2: (−2, −2); (0, 0); (2, 2)" in text
+
+
+def test_annotate_stationary_and_flat_minimum():
+    s = spec("x^3", "x^4", x_min=-1, x_max=1, samples=21)
+    cube = ("(x^3)", (lambda x: x ** 3, lambda x: 3 * x * x, lambda x: 6 * x))
+    quart = ("(x^4)", (lambda x: x ** 4, lambda x: 4 * x ** 3, lambda x: 12 * x * x))
+    got = _sampled(s, cube[1][0], quart[1][0])
+    b = AnnotBridge({"derivative((x^3),x)": "{0}", "derivative((x^4),x)": "{0}"}, dict([cube, quart]))
+    ann = pl.annotate(b, s, got, ["extrema"], 5)
+    assert [(m.type, m.funcs) for m in ann.marks] == [("min", [1]), ("stationary", [0])]
+    assert len(b.batches[1]) == 6  # each point with its two slopes
+    assert "- stationary point (not an extremum) of 1: (0, 0)" in pl.summary(s, got, None, ann)
+
+
+def test_annotate_falls_back_to_nsolve():
+    # say zeros() failed for cos(x)=x/5, and the extrema list came back empty although the samples turn
+    cosx = ("(cos(x)-x/5)", (lambda x: math.cos(x) - x / 5, lambda x: -math.sin(x) - 0.2, lambda x: -math.cos(x)))
+    s = spec("cos(x)-x/5", x_min=-10, x_max=10, samples=200)
+    got = _sampled(s, cosx[1][0])
+    b = AnnotBridge({"(cos(x)-x/5)": (False, "error 1010 (Questionable accuracy)"),
+                     "derivative((cos(x)-x/5),x)": "{}"}, dict([cosx]))
+    ann = pl.annotate(b, s, got, ["zeros", "extrema"], 5)
+    assert len(b.batches) == 3 and all(e.startswith("nSolve(") for e in b.batches[1])
+    zeros = [m for m in ann.marks if m.type == "zero"]
+    assert [round(m.x_approx, 5) for m in zeros] == [-3.83747, -1.97738, 1.30644]
+    assert all(m.method == "numeric" for m in ann.marks)
+    assert {m.type for m in ann.marks} == {"zero", "max", "min"}
+    assert ann.errors == ["error 1010 (Questionable accuracy)"]
+    assert any("looked for them numerically" in n for n in ann.notes)
+    assert "- zeros of 1 (found numerically): x = −3.83747; x = −1.97738; x = 1.30644" in \
+        pl.summary(s, got, None, ann)
+
+
+def test_annotate_unusable_reply_without_sign_changes_is_a_warning():
+    s = spec("x^2+1", x_min=-2, x_max=2, samples=20)
+    sq = ("(x^2+1)", (lambda x: x * x + 1, lambda x: 2 * x, lambda x: 2.0))
+    got = _sampled(s, sq[1][0])
+    ann = pl.annotate(AnnotBridge({"(x^2+1)": "{n1*π}"}, dict([sq])), s, got, ["zeros"], 5)
+    assert ann.marks == [] and "zeros() gave {n1*π}; none marked" in ann.warnings[0]
+
+
+def test_annotate_timeout_is_a_warning():
+    s = spec("x^3-3*x", x_min=-3, x_max=3, samples=61)
+    got = _sampled(s, CUBIC[1][0])
+    b = AnnotBridge({"(x^3-3*x)": "{0}"}, dict([CUBIC]), dead_at=1)  # the points' batch times out
+    ann = pl.annotate(b, s, got, ["zeros"], 5)
+    assert ann.marks == [] and "didn't finish the annotations (values at the points)" in ann.warnings[0]
+
+
+def test_annotate_caps_points():
+    s = spec("sin(x)", x_min=-100, x_max=100, samples=1000)
+    sinx = ("(sin(x))", (math.sin, math.cos, lambda x: -math.sin(x)))
+    got = _sampled(s, sinx[1][0])
+    reply = "{" + ",".join(f"{k}*π" for k in range(-31, 32)) + "}"
+    b = AnnotBridge({"(sin(x))": reply}, dict([sinx]), {f"{k}*π": k * math.pi for k in range(-31, 32)})
+    ann = pl.annotate(b, s, got, ["zeros"], 5)
+    assert len(ann.marks) == pl.MAX_PER_SET
+    assert "the CAS found 63; the first 12 are marked" in ann.notes[0]
+
+
+def test_render_png_with_marks():
+    pytest.importorskip("matplotlib")
+    s = spec("x^3-3*x", "x", x_min=-3, x_max=3, samples=61)
+    got = _sampled(s, CUBIC[1][0], LINE[1][0])
+    marks = [pl.Mark("zero", [0], "0", "0", 0.0, 0.0, "exact"), pl.Mark("max", [0], "−1", "2", -1.0, 2.0, "exact"),
+             pl.Mark("min", [0], "1", "−2", 1.0, -2.0, "exact"),
+             pl.Mark("stationary", [1], "0", "0", 0.0, 0.0, "exact"),
+             pl.Mark("intersection", [0, 1], "2", "2", 2.0, 2.0, "exact"),
+             pl.Mark("zero", [0], "50", "0", 50.0, 0.0, "exact")]   # outside the view: not drawn
+    assert [m.x for m in pl.visible_marks(marks, pl.plot_view(s, got))] == ["0", "−1", "1", "0", "2"]
+    plain = pl.render_png(s, got)
+    marked = pl.render_png(s, got, marks=marks)
+    assert marked.startswith(b"\x89PNG") and marked != plain
+    many = [pl.Mark("zero", [0], str(i), "0", -3 + i * 0.1, 0.0, "exact") for i in range(30)]
+    assert pl.render_png(s, got, marks=many).startswith(b"\x89PNG")  # too many for labels

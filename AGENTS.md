@@ -184,7 +184,20 @@ hotkey.
   are real), `curve_breaks()` applies `breaks()` to both, `pole_points()` drops grid points around a
   sign change that jumps against the neighbouring steps (F through ±∞, not 0) and `crossing_cells()`
   finds where the contour runs; `render_png()` draws implicit curves with matplotlib `contour` at 0.
-  `plot_view()` is the one window shared by `summary()` and `render_png()` (add markers there).
+  `plot_view()` is the one window shared by `summary()` and `render_png()`.
+  `annotate=[...]` (kind "function" only; `prepare_annotations()` refuses others offline) finds marked points
+  in `annotate()`, inside the same `bridge.session()` after `sample()` but in its own batches, so a slow
+  `zeros()` can't cost the plot: (1) one `zeros(expr,x)|x>=a and x<=b` per `AnnotationTask` (expr `(f)`,
+  `derivative((f),x)` or `(f)-(g)`; use `derivative()`, the bridge leaves `d()` unevaluated, and a `|x>=a`
+  constraint on `d()` gives `{}`), (2) where that reply isn't a list of points (`exact_points()`: an error,
+  `{n1*π}`, a condition) or is `{}` although the samples change sign, `nSolve(expr=0,x,lo,hi)` in each
+  `brackets()` interval (Python only picks intervals from the CAS's samples, skipping `breaks()`), (3) one
+  `{(f),approx(x),approx((f))[,approx(derivative((f),x,2))]}|x=(point)` per point, plus for extrema
+  `approx(derivative((f),x)|x=(point)±step/4)`; `_classify()` reads the signs (f''=0: the slopes decide,
+  no sign change is "stationary"). Caps `MAX_PER_SET`, `MAX_MARKS`; more than `MAX_LABELS` marks are drawn
+  without labels. A timeout or error is a warning (`Annotations.warnings`, `errors` for `explain_all`),
+  never a failed plot. `marks_summary()` writes the summary lines and `_draw_marks()` the markers.
+  Checked on the real CAS by `selftest.py` (`ANNOTATE_CASES`).
   Checked on the real CAS by `selftest.py` (Func + setMode + Local θ, Define f(x,y), DelVar), with the
   document in Radian mode only.
 - `nspire_data.py`: data for TI-Nspire, standard library only: `parse_table(csv_text, columns, headers, header)`
