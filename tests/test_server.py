@@ -81,11 +81,12 @@ def tools() -> dict:
 def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
-                       "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps", "nspire_stats"}
+                       "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps", "nspire_stats",
+                       "nspire_to_latex"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
-    for name in ("nspire_status", "nspire_vars", "nspire_check_steps"):
+    for name in ("nspire_status", "nspire_vars", "nspire_check_steps", "nspire_to_latex"):
         assert ts[name].annotations.readOnlyHint is True and ts[name].annotations.idempotentHint is True
     assert ts["nspire_clear"].annotations.destructiveHint is True
     for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
@@ -118,7 +119,8 @@ def test_notes_schema():
 def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
-                   "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats"):
+                   "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats",
+                   "nspire_to_latex"):
         assert needle in text
 
 
@@ -127,6 +129,16 @@ def test_bad_action_rejected_before_the_bridge(monkeypatch):
     monkeypatch.setattr(server, "bridge", fake)
     with pytest.raises(Exception, match="action"):
         run(server.mcp.call_tool("nspire_latex", {"latex": "x^2=4", "action": "bogus"}))
+    assert fake.calls == []
+
+
+def test_to_latex_tool_never_uses_the_bridge(monkeypatch):
+    fake = FakeBridge({})
+    monkeypatch.setattr(server, "bridge", fake)
+    _, structured = run(server.mcp.call_tool("nspire_to_latex", {"text": "√(2)/2"}))
+    assert structured == {"latex": r"\frac{\sqrt{2}}{2}"}
+    with pytest.raises(Exception, match="convert"):
+        run(server.mcp.call_tool("nspire_to_latex", {"text": "x∫y"}))
     assert fake.calls == []
 
 

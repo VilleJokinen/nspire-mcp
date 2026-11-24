@@ -11,12 +11,14 @@
 Ctrl+Alt+Shift+L   solve/evaluate the LaTeX on the clipboard (action "auto")
 Ctrl+Alt+Shift+K   same, but the decimal value becomes the answer
 Ctrl+Alt+Shift+J   pick an action (factor, expand, solve, integrate, ...) for it
+Ctrl+Alt+Shift+T   the other way: TI-Nspire text on the clipboard becomes LaTeX
 Ctrl+Alt+Shift+Q   quit
 
 The answer replaces the clipboard (as LaTeX, see --copy) and shows in a popup
 in the bottom-right corner, drawn as math when matplotlib can draw it; click
 the popup to close it. The tray icon's menu lists the last answers: click one
-to copy it again. Needs TI-Nspire open on the bridge page, like the MCP server.
+to copy it again. Needs TI-Nspire open on the bridge page, like the MCP server
+(except Ctrl+Alt+Shift+T, which only converts text and doesn't use TI-Nspire).
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")  # noqa: SIM115
 
-from nspire_latex import ACTIONS, LatexError, format_answer, plan, run_plan  # noqa: E402
+from nspire_latex import ACTIONS, LatexError, format_answer, nspire_to_latex, plan, run_plan  # noqa: E402
 
 # The Windows parts (hotkeys, tray icon, clipboard) load only on Windows, so the
 # rest of this module (history, action list, math rendering) imports anywhere
@@ -66,9 +68,9 @@ MODS = {"alt": 0x1, "ctrl": 0x2, "control": 0x2, "shift": 0x4, "win": 0x8}
 MOD_NOREPEAT = 0x4000
 
 # hotkey ids
-SOLVE, APPROX, PICK, QUIT = 1, 2, 3, 4
+SOLVE, APPROX, PICK, QUIT, TO_LATEX = 1, 2, 3, 4, 5
 # tray menu ids; history entries are MENU_HISTORY + index
-MENU_SOLVE, MENU_PICK, MENU_CLEAR, MENU_QUIT, MENU_HISTORY = 1, 2, 3, 4, 100
+MENU_SOLVE, MENU_PICK, MENU_CLEAR, MENU_QUIT, MENU_TO_LATEX, MENU_HISTORY = 1, 2, 3, 4, 5, 100
 HISTORY_SIZE = 10
 
 
@@ -168,6 +170,8 @@ def tray_menu(history: History, hotkeys: dict[int, str]) -> list[MenuItem]:
     items += [(None, "", False, None),
               (MENU_SOLVE, f"Solve clipboard\t{pretty_hotkey(hotkeys[SOLVE])}", True, None),
               (MENU_PICK, f"Pick an action…\t{pretty_hotkey(hotkeys[PICK])}", True, None)]
+    if TO_LATEX in hotkeys:
+        items.append((MENU_TO_LATEX, f"TI-Nspire text to LaTeX\t{pretty_hotkey(hotkeys[TO_LATEX])}", True, None))
     if answers:
         items.append((MENU_CLEAR, "Clear history", True, None))
     items += [(None, "", False, None),
@@ -890,6 +894,8 @@ class App:
                 return self.quit()
             if ev[1] == PICK:
                 self.open_picker()
+            elif ev[1] == TO_LATEX:
+                self.request_to_latex()
             else:
                 self.request(Job(numeric=ev[1] == APPROX))
         elif kind == "menu":
@@ -900,6 +906,8 @@ class App:
                 self.request(Job())
             elif cmd == MENU_PICK:
                 self.open_picker()
+            elif cmd == MENU_TO_LATEX:
+                self.request_to_latex()
             elif cmd == MENU_CLEAR:
                 self.history.clear()
             elif isinstance(data, Answer):
@@ -917,6 +925,11 @@ class App:
         elif kind == "picker":
             _, latex, defaults = ev
             self.show_picker(latex, defaults)
+        elif kind == "converted":
+            _, text, tex, png = ev
+            self.history.add(Answer(text, "to LaTeX", tex, tex))
+            self.popup.show("TI-Nspire text to LaTeX:  " + short(text, 140), tex, footer="LaTeX copied to clipboard",
+                            seconds=10, image=self._photo(png))
         elif kind == "copied":
             self.popup.show("Copied to the clipboard", short(ev[1], 300), seconds=4)
         return True
@@ -1006,6 +1019,43 @@ class App:
         finally:
             self.busy.clear()
 
+    # -- TI-Nspire text -> LaTeX
+
+    def request_to_latex(self) -> None:
+        if self.busy.is_set():
+            # A copy now would land in the middle of a bridge request.
+            self.show_busy()
+            return
+        self.busy.set()
+        try:
+            threading.Thread(target=self.to_latex, daemon=True).start()
+        except BaseException:
+            self.busy.clear()  # the worker never started, so it can't clear busy itself
+            raise
+
+    def to_latex(self) -> None:
+        """Worker thread: the clipboard's TI-Nspire text -> LaTeX on the clipboard.
+
+        A text conversion only (nspire_to_latex), no bridge. On failure the
+        clipboard is left as it was.
+        """
+        text = ""
+        try:
+            text = (self.clip.get() or "").strip()
+            if not text or self.clip.is_traffic(text):
+                self.events.put(("error", "Clipboard has no text", "Copy a result from TI-Nspire first.", ""))
+                return
+            tex = nspire_to_latex(text)
+            self.clip.set(tex)
+            png = self.renderer.render(tex) if self.renderer is not None else None
+            self.events.put(("converted", text, tex, png))
+        except LatexError as e:
+            self.events.put(("error", "Couldn't convert to LaTeX", str(e), text))
+        except Exception as e:
+            self.events.put(("error", "Hotkey error", f"{type(e).__name__}: {e}", text))
+        finally:
+            self.busy.clear()
+
     # -- tray history
 
     def copy_answer(self, answer: Answer) -> None:
@@ -1089,6 +1139,8 @@ def main():
     ap.add_argument("--approx-hotkey", default="ctrl+alt+shift+k", help="numeric hotkey (default %(default)s)")
     ap.add_argument("--actions-hotkey", default="ctrl+alt+shift+j",
                     help="action picker hotkey (default %(default)s)")
+    ap.add_argument("--latex-hotkey", default="ctrl+alt+shift+t",
+                    help="TI-Nspire text to LaTeX hotkey (default %(default)s)")
     ap.add_argument("--quit-hotkey", default="ctrl+alt+shift+q", help="quit hotkey (default %(default)s)")
     ap.add_argument("--copy", choices=["latex", "text", "none"], default="latex",
                     help="what to put on the clipboard after solving (default %(default)s)")
@@ -1111,7 +1163,8 @@ def main():
     with contextlib.suppress(Exception):
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
-    specs = {SOLVE: args.hotkey, APPROX: args.approx_hotkey, PICK: args.actions_hotkey, QUIT: args.quit_hotkey}
+    specs = {SOLVE: args.hotkey, APPROX: args.approx_hotkey, PICK: args.actions_hotkey, QUIT: args.quit_hotkey,
+             TO_LATEX: args.latex_hotkey}
     bindings = {hid: (*parse_hotkey(spec), spec) for hid, spec in specs.items()}
     events: queue.Queue = queue.Queue()
     hk = HotkeyThread(bindings, events)
@@ -1141,16 +1194,17 @@ def main():
     if hk.failed:
         print("Couldn't register: " + ", ".join(hk.failed), file=sys.stderr)
         popup.show("Hotkey unavailable", "Couldn't register " + ", ".join(hk.failed),
-                   footer="Another program uses it; pick another with --hotkey, --actions-hotkey, ….",
+                   footer="Another program uses it; pick another with --hotkey, --latex-hotkey, ….",
                    error=True, seconds=10)
     else:
         popup.show("TI-Nspire LaTeX hotkey ready", pretty_hotkey(args.hotkey),
                    detail=f"numeric: {pretty_hotkey(args.approx_hotkey)}    "
-                          f"actions: {pretty_hotkey(args.actions_hotkey)}    quit: {pretty_hotkey(args.quit_hotkey)}",
+                          f"actions: {pretty_hotkey(args.actions_hotkey)}    "
+                          f"to LaTeX: {pretty_hotkey(args.latex_hotkey)}    quit: {pretty_hotkey(args.quit_hotkey)}",
                    footer="Copy LaTeX, then press the hotkey."
                           + ("  Recent answers: the tray icon." if tray else ""), seconds=6)
     print(f"Ready. {args.hotkey} solves, {args.approx_hotkey} approximates, {args.actions_hotkey} picks "
-          f"an action, {args.quit_hotkey} quits.", file=sys.stderr)
+          f"an action, {args.latex_hotkey} turns TI-Nspire text into LaTeX, {args.quit_hotkey} quits.", file=sys.stderr)
 
     root.after(50, app.pump)
     with contextlib.suppress(KeyboardInterrupt):

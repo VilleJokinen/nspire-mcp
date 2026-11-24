@@ -57,7 +57,8 @@ hotkey.
    edit code to make the test pass without telling the user.
 6. **Tell the user** to restart Claude Code (the new MCP server loads on restart),
    that `claude mcp list` should show `nspire` connected, and how to use the
-   hotkey: copy LaTeX, press Ctrl+Alt+Shift+L (Ctrl+Alt+Shift+K for decimals).
+   hotkey: copy LaTeX, press Ctrl+Alt+Shift+L (Ctrl+Alt+Shift+K for decimals); copy a
+   result in TI-Nspire and press Ctrl+Alt+Shift+T to get it as LaTeX.
 
 ## Things to know
 
@@ -134,6 +135,14 @@ hotkey.
   on input it can't read to the end, and `_check_commands` rejects any `\command`
   not in `_PARSER_CMDS` (`_FUNCLIKE` ones need parentheses). To support a new
   command, rewrite it in `_Pre` or add it there, with a case in `tests/test_plan.py`.
+  `nspire_to_latex()` is the reverse direction for text a person copies from TI-Nspire
+  (the hotkey's Ctrl+Alt+Shift+T, `App.to_latex`, and the `nspire_to_latex` MCP tool): no
+  bridge, no evaluation. It reuses `result_to_latex()` and only adds spellings around it
+  (`·`/`×`/`÷`, `²`, `⁻¹`, `30°` as the symbol `nsdegree`) and splits at top-level `|`, `→`,
+  `:=` and `►`/`▸`/`@>`, converting each piece on its own. Unreadable text raises
+  `LatexError`; the hotkey then leaves the clipboard alone. Cases in `tests/test_nspire_to_latex.py`.
+  What TI-Nspire's own Ctrl+C puts on the clipboard (formats, `·` or `*`) hasn't been checked on
+  the real app: the cases are the CAS's text through the bridge plus likely display spellings.
 - `server.py`: MCP tools. Keep heavy imports (SymPy) lazy: the client times out a
   server that is slow to answer `initialize` (`tests/test_server.py` checks that
   startup imports neither SymPy, matplotlib nor the Notes and plot modules). It also holds the server

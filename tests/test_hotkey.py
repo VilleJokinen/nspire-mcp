@@ -18,7 +18,7 @@ import hotkey as hk  # noqa: E402
 from nspire_latex import ACTIONS, LatexError, plan  # noqa: E402
 
 SPECS = {hk.SOLVE: "ctrl+alt+shift+l", hk.APPROX: "ctrl+alt+shift+k", hk.PICK: "ctrl+alt+shift+j",
-         hk.QUIT: "ctrl+alt+shift+q"}
+         hk.QUIT: "ctrl+alt+shift+q", hk.TO_LATEX: "ctrl+alt+shift+t"}
 
 
 # ---------------------------------------------------------------- hotkeys
@@ -104,6 +104,7 @@ def test_tray_menu_empty():
     labels = {i[0]: i[1] for i in items}
     assert labels[hk.MENU_SOLVE].endswith("\tCtrl+Alt+Shift+L")
     assert labels[hk.MENU_PICK].endswith("\tCtrl+Alt+Shift+J")
+    assert labels[hk.MENU_TO_LATEX].endswith("\tCtrl+Alt+Shift+T")
     assert labels[hk.MENU_QUIT].endswith("\tCtrl+Alt+Shift+Q")
 
 
@@ -114,7 +115,7 @@ def test_tray_menu_lists_answers_with_their_data():
     items = hk.tray_menu(h, SPECS)
     assert [(i[0], i[3].latex) for i in items[:2]] == [(hk.MENU_HISTORY, "x=2"), (hk.MENU_HISTORY + 1, "x=1")]
     assert hk.MENU_CLEAR in [i[0] for i in items]
-    assert max(hk.MENU_SOLVE, hk.MENU_PICK, hk.MENU_CLEAR, hk.MENU_QUIT) < hk.MENU_HISTORY
+    assert max(hk.MENU_SOLVE, hk.MENU_PICK, hk.MENU_CLEAR, hk.MENU_QUIT, hk.MENU_TO_LATEX) < hk.MENU_HISTORY
     seps = [i for i in items if i[0] is None]
     assert len(seps) == 2
 
@@ -390,6 +391,7 @@ def test_cas_error_is_reported():
 
 
 @pytest.mark.parametrize("ev", [("hotkey", hk.SOLVE), ("hotkey", hk.APPROX), ("hotkey", hk.PICK),
+                                ("hotkey", hk.TO_LATEX), ("menu", hk.MENU_TO_LATEX, None),
                                 ("menu", hk.MENU_SOLVE, None), ("menu", hk.MENU_PICK, None),
                                 ("menu", hk.MENU_HISTORY, answer())])
 def test_busy_shows_still_solving(ev):
@@ -437,6 +439,60 @@ def test_quit_hotkey():
     app, _, _ = make_app()
     assert app.handle(("hotkey", hk.QUIT)) is False
     assert app.root.quitted
+
+
+# ---------------------------------------------------------------- TI-Nspire text -> LaTeX
+
+def run_to_latex(app):
+    app.busy.set()  # as request_to_latex() does
+    app.to_latex()
+    assert not app.busy.is_set()
+    return app.events.get_nowait()
+
+
+def test_to_latex_copies_latex_without_the_bridge():
+    app, clip, bridge = make_app(clip_text="√(2)/2")
+    ev = run_to_latex(app)
+    assert ev == ("converted", "√(2)/2", r"\frac{\sqrt{2}}{2}", None)
+    assert clip.copies == [r"\frac{\sqrt{2}}{2}"]
+    assert bridge.sessions == 0
+    assert app.handle(ev) is True
+    assert app.popup.last.title.startswith("TI-Nspire text to LaTeX:")
+    assert app.popup.last.body == r"\frac{\sqrt{2}}{2}" and not app.popup.last.error
+    assert app.history.items()[0].copy_text("latex") == r"\frac{\sqrt{2}}{2}"
+
+
+def test_to_latex_draws_the_result():
+    class Renderer:
+        def render(self, latex):
+            self.latex = latex
+            return b"png"
+    app, _, _ = make_app(clip_text="x^2")
+    app.renderer = Renderer()
+    assert run_to_latex(app)[3] == b"png"
+    assert app.renderer.latex == "x^{2}"
+
+
+@pytest.mark.parametrize("text, title", [(None, "Clipboard has no text"), ("  ", "Clipboard has no text"),
+                                         ("NSPIRE_OUT:abc", "Clipboard has no text"),
+                                         ("x∫y", "Couldn't convert to LaTeX"),
+                                         ("Define f(x)=x", "Couldn't convert to LaTeX")])
+def test_to_latex_failure_leaves_the_clipboard(text, title):
+    app, clip, _ = make_app(clip_text=text)
+    ev = run_to_latex(app)
+    assert ev[:2] == ("error", title)
+    assert clip.copies == []
+    app.handle(ev)
+    assert app.popup.last.error
+
+
+def test_to_latex_hotkey_and_menu_start_a_conversion():
+    for ev in [("hotkey", hk.TO_LATEX), ("menu", hk.MENU_TO_LATEX, None)]:
+        app, clip, _ = make_app(clip_text="5.*_km►_m")
+        app.handle(ev)
+        got = app.events.get(timeout=30)
+        assert got[0] == "converted"
+        assert clip.copies == [r"5.0 \mathrm{km} \blacktriangleright \mathrm{m}"]
 
 
 def test_prepare_picker():
