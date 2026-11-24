@@ -99,9 +99,15 @@ Call `nspire_status()` once at the start of a math session. It returns
   (`nspire_status` shows it) or ask the user to change it.
 - `nspire_check_steps(lines)` checks a worked solution line by line (LaTeX, or
   `latex=False` for TI-Nspire syntax): equal expressions by
-  `simplify((before)-(after))`, equations by comparing their `solve()` solutions.
-  Each step is ok, broken (with the CAS output) or undecided; check undecided
-  ones another way. It stores nothing.
+  `expand((before)-(after))`, equations by comparing their `solve()` solutions.
+  Expression steps that can't be settled exactly (trig, logs, roots) are evaluated
+  by the CAS at random points: `probably_ok` (agrees everywhere it was tried; not
+  a proof) or `broken` with `spot_check.counterexample` (the point and both
+  values; it may mean the step holds only on a smaller domain, like `√(x^2)=x`
+  for x>0). Each step is ok, probably_ok, broken (with the CAS output) or
+  undecided; check undecided ones another way. It stores nothing. To test
+  whether two expressions are equal, pass them as two lines. TI-Nspire has no
+  `simplify()`: every result is already simplified.
 - The prompt `check_solution(problem, solution)` walks through checking a
   student's worked solution step by step with `nspire_check_steps` and
   `nspire_eval_batch(..., isolated=True)`.

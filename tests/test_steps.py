@@ -27,7 +27,7 @@ def test_raw_expression_chain():
     spec = st.prepare(["(x+1)^2-1", "= x^2+2x+1-1", "=x^2+2x"], latex=False)
     assert [ln.kind for ln in spec.lines] == ["expression"] * 3
     assert spec.var is None
-    assert st.commands(spec) == ["simplify(((x+1)^2-1)-(x^2+2x+1-1))", "simplify((x^2+2x+1-1)-(x^2+2x))"]
+    assert st.commands(spec) == ["expand(((x+1)^2-1)-(x^2+2x+1-1))", "expand((x^2+2x+1-1)-(x^2+2x))"]
 
 
 def test_raw_equations_solved_once_each():
@@ -61,7 +61,7 @@ def test_latex_lines():
 def test_latex_expression_chain_and_align():
     spec = st.prepare([r"(x+1)^2", r"&= x^2+2x+1 \\", r"= \frac{x^3+2x^2+x}{x}"])
     assert [ln.nspire for ln in spec.lines] == ["(x + 1)^2", "x^2 + 2*x + 1", "(x^3 + 2*x^2 + x)/x"]
-    assert st.commands(spec)[0] == "simplify(((x + 1)^2)-(x^2 + 2*x + 1))"
+    assert st.commands(spec)[0] == "expand(((x + 1)^2)-(x^2 + 2*x + 1))"
 
 
 def test_latex_system_keeps_both_variables():
@@ -196,3 +196,146 @@ def test_run_is_one_batch():
     steps = st.run(b, spec, 10)
     assert len(b.batches) == 1 and [s.verdict for s in steps] == ["ok", "ok"]
     assert set(steps[0].as_dict()) == {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason"}
+
+
+# ------------------------------------------------------------ numeric spot check
+
+class Spot(Batch):
+    """Answers the first batch from replies and spot-check commands from fn(before, after, point),
+    which returns the CAS's reply text (or an err() dict)."""
+
+    def __init__(self, replies, fn):
+        super().__init__(replies)
+        self.fn = fn
+        self.last_timeout = None
+
+    def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+        if not exprs[0].startswith("approx("):
+            return super().eval_batch(exprs, timeout_s, raw)
+        self.batches.append(list(exprs))
+        out = []
+        for e in exprs:
+            body, _, at = e[len("approx({"):-1].rpartition("}|") if "}|" in e else (e[len("approx({"):-2], "", "")
+            pt = dict(p.split("=") for p in at.split(" and ")) if at else {}
+            r = self.fn(pt)
+            out.append({"expr": e, **(r if isinstance(r, dict) else ok(r))})
+        return out
+
+
+def three(a: float, b: float) -> str:
+    return "{" + ",".join(f"{v:.6g}".replace("-", "−") for v in (a, b, a - b)) + "}"
+
+
+def test_spot_points_reproducible_and_varied():
+    p1 = st.spot_points(["x", "y"], "sin(x)\ny")
+    assert p1 == st.spot_points(["x", "y"], "sin(x)\ny") and len(p1) == st.SPOT_POINTS
+    assert p1 != st.spot_points(["x", "y"], "cos(x)\ny")
+    xs = [float(p["x"]) for p in p1]
+    assert all(0.1 <= x <= 3 for x in xs[:6]) and all(x < 0 for x in xs[6:9])
+    assert all(p["x"].isdigit() for p in p1[9:11]) and xs[11] > 3
+    assert {p["x"] for p in p1} != {p["y"] for p in p1}  # each variable gets its own values
+    assert all(abs(x) not in (0, 1) for x in xs)
+
+
+def test_spot_command():
+    assert st.spot_command("ln(x*y)", "ln(x)+ln(y)", {"x": "0.5", "y": "-1.2"}) == \
+        "approx({ln(x*y),ln(x)+ln(y),(ln(x*y))-(ln(x)+ln(y))}|x=0.5 and y=-1.2)"
+    assert st.spot_command("√(2)", "1.4142", {}) == "approx({√(2),1.4142,(√(2))-(1.4142)})"
+
+
+@pytest.mark.parametrize(("reply", "want"), [
+    ("{1.23457,1.23457,1.ᴇ−13}", [1.23457, 1.23457, 1e-13]),
+    ("{−2.,3,−5.}", [-2.0, 3.0, -5.0]),
+    ("{undef,1.,undef}", None), ("{1.+2.*𝑖,1.,2.*𝑖}", None), ("{∞,1,∞}", None), ("{a,1,a−1}", None),
+    ("{1,2}", None), ("1.5", None),
+])
+def test_spot_reply_parsing(reply, want):
+    got = st._three(reply)
+    assert (got[1] if got else None) == (pytest.approx(want) if want else None)
+
+
+def test_agree_is_relative():
+    assert st.agree(1e6, 1e6, 1e-5) and not st.agree(1e6, 1e6 + 1, -1)
+    assert st.agree(0, 0, 0) and not st.agree(1e-3, 2e-3, -1e-3)
+
+
+def test_spot_check_probably_ok():
+    import math
+    spec = st.prepare(["sin(x)^2+cos(x)^2", "1"], latex=False)
+    b = Spot({st.commands(spec)[0]: ok("sin(x)^2+cos(x)^2−1")},
+             lambda pt: three(math.sin(float(pt["x"])) ** 2 + math.cos(float(pt["x"])) ** 2, 1))
+    steps = st.run(b, spec, 10)
+    assert len(b.batches) == 2 and len(b.batches[1]) == st.SPOT_POINTS
+    s = steps[0]
+    assert s.verdict == "probably_ok" and "probably equal" in s.reason and "isn't a proof" in s.reason
+    assert s.spot_check == {"tried": 12, "usable": 12, "agreed": 12, "counterexample": None}
+    assert s.as_dict()["spot_check"] == s.spot_check and s.as_dict()["residual"] == "sin(x)^2+cos(x)^2−1"
+
+
+def test_spot_check_counterexample():
+    spec = st.prepare(["√(x^2)", "x"], latex=False)
+    b = Spot({st.commands(spec)[0]: ok("|x|−x")}, lambda pt: three(abs(float(pt["x"])), float(pt["x"])))
+    s = st.run(b, spec, 10)[0]
+    assert s.verdict == "broken"
+    ce = s.spot_check["counterexample"]
+    first_negative = st.spot_points(["x"], "√(x^2)\nx")[6]["x"]
+    assert ce["at"] == f"x={first_negative}" and ce["command"].endswith(f"|x={first_negative})")
+    assert ce["before"] == f"{abs(float(first_negative)):.6g}" and ce["difference"] == f"{2 * abs(float(first_negative)):.6g}"
+    assert f"at x={first_negative}" in s.reason and "smaller domain" in s.reason
+    assert s.spot_check["agreed"] == 9 and s.spot_check["usable"] == 12
+
+
+def test_spot_check_skips_points_off_the_domain():
+    import math
+    spec = st.prepare(["ln(x*y)", "ln(x)+ln(y)"], latex=False)
+
+    def fn(pt):
+        x, y = float(pt["x"]), float(pt["y"])
+        if x <= 0 or y <= 0:
+            return err("error 800 (Non-real result)")
+        return three(math.log(x * y), math.log(x) + math.log(y))
+    s = st.run(Spot({st.commands(spec)[0]: ok("ln(x*y)−ln(x)−ln(y)")}, fn), spec, 10)[0]
+    assert s.variables == ["x", "y"]
+    assert s.verdict == "probably_ok" and s.spot_check["usable"] == s.spot_check["agreed"] == 9
+
+
+def test_spot_check_too_few_points_stays_undecided():
+    spec = st.prepare(["x!", "Γ(x+1)"], latex=False)
+    s = st.run(Spot({st.commands(spec)[0]: ok("x!−Γ(x+1)")},
+                    lambda pt: three(6, 6) if pt["x"].isdigit() else ok("{undef,undef,undef}")), spec, 10)[0]
+    assert s.verdict == "undecided" and "too few" in s.reason
+    assert s.spot_check["usable"] == 2 and s.spot_check["counterexample"] is None
+
+
+def test_spot_check_without_variables():
+    spec = st.prepare(["√(2)", "1.41421356237"], latex=False)
+    b = Spot({st.commands(spec)[0]: ok("1.41421356237−√(2)")}, lambda pt: "{1.41421,1.41421,−3.1ᴇ−13}")
+    s = st.run(b, spec, 10)[0]
+    assert b.batches[1] == ["approx({√(2),1.41421356237,(√(2))-(1.41421356237)})"]
+    assert s.verdict == "probably_ok" and s.spot_check["tried"] == 1
+    spec = st.prepare(["√(2)", "1.4142"], latex=False)
+    s = st.run(Spot({st.commands(spec)[0]: ok("1.4142−√(2)")}, lambda pt: "{1.41421,1.4142,1.35624ᴇ−5}"), spec, 10)[0]
+    assert s.verdict == "broken" and "numerically line 1 is 1.41421" in s.reason
+
+
+def test_spot_check_only_for_undecided_expression_steps():
+    spec = st.prepare(["(x+1)^2", "x^2+2x+1", "x^2+1", "ln(ℯ^x)", "x=1", "x=1"], latex=False)
+    c = st.commands(spec)
+    replies = {c[0]: ok("x=1"), "expand(((x+1)^2)-(x^2+2x+1))": ok("0"),
+               "expand((x^2+2x+1)-(x^2+1))": ok("2*x"), "expand((x^2+1)-(ln(ℯ^x)))": ok("x^2−ln(ℯ^x)+1")}
+    b = Spot(replies, lambda pt: three(1, 2))
+    steps = st.run(b, spec, 10)
+    assert [s.verdict for s in steps] == ["ok", "broken", "broken", "undecided", "ok"]
+    assert len(b.batches) == 2 and all("ln(ℯ^x)" in e for e in b.batches[1])
+    assert [s.spot_check is not None for s in steps] == [False, False, True, False, False]
+
+
+def test_spot_check_off_or_after_a_timeout():
+    spec = st.prepare(["sin(2x)", "2sin(x)cos(x)"], latex=False)
+    replies = {st.commands(spec)[0]: ok("sin(2*x)−2*sin(x)*cos(x)")}
+    b = Spot(replies, lambda pt: three(1, 1))
+    assert st.run(b, spec, 10, spot_check=False)[0].verdict == "undecided" and len(b.batches) == 1
+    b = Spot(replies, lambda pt: three(1, 1))
+    b.last_timeout = "No reply"  # what eval_batch leaves after a timeout
+    s = st.run(b, spec, 10)[0]
+    assert s.verdict == "undecided" and s.spot_check is None and len(b.batches) == 1

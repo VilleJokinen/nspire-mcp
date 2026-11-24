@@ -338,8 +338,10 @@ def test_output_schemas():
     assert props(check) == ({"all_ok", "first_broken", "summary", "steps", "lines", "var", "warnings"},
                             {"all_ok", "first_broken", "summary", "steps", "lines"})
     assert props(check, "CheckStep") == (
-        {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason", "residual"},
+        {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason", "residual", "spot_check"},
         {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason"})
+    assert props(check, "SpotCheck") == ({"tried", "usable", "agreed", "counterexample"},) * 2
+    assert props(check, "SpotCounterexample") == ({"at", "command", "before", "after", "difference"},) * 2
     assert props(check, "CheckLine") == ({"line", "source", "nspire", "kind"},) * 2
     assert props(ts["nspire_latex"].outputSchema) == (
         {"action", "nspire", "result", "result_latex", "approx", "approx_latex", "warnings"},
@@ -617,8 +619,8 @@ def test_check_steps_through_the_handler(monkeypatch):
     # checked against the outputSchema, as a client would see it
     fake = use(monkeypatch, FakeBridge({
         "getVarInfo()": NOTHING, "getMode(2)": RADIAN,
-        "simplify(((x+1)^2)-(x^2+2x+1))": (True, "0"),
-        "simplify((x^2+2x+1)-(x^2+1))": (True, "2*x"),
+        "expand(((x+1)^2)-(x^2+2x+1))": (True, "0"),
+        "expand((x^2+2x+1)-(x^2+1))": (True, "2*x"),
     }))
     r = call("nspire_check_steps", {"lines": ["(x+1)^2", "=x^2+2x+1", "=x^2+1"], "latex": False})
     assert not r.isError, r.content
@@ -629,7 +631,7 @@ def test_check_steps_through_the_handler(monkeypatch):
     assert out["summary"].startswith("Step 2 (line 2 to line 3) is broken")
     assert out["lines"][1] == {"line": 2, "source": "=x^2+2x+1", "nspire": "x^2+2x+1", "kind": "expression"}
     assert fake.sessions == 1
-    assert fake.batches[-1] == ["simplify(((x+1)^2)-(x^2+2x+1))", "simplify((x^2+2x+1)-(x^2+1))"]
+    assert fake.batches[-1] == ["expand(((x+1)^2)-(x^2+2x+1))", "expand((x^2+2x+1)-(x^2+1))"]
 
 
 def test_check_steps_latex_equations_and_warnings(monkeypatch):
@@ -642,6 +644,37 @@ def test_check_steps_latex_equations_and_warnings(monkeypatch):
     assert out["summary"] == "All 2 step(s) check out on the CAS."
     assert any("a is stored in the document (a = 3)" in w for w in out["warnings"])
     assert fake.batches[-1] == ["solve(2*x + a=7,x)", "solve(2*x=4,x)", "solve(x=2,x)"]
+
+
+def test_check_steps_spot_check_through_the_handler(monkeypatch):
+    # an undecided step settled numerically, checked against the outputSchema
+    import nspire_steps as st
+    a, b = "√(x^2)", "x"
+    replies = {"getVarInfo()": NOTHING, "getMode(2)": RADIAN, f"expand(({a})-({b}))": (True, "|x|−x")}
+    for p in st.spot_points(["x"], f"{a}\n{b}"):
+        x = float(p["x"])
+        replies[st.spot_command(a, b, p)] = (True, f"{{{abs(x):g},{x:g},{abs(x) - x:g}}}".replace("-", "−"))
+    fake = use(monkeypatch, FakeBridge(replies))
+    r = call("nspire_check_steps", {"lines": [a, b], "latex": False})
+    assert not r.isError, r.content
+    out = r.structuredContent
+    s = out["steps"][0]
+    assert s["verdict"] == "broken" and out["first_broken"] == 1 and out["all_ok"] is False
+    assert s["spot_check"]["counterexample"]["at"].startswith("x=-")  # the first negative point
+    assert s["spot_check"]["usable"] == 12 and fake.sessions == 1
+    assert len(fake.batches[-1]) == 12 and all(e.startswith("approx(") for e in fake.batches[-1])
+
+    replies = {"getVarInfo()": NOTHING, "getMode(2)": RADIAN, f"expand(({a})-({b}))": (True, "|x|−x")}
+    for p in st.spot_points(["x"], f"{a}\n{b}"):
+        x = abs(float(p["x"]))
+        replies[st.spot_command(a, b, p)] = (True, f"{{{x:g},{x:g},0.}}")
+    use(monkeypatch, FakeBridge(replies))
+    out = run(server.nspire_check_steps([a, b], latex=False))
+    assert out["steps"][0]["verdict"] == "probably_ok" and out["all_ok"] is False and out["first_broken"] is None
+    assert out["summary"].startswith("No step is wrong. Probably ok") and "not proven" in out["summary"]
+    use(monkeypatch, FakeBridge(replies))
+    out = run(server.nspire_check_steps([a, b], latex=False, spot_check=False))
+    assert out["steps"][0]["verdict"] == "undecided" and "spot_check" not in out["steps"][0]
 
 
 def test_check_steps_bad_input_never_reaches_the_bridge(monkeypatch):

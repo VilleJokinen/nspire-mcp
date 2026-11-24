@@ -127,6 +127,11 @@ STEPS_CASES = [
     (["x+y=3 and x-y=1", "x=2 and y=1"], False, "x,y", ["ok"]),
     ([r"x^2-5x+6=0", r"\iff (x-2)(x-3)=0", r"x=2 \lor x=3"], True, None, ["ok", "ok"]),
     ([r"\sin^2 x+\cos^2 x", r"= 1"], True, None, ["ok"]),
+    # numeric spot check (a tuple: any of these verdicts passes, as simplify may or may not settle it)
+    (["√(x^2)", "x"], False, None, ["broken"]),  # differs at negative x
+    (["sin(x)^2-cos(x)^2", "1-cos(x)^2"], False, None, ["broken"]),
+    (["ln(x*y)", "ln(x)+ln(y)"], False, None, [("ok", "probably_ok")]),  # negative points skipped
+    ([r"\sin(2x)", r"2\sin x\cos x"], True, None, [("ok", "probably_ok")]),
 ]
 
 
@@ -141,8 +146,13 @@ def steps_check(report: "Report", specs: list) -> None:
         if bridge.last_timeout:
             raise BridgeTimeout(bridge.last_timeout)
         got = [s.verdict for s in steps]
-        report(got == want, name, f"{got}  " + "; ".join(f"{c} -> {r}" for s in steps for c, r in zip(s.check, s.cas,
-                                                                                                    strict=False)))
+        good = len(got) == len(want) and all(g in w if isinstance(w, tuple) else g == w
+                                              for g, w in zip(got, want, strict=True))
+        spots = [f"spot {s.spot_check['agreed']}/{s.spot_check['usable']}/{s.spot_check['tried']}"
+                 + (f" at {s.spot_check['counterexample']['at']}" if s.spot_check['counterexample'] else "")
+                 for s in steps if s.spot_check]
+        report(good, name, f"{got}  " + "; ".join(spots + [f"{c} -> {r}" for s in steps
+                                                           for c, r in zip(s.check, s.cas, strict=False)]))
 
 
 class Report:
