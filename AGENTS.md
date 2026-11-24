@@ -175,8 +175,8 @@ hotkey.
   with `;`/tab; a header row when a first-row cell isn't a number) or a list of columns into a `Table`
   (`headers`, `columns` of TI-Nspire number literals written as given, `values` as floats for drawing
   only). Limits: `MAX_ROWS`, `MAX_COLS`, `EXP_LIMIT`. Very large or small numbers become `1.5ᴇ-30`
-  (accepted by the real CAS). `list_literal()` / `list_chunks()` write a column as `{...}` pieces. Meant
-  to be reused for filling a Lists & Spreadsheet page.
+  (accepted by the real CAS). `list_literal()` / `list_chunks()` write a column as `{...}` pieces. Also
+  used by `nspire_notes` to fill a Lists & Spreadsheet page.
 - `nspire_stats.py`: the `nspire_stats` tool's work, without pywin32 at import. `COMMANDS` (keep
   `server.StatCommand` in step; a test checks), `prepare()` picks columns offline, `commands()` gives the
   stores (`mcpstatx:={...}`, then `:=augment(...)` per `CHUNK` values; server.py runs them inside
@@ -240,6 +240,17 @@ hotkey.
   add-page menu), pastes each function into the entry line and presses Enter, with
   Ctrl+G to show the entry line again before f2, f3, ... Each function is checked on
   the bridge as `Define mcpgraphchk(x)=...`, which the undo deletes.
+  `spreadsheet={...}` adds a Lists & Spreadsheet page after that (Insert > Page, then Insert >
+  Lists & Spreadsheet, `INSERT_LISTS_ITEM`; handheld: `LISTS_MENU_KEY` `4` in the add-page menu).
+  `plan_spreadsheet()` reads the data with `nspire_data.parse_table` and refuses names that aren't
+  TI-Nspire names, look like a cell (`a1`), repeat, or are defined or used by a step or graph (and
+  `f1`...`fn` with graphs). Each column is checked on the bridge as `name:={...}` (unnamed ones as
+  `mcpsheetchk`), `SHEET_CHUNK` values per request with `augment`, which the undo removes or puts
+  back. `_type_sheet()` types, never pastes: from A1, two Ups to the name row, each name then Enter
+  and two Ups (back to the name row wherever Enter went), Right; Left and two Downs back to A1; then
+  each value typed with Enter (moves down), Right and one Up per row to the next column. Exponents
+  are typed as TI-Nspire's private `ᴇ` character (`to_cas_chars`). The menu item, the add-page key
+  and the cell navigation were written from TI's layout and are not yet checked on the real app.
   `save_as=` saves with Ctrl+S, but only types into a standard Windows file dialog
   (`#32770`) whose focused control is its file name box (`is_file_name_box`), reads the
   box back (`control_text`) before Enter, and reports success only once the dialog
