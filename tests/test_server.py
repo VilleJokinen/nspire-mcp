@@ -82,13 +82,19 @@ def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
                        "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps", "nspire_stats",
-                       "nspire_to_latex", "nspire_log"}
+                       "nspire_to_latex", "nspire_log", "nspire_lib_save", "nspire_lib_load", "nspire_lib_list",
+                       "nspire_lib_remove"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
-    for name in ("nspire_status", "nspire_vars", "nspire_check_steps", "nspire_to_latex", "nspire_log"):
+    for name in ("nspire_status", "nspire_vars", "nspire_check_steps", "nspire_to_latex", "nspire_log",
+                 "nspire_lib_list"):
         assert ts[name].annotations.readOnlyHint is True and ts[name].annotations.idempotentHint is True
     assert ts["nspire_clear"].annotations.destructiveHint is True
+    # the library: saving leaves the document alone (it writes only the library file), loading stores into it
+    assert ts["nspire_lib_save"].annotations.destructiveHint is False
+    assert ts["nspire_lib_load"].annotations.destructiveHint is True and not ts["nspire_lib_load"].annotations.readOnlyHint
+    assert ts["nspire_lib_remove"].annotations.destructiveHint is True
     for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
         assert not ts[name].annotations.readOnlyHint  # they can define or delete things, or evaluate in the document
     assert ts["nspire_plot"].annotations.destructiveHint is False
@@ -120,7 +126,8 @@ def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
                    "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps", "nspire_stats",
-                   "nspire_to_latex", "nspire_log", "NSPIRE_LOG", "nspire://variables", "nspire://modes"):
+                   "nspire_to_latex", "nspire_log", "NSPIRE_LOG", "nspire://variables", "nspire://modes",
+                   "nspire_lib_save", "nspire_lib_load", "overwrite=True", "nspire://library"):
         assert needle in text
 
 
@@ -203,7 +210,7 @@ def read_res(uri: str):
 
 def test_resources_are_listed():
     assert {str(r.uri) for r in run(server.mcp.list_resources())} == {
-        "nspire://variables", "nspire://modes", "nspire://status"}
+        "nspire://variables", "nspire://modes", "nspire://status", "nspire://library"}
     assert [t.uriTemplate for t in run(server.mcp.list_resource_templates())] == ["nspire://variables/{name}"]
     assert all(r.mimeType == "application/json" for r in run(server.mcp.list_resources()))
 
@@ -248,6 +255,31 @@ def test_resources_fail_with_a_body_not_an_exception(monkeypatch):
     monkeypatch.setattr(server, "bridge", Broken({}))
     assert read_res("nspire://variables") == {"ok": False, "error": "boom"}
     assert read_res("nspire://modes")["ok"] is False
+
+
+def test_library_tools_and_resource(monkeypatch, tmp_path):
+    from test_library import FakeCAS
+    monkeypatch.setenv("NSPIRE_LIBRARY_DIR", str(tmp_path / "lib"))
+    empty = read_res("nspire://library")
+    assert empty == {"ok": True, "folder": str(tmp_path / "lib"), "libraries": []}
+    cas = FakeCAS()
+    monkeypatch.setattr(server, "bridge", cas)
+    _, saved = run(server.mcp.call_tool("nspire_lib_save", {"definitions": ["Define f(x)=x^2"], "library": "m"}))
+    assert saved["saved"] == ["f"] and saved["conflicts"] == [] and cas.defs == {}
+    body = read_res("nspire://library")
+    assert body["ok"] and body["libraries"][0]["library"] == "m"
+    assert body["libraries"][0]["entries"][0]["command"] == "Define f(x)=x^2"
+    _, listed = run(server.mcp.call_tool("nspire_lib_list", {}))
+    assert listed["libraries"][0]["entries"][0]["exact"] is True
+    _, loaded = run(server.mcp.call_tool("nspire_lib_load", {"library": "m"}))
+    assert loaded["loaded"] == ["f"] and "f" in cas.defs
+    _, removed = run(server.mcp.call_tool("nspire_lib_remove", {"library": "m", "names": ["f"]}))
+    assert removed["removed"] == ["f"]
+    with pytest.raises(Exception, match="isn't a definition"):
+        run(server.mcp.call_tool("nspire_lib_save", {"definitions": ["x^2"]}))
+    (tmp_path / "lib" / "bad.json").write_text("nope", encoding="utf-8")
+    libs = {x["library"]: x for x in read_res("nspire://library")["libraries"]}
+    assert libs["bad"]["error"] and libs["m"]["error"] is None
 
 
 # ------------------------------------------------------------ nspire_latex warnings
