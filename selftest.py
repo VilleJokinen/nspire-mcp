@@ -7,7 +7,7 @@
 #     "antlr4-python3-runtime==4.11.*",
 # ]
 # ///
-"""Check the bridge, the LaTeX translator, plot sampling (all kinds) and statistics end to end:  uv run --script selftest.py
+"""Check the bridge, the LaTeX translator, plot sampling (all kinds) and annotations, and statistics end to end:  uv run --script selftest.py
 
 Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
@@ -29,7 +29,7 @@ import nspire_stats  # noqa: E402
 import nspire_steps  # noqa: E402
 from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
-from nspire_plot import Func, curve_xy, implicit_rows, prepare, prepare_kind, sample  # noqa: E402
+from nspire_plot import Func, annotate, curve_xy, implicit_rows, prepare, prepare_kind, sample  # noqa: E402
 
 bridge = Bridge()
 
@@ -170,6 +170,40 @@ def plot_kinds_check(report: "Report") -> None:
                 bad.append(f"{h} left in the document ({kept})")
         bad += got.warnings
         report(not bad, label, "; ".join(bad[:3]) or f"{got.requests} request(s), {len(spec.funcs)} channel(s)")
+
+
+# nspire_plot annotate: (functions, x_min, x_max, annotations, expected (type, functions, x) in order)
+_S3, _A = math.sqrt(3), math.asin(0.2)
+ANNOTATE_CASES = [
+    (["x^3-3*x", "x"], -3, 3, ["zeros", "extrema", "intersections"],
+     [("zero", [0], -_S3), ("zero", [0], 0), ("zero", [0], _S3), ("zero", [1], 0), ("max", [0], -1),
+      ("min", [0], 1), ("intersection", [0, 1], -2), ("intersection", [0, 1], 0), ("intersection", [0, 1], 2)]),
+    # x^3: f''=0 at its critical point (stationary, decided by the slopes); cos(x)=x/5 has no closed form
+    (["x^3", "cos(x)-x/5"], -5, 5, ["zeros", "extrema"],
+     [("zero", [0], 0), ("zero", [1], -3.837467106499), ("zero", [1], -1.9773830293288),
+      ("zero", [1], 1.3064400083695), ("max", [1], -_A), ("min", [1], _A - math.pi), ("min", [1], math.pi + _A),
+      ("stationary", [0], 0)]),
+]
+
+
+def annotate_check(report: "Report") -> None:
+    """Zeros, extrema and intersections found by the CAS (inside the session)."""
+    for funcs, a, b, which, want in ANNOTATE_CASES:
+        label = f"nspire_plot annotate {', '.join(funcs)}"
+        spec = prepare([Func(f, f) for f in funcs], "x", a, b, 41)
+        try:
+            ann = annotate(bridge, spec, sample(bridge, spec, 10), which, 10)
+        except BridgeTimeout:
+            raise
+        except Exception as e:
+            report(False, label, f"{type(e).__name__}: {e}")
+            continue
+        got = [(m.type, m.funcs, m.x_approx) for m in ann.marks]
+        ok = len(got) == len(want) and all(
+            t == wt and f == wf and abs(x - wx) < 1e-6 for (t, f, x), (wt, wf, wx) in zip(got, want, strict=False))
+        shown = "; ".join(f"{m.type} {m.x}" for m in ann.marks)
+        report(ok and not ann.warnings, label, f"{ann.requests} request(s): {shown}"
+               + (f" | warnings: {ann.warnings}" if ann.warnings else "") + ("" if ok else f" | want {want}"))
 
 
 # nspire_check_steps: (lines, latex?, var, expected verdict of each step)
@@ -356,6 +390,12 @@ def cas_checks(report: Report, plans: list, step_specs: list) -> list | None:
     except BridgeTimeout as e:
         report(False, "nspire_plot kinds", str(e))
         return None
+    if cas:
+        try:
+            annotate_check(report)
+        except BridgeTimeout as e:
+            report(False, "nspire_plot annotate", str(e))
+            return None
 
     try:
         stats_check(report)

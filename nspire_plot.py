@@ -12,6 +12,8 @@ when one fails), and render_png() / summary() run after the session, with the us
 clipboard back.
 Nothing here imports pywin32, and matplotlib is imported only in render_png(), so the
 server starts fast and the parsing and gap logic can be tested anywhere.
+Function plots can also be annotated (annotate()): zeros, extrema and intersections found by
+the CAS in the plotted window, marked on the image and listed in the summary.
 """
 from __future__ import annotations
 
@@ -752,6 +754,356 @@ def curve_info(spec: PlotSpec, got: Sampled) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- annotations
+#
+# Zeros, extrema and intersections of function plots, all found by the CAS:
+#   1. one batch with zeros(expr,x)|x>=a and x<=b per function / pair (expr: f, derivative(f,x)
+#      or (f)-(g)); TI-Nspire gives every point in the window, exact when it can (−√(2), π/4)
+#      and as decimals otherwise. derivative(), not d(): the bridge leaves d() unevaluated.
+#   2. where that fails (an error, a reply that isn't a list of points such as {n1*π}, or an
+#      empty list although the samples change sign), nSolve(expr=0,x,lo,hi) in each bracket
+#      between neighbouring samples where the CAS's values change sign (Python only picks where
+#      nSolve looks; the brackets next to an asymptote are left out).
+#   3. one batch with {f,approx(x),approx(f)[,approx(derivative(f,x,2))]}|x=(point) per point:
+#      the exact y, both decimals, and for a critical point the second derivative, whose sign
+#      says minimum or maximum. When it is 0 (x^3, x^4 at 0), the sign of derivative(f,x) just
+#      left and right of the point, also from the CAS, decides; no sign change is "stationary".
+# A separate batch from the sampling, so a slow zeros() can't cost the plot itself.
+
+ANNOTATIONS = ("zeros", "extrema", "intersections")
+MAX_MARKS = 40       # marked points per plot, all kinds together
+MAX_PER_SET = 12     # per function (or pair of functions) and kind
+MAX_LABELS = 20      # with more points than this on the image, they are drawn without labels
+_NOT_A_POINT_RE = re.compile(r"\b[nc]\d+\b|=|\bor\b|\band\b")  # n1 (any integer), c1, a condition
+MARK_TYPES = ("zero", "max", "min", "stationary", "intersection")
+# The CAS writes sin⁻¹(x) as sin + U+F005 + (x); readable() doesn't translate that private-use
+# character yet, so it would show as sin(x). Marks show it as ⁻¹; what is sent back stays raw.
+NS_INV = ""
+
+
+def shown(text: str) -> str:
+    """CAS output for the marks and notes: readable(), with ⁻¹ for the inverse functions."""
+    return readable(text).replace(NS_INV, "⁻¹").strip()
+
+
+def prepare_annotations(spec: PlotSpec, annotate) -> list[str]:
+    """Check the annotate argument offline: a list of ANNOTATIONS names (a single name is
+    fine). Returns them without repeats; [] for none. Raises ValueError."""
+    if not annotate:
+        return []
+    if isinstance(annotate, str):
+        annotate = [annotate]
+    if spec.kind != "function":
+        raise ValueError("annotate works on function plots (kind='function') only: zeros, extrema and "
+                         "intersections of y=f(x). For a curve, find its points with nspire_eval (solve, zeros).")
+    out: list[str] = []
+    for a in annotate:
+        if a not in ANNOTATIONS:
+            raise ValueError(f"annotate: {a!r} isn't one of {', '.join(ANNOTATIONS)}")
+        if a not in out:
+            out.append(a)
+    if "intersections" in out and len(spec.funcs) < 2:
+        out.remove("intersections")
+        spec.notes.append("Intersections need two or more functions: none marked.")
+    return out
+
+
+@dataclass(frozen=True)
+class AnnotationTask:
+    kind: str                # "zeros", "extrema" or "intersections"
+    funcs: tuple[int, ...]   # indices into spec.funcs: one, or two for an intersection
+    expr: str                # zero at the points wanted: (f), derivative((f),x) or (f)-(g)
+
+
+@dataclass
+class Mark:
+    type: str          # one of MARK_TYPES
+    funcs: list[int]   # indices into spec.funcs
+    x: str             # as the CAS gave it: exact (−√(2)) or, found numerically, a decimal
+    y: str
+    x_approx: float
+    y_approx: float
+    method: str        # "exact" (zeros) or "numeric" (nSolve)
+
+    def as_dict(self) -> dict:
+        return {"type": self.type, "functions": [k + 1 for k in self.funcs], "x": self.x, "y": self.y,
+                "x_approx": self.x_approx, "y_approx": self.y_approx, "method": self.method}
+
+
+@dataclass
+class Annotations:
+    marks: list[Mark] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)      # what was capped or found numerically
+    warnings: list[str] = field(default_factory=list)   # what failed
+    errors: list[str] = field(default_factory=list)     # CAS error texts, for nspire_errors
+    requests: int = 0
+
+
+def annotation_tasks(spec: PlotSpec, which: list[str]) -> list[AnnotationTask]:
+    v, fs = spec.var, spec.funcs
+    tasks = []
+    for k, f in enumerate(fs):
+        if "zeros" in which:
+            tasks.append(AnnotationTask("zeros", (k,), f"({f.command})"))
+        if "extrema" in which:
+            tasks.append(AnnotationTask("extrema", (k,), f"derivative(({f.command}),{v})"))
+    if "intersections" in which:
+        for i in range(len(fs)):
+            for j in range(i + 1, len(fs)):
+                tasks.append(AnnotationTask("intersections", (i, j), f"({fs[i].command})-({fs[j].command})"))
+    return tasks
+
+
+def exact_command(spec: PlotSpec, task: AnnotationTask) -> str:
+    v, g = spec.var, spec.grid
+    return f"zeros({task.expr},{v})|{v}>={_num(g.x_min)} and {v}<={_num(g.x_max)}"
+
+
+def numeric_command(spec: PlotSpec, task: AnnotationTask, lo: float, hi: float) -> str:
+    return f"nSolve({task.expr}=0,{spec.var},{_num(lo)},{_num(hi)})"
+
+
+def point_command(spec: PlotSpec, task: AnnotationTask, x: str) -> str:
+    """The exact y, approx x, approx y (and for extrema the second derivative) at x."""
+    v, f = spec.var, f"({spec.funcs[task.funcs[0]].command})"
+    second = f",approx(derivative({f},{v},2))" if task.kind == "extrema" else ""
+    return f"{{{f},approx({v}),approx({f}){second}}}|{v}=({x})"
+
+
+def slope_command(spec: PlotSpec, task: AnnotationTask, x: str, dx: float) -> str:
+    v, f = spec.var, f"({spec.funcs[task.funcs[0]].command})"
+    return f"approx(derivative({f},{v})|{v}=({x}){'+' if dx > 0 else '-'}{_num(abs(dx))})"
+
+
+def number(text: str) -> float | None:
+    """A CAS decimal ('−1.4142135623731', '3.ᴇ−4') as a float; None for anything else."""
+    s = readable(text).strip().replace(" ", "").replace("−", "-").replace("ᴇ", "e").replace("E", "e")
+    if _NUM_RE.fullmatch(s):
+        v = float(s)
+        return v if math.isfinite(v) else None
+    return None
+
+
+def exact_points(reply: dict) -> list[str] | None:
+    """zeros()'s points as the CAS wrote them (to send back), or None when the reply isn't a
+    list of single points: an error, {n1*π} (every multiple), a condition."""
+    if not reply["ok"]:
+        return None
+    t = reply["result"].strip()
+    if not (t.startswith("{") and t.endswith("}")):
+        return None
+    body = t[1:-1].strip()
+    if not body:
+        return []
+    items = [s.strip() for s in _split_top(body)]
+    if any(not s or _NOT_A_POINT_RE.search(readable(s)) for s in items):
+        return None
+    return items
+
+
+def brackets(spec: PlotSpec, got: Sampled, task: AnnotationTask, view: View) -> list[tuple[float, float]]:
+    """Where nSolve should look: between neighbouring samples whose CAS values change sign
+    (zeros: f; intersections: f−g; extrema: the steps between samples). Jumps across an
+    asymptote (breaks()) aren't brackets. Python only chooses the intervals."""
+    g = spec.grid
+    ys = got.ys[task.funcs[0]]
+    cut = set(breaks(ys, view.y_lo, view.y_hi))
+    out: list[tuple[float, float]] = []
+    if task.kind == "extrema":
+        for i in range(1, g.n - 1):
+            a, b, c = ys[i - 1], ys[i], ys[i + 1]
+            if a is None or b is None or c is None or i - 1 in cut or i in cut:
+                continue
+            if (b - a) * (c - b) < 0:
+                out.append((g.x(i - 1), g.x(i + 1)))
+        return out
+    if task.kind == "intersections":
+        other = got.ys[task.funcs[1]]
+        cut |= set(breaks(other, view.y_lo, view.y_hi))
+        ys = [a - b if a is not None and b is not None else None for a, b in zip(ys, other, strict=True)]
+    for i in range(g.n - 1):
+        a, b = ys[i], ys[i + 1]
+        if a is None or b is None or i in cut:
+            continue
+        if a == 0:
+            out.append((g.x(max(i - 1, 0)), g.x(i + 1)))
+        elif a * b < 0 or (b == 0 and i + 1 == g.n - 1):  # a sign change, or a zero at the last sample
+            out.append((g.x(i), g.x(i + 1)))
+    return out
+
+
+def _what(spec: PlotSpec, task: AnnotationTask) -> str:
+    names = " and ".join(f"{k + 1} ({_short_label(spec.funcs[k].label)})" for k in task.funcs)
+    return {"zeros": "zeros of ", "extrema": "extrema of ", "intersections": "intersections of "}[task.kind] + names
+
+
+def _short_label(s: str, limit: int = 30) -> str:
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def annotate(bridge, spec: PlotSpec, got: Sampled, which: list[str], timeout_s: float) -> Annotations:
+    """Find the points to mark. Call inside bridge.session(), after sample(). Never raises for
+    a CAS error or a timeout: what failed is a warning and isn't marked."""
+    out = Annotations()
+    tasks = annotation_tasks(spec, which)
+    if not tasks:
+        return out
+    view = plot_view(spec, got)
+    g = spec.grid
+
+    def dead(stage: str) -> bool:
+        if not bridge.last_timeout:
+            return False
+        out.warnings.append(f"The CAS didn't finish the annotations ({stage}) in time: {bridge.last_timeout} "
+                            f"Nothing is marked; try a larger timeout_s or fewer annotations.")
+        return True
+
+    # 1. exact points
+    res = bridge.eval_batch([exact_command(spec, t) for t in tasks], timeout_s)
+    out.requests += 1
+    if dead("zeros"):
+        return out
+    found: list[list[tuple[str, str]]] = [[] for _ in tasks]
+    numeric: list[tuple[int, float, float]] = []
+    for k, (t, r) in enumerate(zip(tasks, res, strict=True)):
+        pts = exact_points(r)
+        if pts:
+            if len(pts) > MAX_PER_SET:
+                out.notes.append(f"{_what(spec, t)}: the CAS found {len(pts)}; the first {MAX_PER_SET} are marked.")
+            found[k] = [(p, "exact") for p in pts[:MAX_PER_SET]]
+            continue
+        br = brackets(spec, got, t, view)
+        if pts is None:
+            why = r["error"] if not r["ok"] else f"zeros() gave {shown(r['result'])[:60]}"
+            if not r["ok"]:
+                out.errors.append(r["error"])
+            if br:
+                out.notes.append(f"{_what(spec, t)}: {why}; looked for them numerically (nSolve between "
+                                 f"neighbouring samples) instead.")
+            else:
+                out.warnings.append(f"{_what(spec, t)}: {why}; none marked.")
+        if len(br) > MAX_PER_SET:
+            out.notes.append(f"{_what(spec, t)}: only the first {MAX_PER_SET} of {len(br)} sign changes searched.")
+        numeric += [(k, lo, hi) for lo, hi in br[:MAX_PER_SET]]
+
+    # 2. numeric fallback
+    if numeric:
+        res = bridge.eval_batch([numeric_command(spec, tasks[k], lo, hi) for k, lo, hi in numeric], timeout_s)
+        out.requests += 1
+        if dead("nSolve"):
+            return out
+        seen: dict[int, list[float]] = {}
+        for (k, _, _), r in zip(numeric, res, strict=True):
+            if not r["ok"]:
+                out.errors.append(r["error"])
+                continue
+            v = number(r["result"])  # "No solution found" is a string: nothing there
+            if v is None:
+                continue
+            if any(abs(v - w) <= g.step * 1e-3 for w in seen.setdefault(k, [])):
+                continue  # neighbouring brackets found the same point
+            seen[k].append(v)
+            found[k].append((r["result"].strip(), "numeric"))
+        for k in seen:
+            if not any(m == "exact" for _, m in found[k]):
+                out.notes.append(f"{_what(spec, tasks[k])}: found numerically (nSolve), not exactly.")
+
+    # 3. the points' values
+    todo = [(k, x, m) for k, pts in enumerate(found) for x, m in pts]
+    if len(todo) > MAX_MARKS:
+        out.notes.append(f"{len(todo)} points found; the first {MAX_MARKS} are marked.")
+        todo = todo[:MAX_MARKS]
+    if not todo:
+        return out
+    exprs: list[str] = []
+    for k, x, _ in todo:
+        exprs.append(point_command(spec, tasks[k], x))
+        if tasks[k].kind == "extrema":
+            exprs += [slope_command(spec, tasks[k], x, -g.step / 4), slope_command(spec, tasks[k], x, g.step / 4)]
+    res = bridge.eval_batch(exprs, timeout_s)
+    out.requests += 1
+    if dead("values at the points"):
+        return out
+    it = iter(res)
+    tol = g.step * 1e-6
+    for k, x, method in todo:
+        t = tasks[k]
+        r = next(it)
+        slopes = [next(it), next(it)] if t.kind == "extrema" else []
+        if not r["ok"]:
+            out.errors.append(r["error"])
+            continue
+        body = r["result"].strip()
+        items = _split_top(body[1:-1]) if body.startswith("{") and body.endswith("}") else []
+        vals = [number(s) for s in items]
+        if len(items) < 3 or vals[1] is None or vals[2] is None:
+            out.notes.append(f"{_what(spec, t)}: no real value at {spec.var} = {shown(x)}; not marked.")
+            continue
+        xa, ya = vals[1], vals[2]
+        assert xa is not None and ya is not None
+        if not g.x_min - tol <= xa <= g.x_max + tol:
+            continue
+        if t.kind == "zeros":
+            kind = "zero"
+        elif t.kind == "intersections":
+            kind = "intersection"
+        else:
+            kind = _classify(vals[3] if len(vals) > 3 else None,
+                             [number(s["result"]) if s["ok"] else None for s in slopes])
+        out.marks.append(Mark(kind, list(t.funcs), shown(x), shown(items[0]),
+                              xa, ya, method))
+    out.marks.sort(key=lambda m: (MARK_TYPES.index(m.type) if m.type in MARK_TYPES else 9, m.funcs, m.x_approx))
+    return out
+
+
+def _classify(second: float | None, slopes: list[float | None]) -> str:
+    """A critical point by the CAS's second derivative there; when that is 0 or not a number,
+    by the CAS's first derivative just left and right of it."""
+    if second is not None and second != 0:
+        return "min" if second > 0 else "max"
+    left, right = (slopes + [None, None])[:2]
+    if left is not None and right is not None:
+        if left < 0 < right:
+            return "min"
+        if left > 0 > right:
+            return "max"
+    return "stationary"
+
+
+_TYPE_WORDS = {"zero": ("zero", "zeros"), "max": ("maximum", "maxima"), "min": ("minimum", "minima"),
+               "stationary": ("stationary point (not an extremum)", "stationary points (not extrema)"),
+               "intersection": ("intersection", "intersections")}
+
+
+def _value(exact: str, approx: float) -> str:
+    """'−√(2) ≈ −1.41421', or one number when the CAS's form is already a decimal."""
+    if number(exact) is not None:
+        return _g(number(exact) or 0.0)
+    short = _g(approx)
+    return exact if exact.replace("−", "-") == short.replace("−", "-") else f"{exact} ≈ {short}"
+
+
+def marks_summary(spec: PlotSpec, ann: Annotations) -> list[str]:
+    """Lines for the text summary: each set of marked points, exact and decimal."""
+    lines: list[str] = []
+    if ann.marks:
+        lines.append("Marked points (every coordinate computed by the TI-Nspire CAS):")
+    groups: dict[tuple[str, tuple[int, ...]], list[Mark]] = {}
+    for m in ann.marks:
+        groups.setdefault((m.type, tuple(m.funcs)), []).append(m)
+    for (typ, funcs), ms in groups.items():
+        word = _TYPE_WORDS[typ][len(ms) > 1]
+        of = " and ".join(str(k + 1) for k in funcs)
+        if typ == "zero":
+            pts = [f"{spec.var} = {_value(m.x, m.x_approx)}" for m in ms]
+        else:
+            pts = [f"({_value(m.x, m.x_approx)}, {_value(m.y, m.y_approx)})" for m in ms]
+        numeric = " (found numerically)" if all(m.method == "numeric" for m in ms) else ""
+        lines.append(f"- {word} of {of}{numeric}: " + "; ".join(pts))
+    lines += ann.notes
+    return lines
+
+
 # ---------------------------------------------------------------- output
 
 def _g(v: float, scale: float = 0.0) -> str:
@@ -866,7 +1218,8 @@ def _implicit_summary(spec: PlotSpec, got: Sampled, warnings: list[str] | None) 
     return _tail(lines, spec, got, warnings)
 
 
-def summary(spec: PlotSpec, got: Sampled, warnings: list[str] | None = None) -> str:
+def summary(spec: PlotSpec, got: Sampled, warnings: list[str] | None = None,
+            ann: Annotations | None = None) -> str:
     if spec.kind == "implicit":
         return _implicit_summary(spec, got, warnings)
     if spec.is_curve:
@@ -899,6 +1252,13 @@ def summary(spec: PlotSpec, got: Sampled, warnings: list[str] | None = None) -> 
     if clipped:
         lines.append(f"The y axis shows {_g(lo)} to {_g(hi)}; spikes beyond that are cut off "
                      f"(set y_min / y_max to change it).")
+    if ann is not None:
+        lines += marks_summary(spec, ann)
+        off = len(ann.marks) - len(visible_marks(ann.marks, View(g.x_min, g.x_max, lo, hi)))
+        if off:
+            lines.append(f"{off} marked point{'s are' if off > 1 else ' is'} outside the y range "
+                         f"shown, so not drawn.")
+        warnings = ann.warnings + list(warnings or [])
     return _tail(lines, spec, got, warnings)
 
 
@@ -991,12 +1351,57 @@ def _equal_aspect(ax, spec: PlotSpec, view: View) -> None:
     ax.set_aspect("equal", adjustable="box")  # the plot box shrinks; the window stays as computed
 
 
+_MARK_STYLE = {"zero": ("o", 36), "max": ("^", 48), "min": ("v", 48), "stationary": ("D", 30),
+               "intersection": ("X", 56)}
+_MARK_KEY = {"zero": "○ zero", "max": "▲ maximum", "min": "▼ minimum", "stationary": "◇ stationary",
+             "intersection": "✕ intersection"}
+
+
+def _coord(v: float, span: float) -> str:
+    """A coordinate for a label: 3 significant digits, 0 for rounding noise."""
+    if abs(v) < span * 1e-9:
+        v = 0.0
+    return f"{v + 0.0:.3g}".replace("-", "−")
+
+
+def visible_marks(marks: list[Mark], view: View) -> list[Mark]:
+    return [m for m in marks if view.x_lo <= m.x_approx <= view.x_hi and view.y_lo <= m.y_approx <= view.y_hi]
+
+
+def _draw_marks(fig, ax, marks: list[Mark], view: View) -> None:
+    """Each mark in its function's colour (intersections in ink), with its rounded coordinates
+    unless there are more than MAX_LABELS, and a key of the marker shapes under the plot."""
+    shown = visible_marks(marks, view)
+    labels = len(shown) <= MAX_LABELS
+    sx, sy = view.x_hi - view.x_lo, view.y_hi - view.y_lo
+    done: set[str] = set()   # one label per spot (a zero of two functions that is also where they meet)
+    for m in shown:
+        color = INK if m.type == "intersection" else PALETTE[m.funcs[0] % len(PALETTE)]
+        marker, size = _MARK_STYLE.get(m.type, ("o", 36))
+        face = SURFACE if m.type in ("zero", "stationary") else color
+        ax.scatter([m.x_approx], [m.y_approx], marker=marker, s=size, facecolors=face, edgecolors=color,
+                   linewidths=1.3, zorder=5)
+        text = f"({_coord(m.x_approx, sx)}, {_coord(m.y_approx, sy)})"
+        if labels and text not in done:
+            done.add(text)
+            below = m.type == "min"
+            ax.annotate(text, (m.x_approx, m.y_approx),
+                        xytext=(5, -11 if below else 5), textcoords="offset points", fontsize=7, color=INK_2,
+                        zorder=6, bbox={"boxstyle": "round,pad=0.15", "fc": SURFACE, "ec": "none", "alpha": 0.8})
+    kinds = [t for t in MARK_TYPES if any(m.type == t for m in shown)]
+    if kinds:
+        fig.text(0.01, 0.01, "   ".join(_MARK_KEY[t] for t in kinds) + "  (points: TI-Nspire CAS)",
+                 ha="left", va="bottom", color=MUTED, fontsize=7)
+
+
 def render_png(spec: PlotSpec, got: Sampled, points: tuple[list[float], list[float]] | None = None,
-               title: str | None = None, xlabel: str | None = None, ylabel: str | None = None) -> bytes:
+               title: str | None = None, xlabel: str | None = None, ylabel: str | None = None,
+               marks: list[Mark] | None = None) -> bytes:
     """Draw the sampled values. Imports matplotlib (slow the first time).
 
     points: data points (xs, ys) drawn as dots under the curves (nspire_stats' data; given, not
-    computed). title replaces the single function's or curve's label as the title."""
+    computed). title replaces the single function's or curve's label as the title. marks:
+    annotate()'s points (zeros, extrema, intersections), drawn on top."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -1017,6 +1422,8 @@ def render_png(spec: PlotSpec, got: Sampled, points: tuple[list[float], list[flo
     else:
         _draw_functions(ax, spec, got, view)
         labels = [f.command for f in spec.funcs]
+    if marks:
+        _draw_marks(fig, ax, marks, view)
 
     ax.set_xlim(view.x_lo, view.x_hi)
     ax.set_ylim(view.y_lo, view.y_hi)
