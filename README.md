@@ -7,7 +7,8 @@ and solve LaTeX from the clipboard with a hotkey.
   (equations, systems, integrals, limits, sums, derivatives, ODEs, matrices…) with
   answers returned as text and LaTeX.
 - **Clipboard hotkey** (Windows): copy LaTeX anywhere, press Ctrl+Alt+Shift+L, and the
-  answer pops up and replaces the clipboard as LaTeX.
+  answer pops up and replaces the clipboard as LaTeX. Ctrl+Alt+Shift+T goes the other way:
+  copy a result in TI-Nspire and get it as LaTeX for Obsidian, Word, ….
 
 How it works: a Lua script on a page of an open TI-Nspire document watches the
 clipboard. The Python side writes a request there and reads the CAS's
@@ -120,6 +121,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer", graphs, spreadsheet, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and a Lists & Spreadsheet page, and saved to a file (see below) |
 | `nspire_plot(exprs, latex, var, x_min, x_max, y_min, y_max, samples, timeout_s=20, kind="function", t_min, t_max, annotate)` | graph up to 8 functions (x from -10 to 10, 200 points by default), or with `kind` up to 4 parametric curves (`"cos(t), sin(t)"`, t from 0 to 2π), polar curves (`"1+cos(θ)"`, always in radians) or implicit curves (`"x^2+y^2=25"`, on a 60×60 grid in -10..10): a PNG image plus a summary (ranges, gaps, asymptotes, `warnings`) and a structured result. The CAS computes every point with `seq(approx(…))`; matplotlib only draws them (implicit: a contour at 0 of the CAS's grid values). Undefined or non-real points are gaps, and lines aren't drawn across asymptotes or poles. Polar and implicit plots use temporary functions (`mcpplot…`) and delete them again. `annotate=["zeros", "extrema", "intersections"]` (function plots only) has the CAS find those points in the window (`zeros(f,x)\|x>=a and x<=b`, of `derivative(f,x)` for extrema, classified by the second derivative, and of f−g for each pair; `nSolve` between sign changes where `zeros` can't answer), marks them on the image with their rounded coordinates and returns them in `marks`, exact and as decimals. Corners (like `abs(x)` at 0) and the ends of the window aren't extrema here |
+| `nspire_to_latex(text)` | TI-Nspire math text (e.g. a result the user pasted from TI-Nspire) → LaTeX, without TI-Nspire: a text conversion only, nothing evaluated. The same conversion as the Ctrl+Alt+Shift+T hotkey |
 | `nspire_stats(command, csv, columns, headers, x_column, y_column, freq_column, plot=False, timeout_s=10)` | statistics on data given as CSV text (tab, `;`, `,` or space separated, optional header row; decimal commas with `;` or tabs) or as columns: `OneVar`, `TwoVar` and the regressions `LinRegMx`, `LinRegBx`, `MedMed`, `QuadReg`, `CubicReg`, `QuartReg`, `PowerReg`, `ExpReg`, `LnReg`, `Logistic`, `LogisticD`, `SinReg`, with an optional frequency column. Returns `stat.results` as `results: [{name, value}]`, and for regressions the fitted `equation` (from `stat.RegEqn`), `r2` and `r`. `plot=True` adds a PNG of the data and the fitted curve (every curve point computed by the CAS). The data lists `mcpstatx`, `mcpstaty`, `mcpstatf` are put back afterwards; TI-Nspire's `stat.*` variables keep this call's results, as on a handheld |
 | `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants, spot_check=True)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `expand((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Expression steps that can't be settled that way get a numeric spot check (one more request): both lines evaluated at 12 random points, `probably_ok` or `broken` with a counterexample. Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| probably_ok \| broken \| undecided, check, cas, reason, residual?, spot_check?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
@@ -250,6 +252,7 @@ uv run --gui-script hotkey.py      # no console
 | Ctrl+Alt+Shift+L | solve/evaluate the LaTeX on the clipboard |
 | Ctrl+Alt+Shift+K | same, but the decimal value is the answer |
 | Ctrl+Alt+Shift+J | pick an action for it: factor, expand, solve, diff, integrate, limit, … |
+| Ctrl+Alt+Shift+T | the other way: TI-Nspire text on the clipboard becomes LaTeX |
 | Ctrl+Alt+Shift+Q | quit |
 
 The answer shows in a popup in the bottom-right corner (click it to close) and
@@ -264,14 +267,25 @@ need a variable (solve, diff, integrate, limit, taylor, zeros, …) ask for it n
 prefilled with the one the solver would pick (several for a system: `x, y`). limit
 also asks where the variable goes (default 0), taylor the order (default 5).
 
+**TI-Nspire to LaTeX.** Copy a result in TI-Nspire (select it in a Calculator or Notes
+math box, Ctrl+C), press Ctrl+Alt+Shift+T, and the clipboard holds it as LaTeX, ready to
+paste into Obsidian, Word's equation editor or a LaTeX document. This is a text
+conversion only: TI-Nspire isn't used (the bridge document needn't be open) and nothing
+is evaluated or simplified, so `2*(x+1)` stays `2 \left(x + 1\right)`. It reads
+TI-Nspire's private characters (ℯ, 𝑖, the ᴇ of `1.5ᴇ-3`), `√(`, `π`, `∞`, `≤ ≥ ≠`, units
+(`5.*_km`, `_°C`), `►` conversions, `→` stores, `:=`, the `|` operator, `30°`, lists,
+matrices, unevaluated `∫(`, `Σ(`, `limit(`, `piecewise(` and `x=2 or x=3`; several copied
+lines give one LaTeX line each. Text it can't read shows an error and the clipboard is
+left as it was. The same conversion is the `nspire_to_latex` MCP tool.
+
 **Tray icon.** A green √ in the notification area (it may be under the taskbar's ^
 arrow). Click it for the last 10 answers, newest first: clicking one copies it again,
 as LaTeX, or as TI-Nspire text with `--copy text`. The menu also has Solve clipboard,
-Pick an action, Clear history and Quit.
+Pick an action, TI-Nspire text to LaTeX, Clear history and Quit.
 
 Options: `--copy text` (TI-Nspire text instead of LaTeX), `--copy none` (leave the
 clipboard alone; a click in the tray menu still copies), `--hotkey ctrl+alt+f9`,
-`--approx-hotkey …`, `--actions-hotkey …`, `--quit-hotkey …` (a letter, digit or
+`--approx-hotkey …`, `--actions-hotkey …`, `--latex-hotkey …`, `--quit-hotkey …` (a letter, digit or
 F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--plain` (answers as text,
 matplotlib never loaded). Only one copy runs at a time.
 

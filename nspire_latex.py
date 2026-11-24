@@ -1973,6 +1973,8 @@ class _ResultLatex(LatexPrinter):
     def _print_Symbol(self, expr, style="plain"):
         if expr.name.startswith("_"):  # a TI-Nspire unit or constant: _m -> \mathrm{m}
             return unit_latex(decode_unit(expr.name))
+        if expr.name == "nsdegree":  # 30° in text copied from TI-Nspire (nspire_to_latex)
+            return r"{}^{\circ}"
         return super()._print_Symbol(expr, style)
 
 
@@ -2074,6 +2076,90 @@ def result_to_latex(text: str) -> str | None:
         return r" \quad\text{or}\quad ".join(alts)
     except Exception:
         return None
+
+
+# ================================================================ copied TI-Nspire text -> LaTeX
+
+# Characters TI-Nspire's display (or text pasted from it) may use where the
+# CAS's own result text has ASCII. Only spellings, no math.
+_COPIED_CHARS = str.maketrans({"·": "*", "×": "*", "÷": "/", "²": "^2", "³": "^3", " ": " ",
+                               " ": " ", " ": " "})
+# Operators the result converter doesn't read: each top-level piece is converted
+# on its own and joined with the LaTeX for the operator, in this order (|
+# binds loosest: x+1|x=2 is (x+1)|(x=2)).
+_COPIED_OPS = [("|", r" \mid "), ("→", r" \rightarrow "), (":=", " := "),
+               ("►", r" \blacktriangleright "), ("▸", r" \blacktriangleright "), ("▶", r" \blacktriangleright "),
+               ("@>", r" \blacktriangleright ")]
+_COPIED_WORDS = {"true": r"\text{true}", "false": r"\text{false}", "undef": r"\text{undef}", "done": r"\text{Done}"}
+_DEGREES = re.compile(r"(?<!_)°")  # an angle in degrees (30°), not a unit such as _°C
+_INV_POWER = re.compile(r"⁻¹(?!\()")  # A⁻¹ (an inverse); sin⁻¹( is left to result_to_latex
+NSPIRE_TEXT_MAX = 5000
+
+
+def _copied_piece(s: str, ops: list[tuple[str, str]]) -> str:
+    if not ops:
+        word = _COPIED_WORDS.get(s.strip().lower())
+        if word:
+            return word
+        out = result_to_latex(s)
+        if out is None:
+            raise LatexError(f"Couldn't convert {short_text(s)!r} to LaTeX.")
+        return out
+    (op, tex), rest = ops[0], ops[1:]
+    parts = [p.strip() for p in _split_top_keep_empty(s, op)]
+    if len(parts) > 1 and not all(parts):
+        raise LatexError(f"{op!r} needs something on both sides in {short_text(s)!r}.")
+    return tex.join(_copied_piece(p, rest) for p in parts)
+
+
+def _split_top_keep_empty(s: str, sep: str) -> list[str]:
+    """s split at sep outside brackets, keeping empty pieces (so 'a►' can be refused)."""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(s):
+        c = s[i]
+        if c in "{([":
+            depth += 1
+        elif c in "})]":
+            depth -= 1
+        elif depth == 0 and s.startswith(sep, i):
+            out.append(s[start:i])
+            i += len(sep)
+            start = i
+            continue
+        i += 1
+    out.append(s[start:])
+    return out
+
+
+def short_text(s: str, n: int = 60) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def nspire_to_latex(text: str) -> str:
+    r"""Text copied from TI-Nspire (a Calculator or Notes math box) -> LaTeX. Raises LatexError.
+
+    The same conversion as CAS answers (result_to_latex: parsed only to be
+    printed, never evaluated), plus what a person copies besides answers:
+    private-use characters and their readable look-alikes, ·/×/÷, ►
+    conversions (\blacktriangleright), → stores, := definitions, the | with
+    operator, 30° angles, A⁻¹. Several lines become one LaTeX line each.
+    """
+    if len(text) > NSPIRE_TEXT_MAX:
+        raise LatexError(f"The text is too long to convert ({len(text)} characters; at most {NSPIRE_TEXT_MAX}).")
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        raise LatexError("There is no text to convert.")
+    out = []
+    for line in lines:
+        t = line.translate(_COPIED_CHARS)
+        t = _INV_POWER.sub("^(-1)", t)
+        t = _DEGREES.sub("*nsdegree", t)
+        if t.lower().startswith("define "):
+            raise LatexError("Define … can't be converted; copy the function's expression instead.")
+        out.append(_copied_piece(t, _COPIED_OPS))
+    return "\n".join(out)
 
 
 def is_exact_numeric(text: str) -> bool:

@@ -92,6 +92,8 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
 - When the CAS returns an error, a plain-language cause and fix (nspire_errors.py) is added: to the error
   text of nspire_eval, nspire_latex and nspire_stats, to a failed nspire_eval_batch item's warnings, and to the warnings of
   nspire_check_steps and nspire_plot. It is a likely cause, not a diagnosis.
+- nspire_to_latex turns TI-Nspire text (a result the user pasted from TI-Nspire) into LaTeX without
+  TI-Nspire: a text conversion only, nothing is evaluated.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -227,6 +229,10 @@ class LatexResult(_LatexResult, total=False):
     approx: str | None
     approx_latex: str | None
     warnings: list[str] | None
+
+
+class ToLatexResult(TypedDict):
+    latex: str
 
 
 class CheckLine(TypedDict):
@@ -796,6 +802,25 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     if warnings:
         out["warnings"] = warnings
     return out
+
+
+@mcp.tool(annotations=_hints("Convert TI-Nspire text to LaTeX", readOnlyHint=True, idempotentHint=True))
+async def nspire_to_latex(text: str) -> ToLatexResult:
+    """Convert TI-Nspire math text (a result the user copied from TI-Nspire, or nspire_eval output) to LaTeX.
+
+    A text conversion only: TI-Nspire isn't used, the clipboard isn't touched and nothing is
+    evaluated or simplified (the CAS's form is kept: 2*(x+1) stays 2(x+1)). Reads TI-Nspire's
+    private-use characters and their look-alikes (ℯ, 𝑖, ᴇ), √(, π, ∞, ≤ ≥ ≠, units (5.*_km, _°C),
+    ► conversions, → stores, a:=..., the | operator, 30°, lists {…}, matrices [[1,2][3,4]], ∫( Σ( Π(,
+    limit(, derivative(, piecewise(, and "x=2 or x=3". Several lines give one LaTeX line each.
+    Text it can't read is an error, not a guess. Returns {latex}.
+    """
+    lx = await asyncio.to_thread(importlib.import_module, "nspire_latex")
+    try:
+        latex = await asyncio.to_thread(lx.nspire_to_latex, text)
+    except lx.LatexError as e:
+        raise ValueError(str(e)) from None
+    return {"latex": latex}
 
 
 def _steps_summary(steps: list[dict]) -> str:
