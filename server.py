@@ -26,7 +26,7 @@ import re
 import sys
 import threading
 from collections.abc import Collection
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -66,6 +66,9 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
 - nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
+- nspire_check_steps checks a worked solution line by line (LaTeX or TI-Nspire syntax): equal
+  expressions by simplify(before-after)=0, equations by comparing their solve() solutions. Each step
+  is ok, broken or undecided; report broken steps with the CAS output it gives. It stores nothing.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary.
 - Units are TI-Nspire's: 5_m, 9.81_m/_s^2, 2_mA*4.7_kΩ; convert with @> (5_km@>_m). Their names
@@ -190,6 +193,41 @@ class _LatexResult(TypedDict):
 class LatexResult(_LatexResult, total=False):
     approx: str | None
     approx_latex: str | None
+    warnings: list[str] | None
+
+
+class CheckLine(TypedDict):
+    line: int
+    source: str
+    nspire: str
+    kind: Literal["expression", "equation"]
+
+
+class _CheckStep(TypedDict):
+    step: int
+    from_line: int
+    to_line: int
+    kind: Literal["expression", "equation", "mixed"]
+    verdict: Literal["ok", "broken", "undecided"]
+    check: list[str]
+    cas: list[str]
+    reason: str
+
+
+class CheckStep(_CheckStep, total=False):
+    residual: str
+
+
+class _CheckStepsResult(TypedDict):
+    all_ok: bool
+    first_broken: int | None
+    summary: str
+    steps: list[CheckStep]
+    lines: list[CheckLine]
+
+
+class CheckStepsResult(_CheckStepsResult, total=False):
+    var: str | None
     warnings: list[str] | None
 
 
@@ -644,6 +682,83 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     return out
 
 
+def _steps_summary(steps: list[dict]) -> str:
+    broken = [s for s in steps if s["verdict"] == "broken"]
+    undecided = [s for s in steps if s["verdict"] == "undecided"]
+    if not broken and not undecided:
+        return f"All {len(steps)} step(s) check out on the CAS."
+    parts = []
+    if broken:
+        b = broken[0]
+        parts.append(f"Step {b['step']} (line {b['from_line']} to line {b['to_line']}) is broken: {b['reason']}")
+        if len(broken) > 1:
+            parts.append(f"{len(broken) - 1} later step(s) are broken too (an error carried forward may count once).")
+    if undecided:
+        parts.append("Undecided: step(s) " + ", ".join(str(s["step"]) for s in undecided)
+                     + "; check them another way.")
+    return " ".join(parts)
+
+
+@mcp.tool(annotations=_hints("Check a worked solution step by step on the TI-Nspire CAS",
+                             readOnlyHint=True, idempotentHint=True))
+async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | None = None,
+                             timeout_s: float = 10,
+                             constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False) -> CheckStepsResult:
+    """Check a worked solution one line at a time: does each line follow from the one before?
+
+    lines: the solution, one line per step, e.g. ["(x+1)^2-1", "= x^2+2x+1-1", "= x^2+2x"] or
+    ["2x+3=7", "2x=4", "x=2"]. latex=True (default): LaTeX, translated like nspire_latex (a leading
+    =, &=, \\iff or \\Rightarrow and a trailing \\\\ are dropped; x=2 \\lor x=3, x=2 \\text{ or } x=3 and
+    x=2,\\ x=3 are one answer with two solutions). latex=False: TI-Nspire syntax, as for nspire_eval.
+    var: what equations are solved for ("x", or "x,y" for a system); by default the first
+    equation's variable (x, y, z, t, ... first).
+
+    Each consecutive pair of lines is one step, checked by the CAS in one request:
+      two expressions: simplify((before)-(after)); 0 means ok. A nonzero polynomial or
+        rational residual means broken; any other residual (trig, logs, roots, decimals) is
+        undecided, since simplify can miss an identity.
+      two equations: solve(before,var) and solve(after,var); the same solutions mean ok, other
+        solutions mean broken (dividing by x and losing x=0 is broken even if the algebra looks
+        right). Real solutions, as solve gives them.
+      an expression next to an equation: undecided (can't be compared).
+    Returns {all_ok, first_broken (step number or null), summary, var, steps: [{step, from_line,
+    to_line, kind, verdict: ok|broken|undecided, check (CAS commands), cas (their results),
+    reason, residual?}], lines: [{line, source, nspire, kind}], warnings?}. Report the CAS output
+    as given; explain the mistake yourself. Variables stored in the document are substituted
+    (warnings say so). Nothing is stored: lines that store or define (:=, Define) are refused.
+    Bad input fails before the bridge is used, naming the line.
+    """
+    st = await asyncio.to_thread(importlib.import_module, "nspire_steps")
+    spec = await asyncio.to_thread(st.prepare, lines, latex, var, constants)  # ValueError names the line
+    cmds = st.commands(spec)
+    notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")
+
+    def work():
+        warnings = doc_warnings(bridge, ",".join(cmds), timeout_s, notes_mod)
+        steps = st.run(bridge, spec, timeout_s)
+        if bridge.last_timeout:
+            warnings.append(f"The CAS stopped answering partway: {bridge.last_timeout} Steps after that are undecided.")
+        return steps, warnings
+    log.info("check %d lines, %d request(s)", len(spec.lines), len(cmds))
+    steps, warnings = await asyncio.to_thread(bridge.session, work)
+    if spec.constants:
+        warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(spec.constants) + ".")
+    out_steps = [s.as_dict() for s in steps]
+    broken = next((s["step"] for s in out_steps if s["verdict"] == "broken"), None)
+    out: CheckStepsResult = {
+        "all_ok": all(s["verdict"] == "ok" for s in out_steps),
+        "first_broken": broken,
+        "summary": _steps_summary(out_steps),
+        "var": spec.var,
+        "steps": cast("list[CheckStep]", out_steps),
+        "lines": cast("list[CheckLine]", [{"line": i, "source": ln.source, "nspire": ln.nspire, "kind": ln.kind}
+                                           for i, ln in enumerate(spec.lines, 1)]),
+    }
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
 @mcp.tool(annotations=_hints("Plot functions with the TI-Nspire CAS", destructiveHint=False, idempotentHint=True))
 async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = None, var: str = "x",
                       x_min: float = -10, x_max: float = 10, y_min: float | None = None,
@@ -797,8 +912,13 @@ Worked solution:
 
 How to check it:
 1. Split the solution into numbered steps, one per line or transformation, quoting each step.
-2. For each step, write one or more TI-Nspire expressions that test whether it follows from
-   the step before, for example:
+2. Where consecutive lines are equal expressions (a chain of =) or equivalent equations (each
+   line rewrites the equation), check them with ONE nspire_check_steps call: pass the lines in
+   order (LaTeX, or latex=false for TI-Nspire syntax) and var if the unknown isn't obvious. Each
+   step comes back ok, broken (with the CAS output) or undecided. Check undecided steps, and
+   steps it can't take (derivatives, integrals, an expression next to an equation), with step 3.
+3. For the other steps, write one or more TI-Nspire expressions that test whether each follows
+   from the step before, for example:
    - equal expressions: simplify((before)-(after)) should give 0, or expand both sides;
    - equations: solve(before,x) and solve(after,x) should give the same solutions
      (a step that loses or gains solutions is an error even if the algebra looks right);
@@ -806,7 +926,7 @@ How to check it:
    - numbers: evaluate the student's arithmetic as written.
    Helper definitions (Define f(x)=..., a:=...) are fine: use names that look unlikely to be
    stored in the document.
-3. Send all checks in ONE nspire_eval_batch call with isolated=True, so the helper definitions
+   Send these checks in ONE nspire_eval_batch call with isolated=True, so the helper definitions
    aren't left in the user's document. If it refuses because a name is already stored as a
    function, pick another name. Read every item: ok, result or error, and warnings.
 4. Check the final answer on its own: solve or evaluate the original problem (nspire_eval or
@@ -823,7 +943,8 @@ check nspire_vars, and ask the user before deleting anything."""
 @mcp.prompt(title="Check a worked solution")
 def check_solution(problem: str, solution: str) -> str:
     """Check a student's worked solution step by step on the TI-Nspire CAS, with
-    nspire_eval_batch(isolated=True) so the checks leave the user's document as it was."""
+    nspire_check_steps for chains of equal expressions or equivalent equations and
+    nspire_eval_batch(isolated=True) for the rest, so the checks leave the user's document as it was."""
     return CHECK_SOLUTION.format(problem=problem.strip(), solution=solution.strip())
 
 

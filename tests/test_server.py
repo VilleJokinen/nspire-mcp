@@ -80,11 +80,11 @@ def tools() -> dict:
 def test_tool_list_and_annotations():
     ts = tools()
     assert set(ts) == {"nspire_status", "nspire_eval", "nspire_eval_batch", "nspire_vars", "nspire_clear",
-                       "nspire_latex", "nspire_notes", "nspire_plot"}
+                       "nspire_latex", "nspire_notes", "nspire_plot", "nspire_check_steps"}
     for t in ts.values():
         assert t.annotations is not None and t.annotations.title
         assert t.annotations.openWorldHint is False
-    for name in ("nspire_status", "nspire_vars"):
+    for name in ("nspire_status", "nspire_vars", "nspire_check_steps"):
         assert ts[name].annotations.readOnlyHint is True and ts[name].annotations.idempotentHint is True
     assert ts["nspire_clear"].annotations.destructiveHint is True
     for name in ("nspire_eval", "nspire_eval_batch", "nspire_latex", "nspire_notes", "nspire_clear", "nspire_plot"):
@@ -115,7 +115,7 @@ def test_notes_schema():
 def test_instructions():
     text = server.mcp.instructions
     for needle in ("nspire_bridge.tns", "clipboard", "nspire_vars", "nspire_clear", "nspire_notes",
-                   "isolated=True", "exact_mode", "nspire_plot"):
+                   "isolated=True", "exact_mode", "nspire_plot", "nspire_check_steps"):
         assert needle in text
 
 
@@ -132,7 +132,7 @@ def test_startup_imports_stay_light():
     # matplotlib, no keystroke module at import. A fresh interpreter, since other tests import them.
     code = ("import sys; sys.path.insert(0, '.'); import server; "
             "print(sorted(m for m in ('sympy', 'nspire_latex', 'nspire_notes', 'nspire_keys', 'matplotlib', "
-            "'nspire_plot') if m in sys.modules))")
+            "'nspire_plot', 'nspire_steps') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120,
                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     assert out.returncode == 0, out.stderr
@@ -334,6 +334,13 @@ def test_output_schemas():
     clear = ts["nspire_clear"].outputSchema
     assert props(clear) == ({"deleted", "errors"}, {"deleted", "errors"})
     assert props(clear, "ClearError") == ({"name", "error"}, {"name", "error"})
+    check = ts["nspire_check_steps"].outputSchema
+    assert props(check) == ({"all_ok", "first_broken", "summary", "steps", "lines", "var", "warnings"},
+                            {"all_ok", "first_broken", "summary", "steps", "lines"})
+    assert props(check, "CheckStep") == (
+        {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason", "residual"},
+        {"step", "from_line", "to_line", "kind", "verdict", "check", "cas", "reason"})
+    assert props(check, "CheckLine") == ({"line", "source", "nspire", "kind"},) * 2
     assert props(ts["nspire_latex"].outputSchema) == (
         {"action", "nspire", "result", "result_latex", "approx", "approx_latex", "warnings"},
         {"action", "nspire", "result", "result_latex"})
@@ -604,6 +611,61 @@ def test_latex_mode_override_covers_the_approx(monkeypatch):
     assert fake.modes_seen == {"π/4": (2, 1), "approx(π/4)": (2, 1)} and fake.modes == {2: 1, 5: 1}
 
 
+# ------------------------------------------------------------ nspire_check_steps
+
+def test_check_steps_through_the_handler(monkeypatch):
+    # checked against the outputSchema, as a client would see it
+    fake = use(monkeypatch, FakeBridge({
+        "getVarInfo()": NOTHING, "getMode(2)": RADIAN,
+        "simplify(((x+1)^2)-(x^2+2x+1))": (True, "0"),
+        "simplify((x^2+2x+1)-(x^2+1))": (True, "2*x"),
+    }))
+    r = call("nspire_check_steps", {"lines": ["(x+1)^2", "=x^2+2x+1", "=x^2+1"], "latex": False})
+    assert not r.isError, r.content
+    out = r.structuredContent
+    assert out["all_ok"] is False and out["first_broken"] == 2 and out["var"] is None
+    assert [s["verdict"] for s in out["steps"]] == ["ok", "broken"]
+    assert out["steps"][1]["residual"] == "2*x" and out["steps"][1]["cas"] == ["2*x"]
+    assert out["summary"].startswith("Step 2 (line 2 to line 3) is broken")
+    assert out["lines"][1] == {"line": 2, "source": "=x^2+2x+1", "nspire": "x^2+2x+1", "kind": "expression"}
+    assert fake.sessions == 1
+    assert fake.batches[-1] == ["simplify(((x+1)^2)-(x^2+2x+1))", "simplify((x^2+2x+1)-(x^2+1))"]
+
+
+def test_check_steps_latex_equations_and_warnings(monkeypatch):
+    fake = use(monkeypatch, FakeBridge({
+        "getVarInfo()": (True, '[["a","NUM","none",0]]'), "getMode(2)": RADIAN, "a": (True, "3"),
+        "solve(2*x + a=7,x)": (True, "x=2"), "solve(2*x=4,x)": (True, "x=2"), "solve(x=2,x)": (True, "x=2"),
+    }))
+    out = run(server.nspire_check_steps([r"2x+a=7", r"\Rightarrow 2x=4", r"x=2"]))
+    assert out["all_ok"] is True and out["first_broken"] is None and out["var"] == "x"
+    assert out["summary"] == "All 2 step(s) check out on the CAS."
+    assert any("a is stored in the document (a = 3)" in w for w in out["warnings"])
+    assert fake.batches[-1] == ["solve(2*x + a=7,x)", "solve(2*x=4,x)", "solve(x=2,x)"]
+
+
+def test_check_steps_bad_input_never_reaches_the_bridge(monkeypatch):
+    fake = use(monkeypatch, FakeBridge({}))
+    for lines in (["a:=5", "a"], ["x"]):
+        with pytest.raises(ValueError):
+            run(server.nspire_check_steps(lines, latex=False))
+    assert fake.calls == [] and fake.sessions == 0
+
+
+def test_check_steps_timeout_becomes_a_warning(monkeypatch):
+    class B(FakeBridge):
+        def eval_batch(self, exprs, timeout_s=5.0, raw=False):
+            if exprs[0].startswith("solve"):
+                self.last_timeout = "No reply from TI-Nspire."
+                return [{"expr": e, "ok": False, "error": "skipped: No reply from TI-Nspire."} for e in exprs]
+            self.last_timeout = None
+            return super().eval_batch(exprs, timeout_s, raw)
+    use(monkeypatch, B({"getVarInfo()": NOTHING, "getMode(2)": RADIAN}))
+    out = run(server.nspire_check_steps(["x^2=1", "x=1"], latex=False))
+    assert [s["verdict"] for s in out["steps"]] == ["undecided"]
+    assert any("stopped answering" in w for w in out["warnings"])
+
+
 # ------------------------------------------------------------ prompts
 
 def test_check_solution_prompt():
@@ -614,7 +676,7 @@ def test_check_solution_prompt():
                                                        "solution": "x=2"}))
     text = got.messages[0].content.text
     assert "Solve x^2=4 {real}" in text and "x=2" in text
-    assert "nspire_eval_batch" in text and "isolated=True" in text
+    assert "nspire_eval_batch" in text and "isolated=True" in text and "nspire_check_steps" in text
 # ------------------------------------------------------------ nspire_plot
 
 _SEQ_RE = re.compile(r"^seq\(approx\((.*)\),(\w+),([^,]+),([^,]+),([^,]+)\)$")
