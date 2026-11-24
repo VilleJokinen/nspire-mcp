@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nspire_steps  # noqa: E402
 from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
 from nspire_plot import Func, prepare, sample  # noqa: E402
@@ -119,6 +120,31 @@ def plot_check(report: "Report") -> None:
     report(not bad, "nspire_plot sampling", "; ".join(bad[:3]) or f"{got.requests} request(s), gaps where expected")
 
 
+# nspire_check_steps: (lines, latex?, var, expected verdict of each step)
+STEPS_CASES = [
+    (["(x+1)^2", "x^2+2*x+1", "x^2+1"], False, None, ["ok", "broken"]),
+    (["x^2=x", "x=1"], False, None, ["broken"]),  # dividing by x loses x=0
+    (["x+y=3 and x-y=1", "x=2 and y=1"], False, "x,y", ["ok"]),
+    ([r"x^2-5x+6=0", r"\iff (x-2)(x-3)=0", r"x=2 \lor x=3"], True, None, ["ok", "ok"]),
+    ([r"\sin^2 x+\cos^2 x", r"= 1"], True, None, ["ok"]),
+]
+
+
+def steps_check(report: "Report", specs: list) -> None:
+    """Check worked solutions with nspire_steps (inside the session): one batch each."""
+    for (lines, _latex, _var, want), spec in zip(STEPS_CASES, specs, strict=True):
+        name = f"check_steps {' | '.join(lines)}"[:42]
+        if isinstance(spec, Exception):
+            report(False, name, f"{type(spec).__name__}: {spec}")
+            continue
+        steps = nspire_steps.run(bridge, spec, 10)
+        if bridge.last_timeout:
+            raise BridgeTimeout(bridge.last_timeout)
+        got = [s.verdict for s in steps]
+        report(got == want, name, f"{got}  " + "; ".join(f"{c} -> {r}" for s in steps for c, r in zip(s.check, s.cas,
+                                                                                                    strict=False)))
+
+
 class Report:
     def __init__(self) -> None:
         self.failures = self.total = 0
@@ -180,7 +206,7 @@ def document_checks(report: Report, cas: bool) -> None:
            f"{after}, {MODE_FUNC} left: {left}" + "".join(f"; {w}" for w in warnings + warnings2))
 
 
-def cas_checks(report: Report, plans: list) -> list | None:
+def cas_checks(report: Report, plans: list, step_specs: list) -> list | None:
     """Everything that needs the bridge; runs inside bridge.session().
 
     Returns (latex, want, CasRun or exception) for the LaTeX cases, converted
@@ -222,8 +248,13 @@ def cas_checks(report: Report, plans: list) -> list | None:
 
     runs: list = []
     if not cas:
-        print("(non-CAS edition: LaTeX cases skipped)")
+        print("(non-CAS edition: LaTeX and check_steps cases skipped)")
         return runs
+    try:
+        steps_check(report, step_specs)
+    except BridgeTimeout as e:
+        report(False, "check_steps", str(e))
+        return None
     for latex, want, p in plans:
         if isinstance(p, Exception):
             runs.append((latex, want, p))
@@ -246,7 +277,13 @@ def main() -> int:
             plans.append((latex, want, plan(latex, action, **(opts[0] if opts else {}))))
         except Exception as e:
             plans.append((latex, want, e))
-    runs = bridge.session(lambda: cas_checks(report, plans))
+    step_specs = []
+    for lines, latex, var, _want in STEPS_CASES:
+        try:
+            step_specs.append(nspire_steps.prepare(lines, latex, var))
+        except Exception as e:
+            step_specs.append(e)
+    runs = bridge.session(lambda: cas_checks(report, plans, step_specs))
     if runs is None:
         return 1
     for latex, want, run in runs:  # LaTeX conversion after the session

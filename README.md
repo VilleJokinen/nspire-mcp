@@ -120,12 +120,13 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
 | `nspire_notes(steps, title, page_size="computer", graphs, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and saved to a file (see below) |
 | `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200, timeout_s=20)` | graph up to 8 functions: a PNG image plus a summary (y range, gaps, asymptotes, `warnings`). The CAS computes every point with `seq(approx(f),x,…)`; matplotlib only draws them. Undefined or non-real points are gaps, and lines aren't drawn across asymptotes. Stores nothing |
+| `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `simplify((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| broken \| undecided, check, cas, reason, residual?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
 `timeout_s` is limited to 0.5–120 s. `action` and `page_size` take only the values listed
 below; the tool schemas list them, and every tool says in its MCP annotations whether it
-only reads (`nspire_status`, `nspire_vars`) or can delete (`nspire_clear`). The tools that
+only reads (`nspire_status`, `nspire_vars`, `nspire_check_steps`) or can delete (`nspire_clear`). The tools that
 return objects publish an output schema, so clients get typed `structuredContent`.
 
 - **`isolated=True`** is for scratch work: every name the call stores or deletes
@@ -142,7 +143,12 @@ return objects publish an output schema, so clients get typed `structuredContent
   anything runs.
 
 There's also an MCP prompt, `check_solution(problem, solution)`, that has Claude check a
-student's worked solution step by step with `nspire_eval_batch(..., isolated=True)`.
+student's worked solution step by step with `nspire_check_steps` (chains of equal expressions,
+equivalent equations) and `nspire_eval_batch(..., isolated=True)` for the other checks.
+
+`nspire_check_steps` only reports what the CAS shows: a nonzero residual that is a polynomial or
+rational expression makes a step broken, while one with trig, logs, roots or decimals is
+undecided (simplify can miss an identity), as is an expression next to an equation.
 
 ### Worked solutions on a Notes page
 

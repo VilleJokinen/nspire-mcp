@@ -97,9 +97,14 @@ Call `nspire_status()` once at the start of a math session. It returns
   one call, then evaluate with the mode in the next. If the call fails saying the
   expression runs inside a temporary function, work in the document's mode
   (`nspire_status` shows it) or ask the user to change it.
+- `nspire_check_steps(lines)` checks a worked solution line by line (LaTeX, or
+  `latex=False` for TI-Nspire syntax): equal expressions by
+  `simplify((before)-(after))`, equations by comparing their `solve()` solutions.
+  Each step is ok, broken (with the CAS output) or undecided; check undecided
+  ones another way. It stores nothing.
 - The prompt `check_solution(problem, solution)` walks through checking a
-  student's worked solution step by step with `nspire_eval_batch(...,
-  isolated=True)`.
+  student's worked solution step by step with `nspire_check_steps` and
+  `nspire_eval_batch(..., isolated=True)`.
 
 ### `nspire_eval`
 

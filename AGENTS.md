@@ -164,6 +164,15 @@ hotkey.
   `breaks()` finds asymptote jumps (not drawn), and `render_png()` imports matplotlib and
   draws after the session. The CAS computes every value: never compute points in Python.
   The tool reuses `doc_warnings` with `ignore={var}` (seq binds the plot variable).
+- `nspire_steps.py`: the `nspire_check_steps` tool's work, without pywin32 or SymPy at import
+  (`nspire_latex` is imported only for LaTeX lines). `prepare()` reads the lines offline (a leading
+  `=`, `&=`, `\iff`, `⇒` is dropped; `x=2 \lor x=3` and `x=2,\ x=3` become `solve(x=2 or x=3,x)`;
+  stores and definitions are refused), `commands()` lists one `solve(line,var)` per equation line and
+  one `simplify((before)-(after))` per pair of expression lines, `run()` sends them in one `eval_batch`
+  inside `bridge.session()`, and `judge()` reads the replies. The CAS decides: Python only compares
+  the CAS's own solution strings (split at top-level ` or `) and classifies a nonzero residual
+  (`residual_is_decided`: polynomial or rational means broken, anything else undecided). Undecided
+  expression steps keep `residual` and `variables`, for a later numeric spot check on the CAS.
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
 - `nspire_notes.py` / `nspire_keys.py`: Notes-page builder. It works by keystrokes:
   Ctrl+N, `6` (Add Notes), text typed as Unicode, Ctrl+M for a math box, the
