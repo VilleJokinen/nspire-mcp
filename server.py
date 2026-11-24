@@ -67,8 +67,11 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
 - nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
   tell them not to type or click while it runs.
 - nspire_check_steps checks a worked solution line by line (LaTeX or TI-Nspire syntax): equal
-  expressions by simplify(before-after)=0, equations by comparing their solve() solutions. Each step
-  is ok, broken or undecided; report broken steps with the CAS output it gives. It stores nothing.
+  expressions by expand(before-after)=0, equations by comparing their solve() solutions. When
+  that can't settle an expression step (trig, logs, roots), the CAS evaluates both lines at random
+  points: probably_ok (they agree; not a proof) or broken with a counterexample. Each step is ok,
+  probably_ok, broken or undecided; report broken steps with the CAS output it gives. It stores
+  nothing. To test whether two expressions are equal, pass them as two lines.
 - nspire_plot graphs functions as an image; the CAS computes every point. Describe the graph from
   its summary.
 - Units are TI-Nspire's: 5_m, 9.81_m/_s^2, 2_mA*4.7_kΩ; convert with @> (5_km@>_m). Their names
@@ -203,12 +206,27 @@ class CheckLine(TypedDict):
     kind: Literal["expression", "equation"]
 
 
+class SpotCounterexample(TypedDict):
+    at: str
+    command: str
+    before: str
+    after: str
+    difference: str
+
+
+class SpotCheck(TypedDict):
+    tried: int
+    usable: int
+    agreed: int
+    counterexample: SpotCounterexample | None
+
+
 class _CheckStep(TypedDict):
     step: int
     from_line: int
     to_line: int
     kind: Literal["expression", "equation", "mixed"]
-    verdict: Literal["ok", "broken", "undecided"]
+    verdict: Literal["ok", "probably_ok", "broken", "undecided"]
     check: list[str]
     cas: list[str]
     reason: str
@@ -216,6 +234,7 @@ class _CheckStep(TypedDict):
 
 class CheckStep(_CheckStep, total=False):
     residual: str
+    spot_check: SpotCheck
 
 
 class _CheckStepsResult(TypedDict):
@@ -685,9 +704,15 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
 def _steps_summary(steps: list[dict]) -> str:
     broken = [s for s in steps if s["verdict"] == "broken"]
     undecided = [s for s in steps if s["verdict"] == "undecided"]
-    if not broken and not undecided:
+    probably = [s for s in steps if s["verdict"] == "probably_ok"]
+    if not broken and not undecided and not probably:
         return f"All {len(steps)} step(s) check out on the CAS."
     parts = []
+    if probably and not broken and not undecided:
+        parts.append("No step is wrong.")
+    if probably:
+        parts.append("Probably ok (equal at random points on the CAS, not proven): step(s) "
+                     + ", ".join(str(s["step"]) for s in probably) + ".")
     if broken:
         b = broken[0]
         parts.append(f"Step {b['step']} (line {b['from_line']} to line {b['to_line']}) is broken: {b['reason']}")
@@ -703,7 +728,8 @@ def _steps_summary(steps: list[dict]) -> str:
                              readOnlyHint=True, idempotentHint=True))
 async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | None = None,
                              timeout_s: float = 10,
-                             constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False) -> CheckStepsResult:
+                             constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False,
+                             spot_check: bool = True) -> CheckStepsResult:
     """Check a worked solution one line at a time: does each line follow from the one before?
 
     lines: the solution, one line per step, e.g. ["(x+1)^2-1", "= x^2+2x+1-1", "= x^2+2x"] or
@@ -714,18 +740,28 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
     equation's variable (x, y, z, t, ... first).
 
     Each consecutive pair of lines is one step, checked by the CAS in one request:
-      two expressions: simplify((before)-(after)); 0 means ok. A nonzero polynomial or
-        rational residual means broken; any other residual (trig, logs, roots, decimals) is
-        undecided, since simplify can miss an identity.
+      two expressions: expand((before)-(after)); 0 means ok (TI-Nspire has no simplify(); it
+        simplifies every result itself). A nonzero polynomial or rational residual means broken;
+        any other residual (trig, logs, roots, decimals) is undecided, since the CAS can miss an
+        identity. Then (spot_check=True, the default)
+        the CAS evaluates both lines and their difference at 12 seeded random points,
+        approx({before,after,(before)-(after)}|x=...), all in one more request: agreeing at
+        every point it can evaluate (at least 4; relative tolerance 1e-8) is probably_ok, a
+        point where they differ is broken with spot_check.counterexample. Points where a line
+        is undefined, non-real or an error are skipped; too few left stays undecided.
       two equations: solve(before,var) and solve(after,var); the same solutions mean ok, other
         solutions mean broken (dividing by x and losing x=0 is broken even if the algebra looks
         right). Real solutions, as solve gives them.
       an expression next to an equation: undecided (can't be compared).
     Returns {all_ok, first_broken (step number or null), summary, var, steps: [{step, from_line,
-    to_line, kind, verdict: ok|broken|undecided, check (CAS commands), cas (their results),
-    reason, residual?}], lines: [{line, source, nspire, kind}], warnings?}. Report the CAS output
-    as given; explain the mistake yourself. Variables stored in the document are substituted
-    (warnings say so). Nothing is stored: lines that store or define (:=, Define) are refused.
+    to_line, kind, verdict: ok|probably_ok|broken|undecided, check (CAS commands), cas (their
+    results), reason, residual?, spot_check?: {tried, usable, agreed, counterexample: {at,
+    command, before, after, difference} | null}}], lines: [{line, source, nspire, kind}],
+    warnings?}. all_ok is true only if every step is ok (probably_ok isn't proven). A
+    counterexample can mean the step holds only on a smaller domain (√(x^2)=x for x>0): say so
+    if the problem restricts x. To test whether two expressions are equal, pass them as two
+    lines. Report the CAS output as given; explain the mistake yourself. Variables stored in
+    the document are substituted (warnings say so). Nothing is stored: lines that store or define (:=, Define) are refused.
     Bad input fails before the bridge is used, naming the line.
     """
     st = await asyncio.to_thread(importlib.import_module, "nspire_steps")
@@ -735,7 +771,7 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
 
     def work():
         warnings = doc_warnings(bridge, ",".join(cmds), timeout_s, notes_mod)
-        steps = st.run(bridge, spec, timeout_s)
+        steps = st.run(bridge, spec, timeout_s, spot_check)
         if bridge.last_timeout:
             warnings.append(f"The CAS stopped answering partway: {bridge.last_timeout} Steps after that are undecided.")
         return steps, warnings
@@ -919,7 +955,8 @@ How to check it:
    steps it can't take (derivatives, integrals, an expression next to an equation), with step 3.
 3. For the other steps, write one or more TI-Nspire expressions that test whether each follows
    from the step before, for example:
-   - equal expressions: simplify((before)-(after)) should give 0, or expand both sides;
+   - equal expressions: (before)-(after) should give 0 (TI-Nspire simplifies by itself and has
+     no simplify(); try expand(...), or tExpand(...) for trig);
    - equations: solve(before,x) and solve(after,x) should give the same solutions
      (a step that loses or gains solutions is an error even if the algebra looks right);
    - derivatives and integrals: derivative(f,x) or ∫(f,x), compared with the student's;

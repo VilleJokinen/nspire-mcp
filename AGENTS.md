@@ -168,11 +168,22 @@ hotkey.
   (`nspire_latex` is imported only for LaTeX lines). `prepare()` reads the lines offline (a leading
   `=`, `&=`, `\iff`, `⇒` is dropped; `x=2 \lor x=3` and `x=2,\ x=3` become `solve(x=2 or x=3,x)`;
   stores and definitions are refused), `commands()` lists one `solve(line,var)` per equation line and
-  one `simplify((before)-(after))` per pair of expression lines, `run()` sends them in one `eval_batch`
+  one `expand((before)-(after))` per pair of expression lines (TI-Nspire has no `simplify()`: it comes
+  back unevaluated), `run()` sends them in one `eval_batch`
   inside `bridge.session()`, and `judge()` reads the replies. The CAS decides: Python only compares
   the CAS's own solution strings (split at top-level ` or `) and classifies a nonzero residual
   (`residual_is_decided`: polynomial or rational means broken, anything else undecided). Undecided
-  expression steps keep `residual` and `variables`, for a later numeric spot check on the CAS.
+  expression steps then get the numeric spot check (`run(..., spot_check=True)`): `spot_plans()` picks
+  12 points per step with `spot_points()` (seeded from the two lines, so reproducible: positive
+  four-digit decimals first, then negative ones, small integers, larger values; each variable its
+  own value), `spot_command()` asks `approx({before,after,(before)-(after)}|x=... and y=...)`, all
+  steps' points in one second `eval_batch`, and `spot_judge()` reads the replies: a point whose
+  three values aren't real numbers (error, undef, 𝑖, ∞, a name left over) is skipped; `agree()`
+  compares the CAS's own difference with the values (relative `SPOT_RTOL`). One disagreeing point
+  makes the step broken with `spot_check.counterexample`; `SPOT_NEEDED` agreeing points (1 without
+  variables) make it `probably_ok`; fewer leave it undecided. Python never computes a value.
+  Skipped after a timeout in the first batch. Not offered on `nspire_eval`/`nspire_latex`: two lines
+  to `nspire_check_steps` is the way to test an identity.
 - `hotkey.py` / `launch.py`: the hotkey app and the shortcut's entry point.
 - `nspire_notes.py` / `nspire_keys.py`: Notes-page builder. It works by keystrokes:
   Ctrl+N, `6` (Add Notes), text typed as Unicode, Ctrl+M for a math box, the
