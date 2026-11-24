@@ -419,13 +419,18 @@ def _label(text: str, limit: int = 60) -> str:
     return " " + t if t.startswith("_") else t   # a leading _ hides a legend entry
 
 
-def render_png(spec: PlotSpec, got: Sampled) -> bytes:
-    """Draw the sampled values. Imports matplotlib (slow the first time)."""
+def render_png(spec: PlotSpec, got: Sampled, points: tuple[list[float], list[float]] | None = None,
+               title: str | None = None, xlabel: str | None = None, ylabel: str | None = None) -> bytes:
+    """Draw the sampled values. Imports matplotlib (slow the first time).
+
+    points: data points (xs, ys) drawn as dots under the curves (nspire_stats' data; given, not
+    computed). title replaces the single function's label as the title."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
     g = spec.grid
-    lo, hi, _ = view_limits(got.ys, spec.y_min, spec.y_max)
+    extra: list[list[float | None]] = [list(points[1])] if points else []
+    lo, hi, _ = view_limits(got.ys + extra, spec.y_min, spec.y_max)
     xs = [g.x(i) for i in range(g.n)]
     nan = float("nan")
 
@@ -445,6 +450,9 @@ def render_png(spec: PlotSpec, got: Sampled) -> bytes:
     if g.x_min < 0 < g.x_max:
         ax.axvline(0, color=AXIS, linewidth=1, zorder=1)
 
+    if points:
+        ax.scatter(points[0], points[1], s=22, color=INK_2, edgecolors=SURFACE, linewidths=0.6, zorder=4,
+                   label="data")
     for k, (func, ys) in enumerate(zip(spec.funcs, got.ys, strict=True)):
         cut = set(breaks(ys, lo, hi))
         px, py = [], []
@@ -459,10 +467,13 @@ def render_png(spec: PlotSpec, got: Sampled) -> bytes:
 
     ax.set_xlim(g.x_min, g.x_max)
     ax.set_ylim(lo, hi)
-    ax.set_xlabel(spec.var, color=INK_2, fontsize=10)
-    if len(spec.funcs) == 1:
-        ax.set_title(_label(spec.funcs[0].command, 80), loc="left", color=INK, fontsize=11)
-    else:
+    ax.set_xlabel(_label(xlabel) if xlabel else spec.var, color=INK_2, fontsize=10)
+    if ylabel:
+        ax.set_ylabel(_label(ylabel), color=INK_2, fontsize=10)
+    if title is not None or len(spec.funcs) == 1:
+        ax.set_title(_label(title if title is not None else spec.funcs[0].command, 80), loc="left", color=INK,
+                     fontsize=11)
+    elif spec.funcs:
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=min(len(spec.funcs), 4), frameon=False,
                   fontsize=9, labelcolor=INK_2, handlelength=1.6)
     fig.text(0.99, 0.01, "values: TI-Nspire CAS", ha="right", va="bottom", color=MUTED, fontsize=7)

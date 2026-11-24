@@ -4,7 +4,7 @@ No imports beyond the standard library, so server.py and the tool modules can us
 at startup. The codes and their TI names are the ones bridge.lua reports ("error 910
 (syntax error)"), taken from the Reference Guide's "Error Codes and Messages" list;
 the causes and fixes are written here. Codes not in HINTS get no explanation.
-Codes seen on the real CAS through the bridge: 140, 230, 240, 550, 800, 910, 930, 940.
+Codes seen on the real CAS through the bridge: 140, 230, 235, 240, 260, 550, 800, 910, 930, 940.
 """
 from __future__ import annotations
 
@@ -40,11 +40,15 @@ _TABLE: dict[int, tuple[str, str, str]] = {
           "Give it a value first, use another name, or clear it with DelVar."),
     230: ("dimension", "A list or matrix index or size doesn't fit the operation (for example multiplying matrices whose inner sizes differ).",
           "Check the sizes: matrix product needs columns of the left = rows of the right."),
+    235: ("dimension error: not enough elements in the lists",
+          "A statistics command got too few data points (QuadReg needs at least 3, CubicReg 4, QuartReg 5).",
+          "Give more data points, or choose a simpler fit."),
     240: ("dimension mismatch", "Lists or matrices of different sizes were combined element by element.",
           "Make the lists or matrices the same size."),
     250: ("divide by zero", "Something was divided by zero.", "Change the divisor, or restrict the input so it isn't zero."),
     260: ("domain error", "An argument is outside the function's domain.",
-          "Check the argument's range (for example arcsin needs -1 to 1, ln needs a positive number)."),
+          "Check the argument's range (for example arcsin needs -1 to 1, ln needs a positive number; PowerReg needs "
+          "x and y > 0, LnReg x > 0, ExpReg y > 0)."),
     270: ("duplicate variable name", "The same name appears twice where each must be unique.", "Use different names."),
     295: ("excessive iteration", "An iterative calculation didn't finish within its limit.",
           "Use a simpler problem, a closer starting guess, or fewer iterations."),

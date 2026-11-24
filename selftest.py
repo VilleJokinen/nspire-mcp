@@ -7,14 +7,15 @@
 #     "antlr4-python3-runtime==4.11.*",
 # ]
 # ///
-"""Check the bridge, the LaTeX translator and plot sampling end to end:  uv run --script selftest.py
+"""Check the bridge, the LaTeX translator, plot sampling and statistics end to end:  uv run --script selftest.py
 
 Needs TI-Nspire open with nspire_bridge.tns on the bridge page.
 On the non-CAS edition, symbolic cases pass if they fail cleanly with an error.
 LaTeX cases need the CAS and are skipped without it. Variables stored in the
 open document (e.g. x:=3) can change answers; DelVar them if a case fails oddly.
 It also reads the mode settings, stores and deletes brgselftest (a variable of its
-own), and evaluates once each in another angle mode and in Approximate mode (the
+own) and the lists mcpstatx, mcpstaty, mcpstatf (nspire_stats' data; TI-Nspire's stat.*
+variables keep the last statistics run), and evaluates once each in another angle mode and in Approximate mode (the
 per-call override behind nspire_eval's angle / exact_mode, which runs setMode inside a
 temporary function), then checks the document's settings didn't change.
 """
@@ -23,6 +24,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nspire_data  # noqa: E402
+import nspire_stats  # noqa: E402
 import nspire_steps  # noqa: E402
 from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
 from nspire_latex import format_answer, plan, run_plan  # noqa: E402
@@ -155,6 +158,50 @@ def steps_check(report: "Report", specs: list) -> None:
                                                            for c, r in zip(s.check, s.cas, strict=False)]))
 
 
+# nspire_stats: (command, columns, {stat.results name: expected number}, expected equation or None).
+# An expected value of None: the command must fail with that TI error code instead (see STATS_ERROR).
+STATS_CASES = [
+    ("LinRegMx", [[1, 2, 3, 4], [2, 4, 5, 8]], {"m": 1.9, "b": 0.0, "r²": 0.962666666667, "r": 0.981155781039},
+     "1.9*x"),
+    ("OneVar", [[1, 2, 3, 4, 10]], {"x̄": 4.0, "sx := sₙ₋₁x": 3.53553390593, "n": 5.0, "MedianX": 3.0}, None),
+    ("OneVar", [[1, 2, 3], [1, 2, 1]], {"x̄": 2.0, "n": 4.0}, None),  # with frequencies
+    ("CubicReg", [[1, 2, 3], [1, 2, 3]], {}, "error 235"),            # too few points
+]
+
+
+def stats_check(report: "Report") -> None:
+    """Run TI-Nspire's statistics commands through nspire_stats (inside the session). Stores
+    the lists mcpstatx, mcpstaty, mcpstatf and deletes them again (refuses if they exist)."""
+    names = {nspire_stats.X_LIST, nspire_stats.Y_LIST, nspire_stats.F_LIST}
+    if names & _names():
+        report(False, "nspire_stats", f"{', '.join(sorted(names & _names()))} already stored: DelVar, then run again")
+        return
+    try:
+        for command, cols, want, eq in STATS_CASES:
+            name = f"nspire_stats {command} {cols}"[:42]
+            table = nspire_data.parse_table(columns=cols)
+            spec = nspire_stats.prepare(command, table, freq_column=2 if command == "OneVar" and len(cols) > 1 else None)
+            try:
+                out = nspire_stats.result(spec, nspire_stats.run(bridge, spec, 10))
+            except ValueError as e:
+                report(eq is not None and eq in str(e) and not want, name, str(e))
+                continue
+            got = {r["name"]: r["value"] for r in out["results"]}
+            bad = []
+            for k, v in want.items():
+                try:
+                    ok = abs(float(norm(got[k])) - v) <= 1e-9 * max(1, abs(v))
+                except (KeyError, ValueError):
+                    ok = False
+                if not ok:
+                    bad.append(f"{k}={got.get(k)!r}, want {v}")
+            if eq is not None and not (out.get("equation") or "").startswith(eq):
+                bad.append(f"equation {out.get('equation')!r}, want {eq}...")
+            report(not bad, name, "; ".join(bad) or f"{out['title']}: {out.get('equation') or len(got)}")
+    finally:
+        bridge.eval_batch([f"DelVar {n}" for n in sorted(names)], 5)
+
+
 class Report:
     def __init__(self) -> None:
         self.failures = self.total = 0
@@ -254,6 +301,12 @@ def cas_checks(report: Report, plans: list, step_specs: list) -> list | None:
         plot_check(report)
     except BridgeTimeout as e:
         report(False, "nspire_plot sampling", str(e))
+        return None
+
+    try:
+        stats_check(report)
+    except BridgeTimeout as e:
+        report(False, "nspire_stats", str(e))
         return None
 
     runs: list = []
