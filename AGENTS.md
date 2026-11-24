@@ -143,6 +143,17 @@ hotkey.
   `LatexError`; the hotkey then leaves the clipboard alone. Cases in `tests/test_nspire_to_latex.py`.
   What TI-Nspire's own Ctrl+C puts on the clipboard (formats, `·` or `*`) hasn't been checked on
   the real app: the cases are the CAS's text through the bridge plus likely display spellings.
+- Decimal commas (`nspire_latex.py`): `_braced_commas()` turns `3{,}5` into `3.5` in every mode (and refuses a
+  `{,}` not between digits). `plan(..., decimal_comma=)` / `parse()` / `_Pre(decimal_comma)` pick the rest:
+  `None` (default) keeps `_decimal_commas()` (a plain `1,5` is a decimal only at top level and directly in `{}`),
+  `False` never reads a plain comma as a decimal, `True` is decimal-comma mode, `_decimal_commas_strict()`:
+  digit,digit anywhere is a decimal, `;` inside any bracket becomes `,` (top-level `;` still separates
+  equations), runs such as `1,2,3` or `1.5,2` raise `LatexError` (ambiguous, so refused). The tools pass a
+  `decimal_comma` option (`nspire_latex`, `nspire_check_steps` LaTeX lines; hotkey `--decimal-comma` or
+  `NSPIRE_DECIMAL_COMMA=1`, which also converts the Ctrl+Alt+Shift+T output). `format_answer(run, decimal_comma)`
+  writes `result`/`approx` and their LaTeX with `to_decimal_comma()` (`1.5` becomes `1,5`, `1{,}5` in LaTeX,
+  list commas become `;`); `nspire` (the command) is never changed. `nspire_plot` and `nspire_stats` take
+  no LaTeX; `nspire_data.parse_table` already reads decimal commas with `;` or tabs. Notes steps use the default.
 - `server.py`: MCP tools. Keep heavy imports (SymPy) lazy: the client times out a
   server that is slow to answer `initialize` (`tests/test_server.py` checks that
   startup imports neither SymPy, matplotlib nor the Notes and plot modules). It also holds the server

@@ -287,7 +287,8 @@ Pick an action, TI-Nspire text to LaTeX, Clear history and Quit.
 Options: `--copy text` (TI-Nspire text instead of LaTeX), `--copy none` (leave the
 clipboard alone; a click in the tray menu still copies), `--hotkey ctrl+alt+f9`,
 `--approx-hotkey …`, `--actions-hotkey …`, `--latex-hotkey …`, `--quit-hotkey …` (a letter, digit or
-F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--plain` (answers as text,
+F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--decimal-comma` (or `NSPIRE_DECIMAL_COMMA=1`: the LaTeX is read and the answer
+written with decimal commas and `;` as separator, also for the Ctrl+Alt+Shift+T conversion), `--plain` (answers as text,
 matplotlib never loaded). Only one copy runs at a time.
 
 ### Session log
@@ -431,9 +432,19 @@ argument appears on the right, which defines `T`; for `x`, `y`, `z`, `t` write
 `x(t):=…`); accents are separate variables (`\bar x` is `xbar`, `x^*` is `xstar`,
 `\hat x` is `xhat`), while `\mathbf` is only styling (unless next to `\cdot`/`\times`) and `\vec{u}` is the name `u`; a
 script without braces is one character, as LaTeX shows it (`\sum_{k=1}^5 2k` has the
-upper limit 5, `x^12` is `x^1*2`); `1,5` between digits
-is a decimal comma, also inside `{}` groups such as `\frac{1,5}{2}`, but not inside
-`()`, `[]` or `\{\}`, where commas separate arguments (`f(1,5)`, `\gcd(12,18)`).
+upper limit 5, `x^12` is `x^1*2`).
+**Decimal commas:** `3{,}5` is the decimal 3.5 in every mode. By default a plain `1,5`
+between digits is a decimal at top level and inside `{}` groups such as `\frac{1,5}{2}`, but not
+inside `()`, `[]` or `\{\}`, where commas separate arguments (`f(1,5)`, `\gcd(12,18)`).
+For European notation pass `decimal_comma=true` (`nspire_latex`, `nspire_check_steps`): then
+digit,digit with nothing between is a decimal anywhere (`f(1,5)` is `f(1.5)`), `;` separates
+arguments and list items (`f(1;5)`, `\{1;2;3\}`; at top level `;` separates equations as before),
+a comma with a space next to it still separates (`x=2, x=3`), and input that could be read both
+ways (`1,2,3`, `1,500,000`, `1.5,2`) is refused with a message instead of guessed.
+`decimal_comma=false` never reads a plain comma as a decimal (only `3{,}5`). In decimal-comma mode the
+answer is written the same way (`result` `1,5`, `result_latex` `1{,}5`, lists `{1,5;2}`; the
+`nspire` command that ran keeps decimal points). CSV for `nspire_stats` already reads
+decimal commas with `;` or tabs; `nspire_plot` and `nspire_eval` take TI-Nspire syntax, not LaTeX.
 Exact numeric answers also get an `approx`. Variables stored in the open document
 (e.g. `a:=5`) are substituted, so check with `nspire_vars` (or `DelVar a`) if answers
 look odd.

@@ -511,6 +511,12 @@ _ANGLE_DOC = Field(description="Angle mode for this call only; the document's se
 _CONSTANTS_DOC = Field(description='Symbols to read as physical constants (TI-Nspire\'s _g, _c, ...), e.g. '
                                     '["g", "c", "k_B"]; true for all of g, c, h, k_B, N_A, R, G, \\varepsilon_0, '
                                     '\\mu_0, m_e, m_p, m_n, q_e. Leave out to keep every symbol a variable.')
+_DECIMAL_COMMA_DOC = Field(description=(
+    "LaTeX only. Leave out for the default: 1,5 between digits is a decimal at top level and in {} groups "
+    "only; 3{,}5 is always a decimal. true = decimal-comma mode: digit,digit anywhere is a decimal "
+    "(f(1,5) is f(1.5)), ';' separates list items and arguments (f(1;5)), 1,2,3 is refused as ambiguous, and "
+    "answers are written with decimal commas (1,5; 1{,}5 in LaTeX; lists {1,5;2}). false = a plain comma is "
+    "never a decimal."))
 _EXACT_DOC = Field(description="Auto/Exact/Approximate mode for this call only; the document's setting isn't "
                                "changed. Not for expressions that store or define. Leave out to use the document's.")
 
@@ -770,7 +776,8 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
                        isolated: Annotated[bool, _ISOLATED_DOC] = False,
                        angle: Annotated[AngleMode | None, _ANGLE_DOC] = None,
                        exact_mode: Annotated[ExactMode | None, _EXACT_DOC] = None,
-                       constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False) -> LatexResult:
+                       constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False,
+                       decimal_comma: Annotated[bool | None, _DECIMAL_COMMA_DOC] = None) -> LatexResult:
     """Solve or evaluate a LaTeX problem on the TI-Nspire CAS; returns the answer as text and LaTeX.
 
     Accepts $…$ / \\[…\\] delimiters, \\frac, \\sqrt[n]{}, \\int (with limits, \\,dx or \\mathrm{d}x),
@@ -823,7 +830,7 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     log.info("latex %r action=%s", latex, action)
     try:
         # translate first: bad LaTeX fails without touching the clipboard
-        p = await asyncio.to_thread(lx.plan, latex, action, var, order, point, constants)
+        p = await asyncio.to_thread(lx.plan, latex, action, var, order, point, constants, decimal_comma)
     except lx.LatexError as e:
         session_log.record("nspire_latex", latex=latex, error=str(e))
         raise ValueError(str(e)) from None
@@ -851,7 +858,7 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
     if p.parsed.constants:
         warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(p.parsed.constants) + ".")
     # LaTeX conversion after the session, with the user's clipboard already restored
-    out = await asyncio.to_thread(lx.format_answer, run)
+    out = await asyncio.to_thread(lx.format_answer, run, bool(decimal_comma))
     if warnings:
         out["warnings"] = warnings
     session_log.record("nspire_latex", note=opts, latex=latex, command=out["nspire"], result=out["result"],
@@ -909,7 +916,8 @@ def _steps_summary(steps: list[dict]) -> str:
 async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | None = None,
                              timeout_s: float = 10,
                              constants: Annotated[list[str] | bool, _CONSTANTS_DOC] = False,
-                             spot_check: bool = True) -> CheckStepsResult:
+                             spot_check: bool = True,
+                             decimal_comma: Annotated[bool | None, _DECIMAL_COMMA_DOC] = None) -> CheckStepsResult:
     """Check a worked solution one line at a time: does each line follow from the one before?
 
     lines: the solution, one line per step, e.g. ["(x+1)^2-1", "= x^2+2x+1-1", "= x^2+2x"] or
@@ -945,7 +953,7 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
     Bad input fails before the bridge is used, naming the line.
     """
     st = await asyncio.to_thread(importlib.import_module, "nspire_steps")
-    spec = await asyncio.to_thread(st.prepare, lines, latex, var, constants)  # ValueError names the line
+    spec = await asyncio.to_thread(st.prepare, lines, latex, var, constants, decimal_comma)  # ValueError names the line
     cmds = st.commands(spec)
     notes_mod = await asyncio.to_thread(_import_optional, "nspire_notes")
 

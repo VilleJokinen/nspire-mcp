@@ -58,6 +58,8 @@ LATEX_CASES = [
     # sent unevaluated, so the CAS (not Python floats) does the arithmetic
     (r"0.1+0.2", "auto", "0.3"),
     (r"\frac{1,5}{2}", "auto", "0.75"),
+    (r"1{,}5\cdot10^{3}", "auto", "1500."),
+    (r"\max(1,5;\ 2)", "auto", "2", {"decimal_comma": True}),
     (r"\sqrt{8}", "auto", "2*√(2)"),
     (r"e^{i\pi}", "auto", "-1"),
     # x is the dependent variable here, so t is the independent one

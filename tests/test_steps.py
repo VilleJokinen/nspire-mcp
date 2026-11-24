@@ -339,3 +339,10 @@ def test_spot_check_off_or_after_a_timeout():
     b.last_timeout = "No reply"  # what eval_batch leaves after a timeout
     s = st.run(b, spec, 10)[0]
     assert s.verdict == "undecided" and s.spot_check is None and len(b.batches) == 1
+
+
+def test_latex_decimal_comma_mode():
+    spec = st.prepare(["1,5x+3=6", r"1{,}5x=3", "x=2"], decimal_comma=True)
+    assert [ln.nspire for ln in spec.lines][:2] == ["solve(1.5*x + 3=6,x)", "solve(1.5*x=3,x)"]
+    with pytest.raises(ValueError, match="decimal-comma mode"):
+        st.prepare(["1,2,3", "x"], decimal_comma=True)
