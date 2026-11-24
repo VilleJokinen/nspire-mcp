@@ -15,7 +15,8 @@ LaTeX cases need the CAS and are skipped without it. Variables stored in the
 open document (e.g. x:=3) can change answers; DelVar them if a case fails oddly.
 It also reads the mode settings, stores and deletes brgselftest (a variable of its
 own) and the lists mcpstatx, mcpstaty, mcpstatf (nspire_stats' data; TI-Nspire's stat.*
-variables keep the last statistics run), and evaluates once each in another angle mode and in Approximate mode (the
+variables keep the last statistics run) and, for the function library, brglibf, brglibg and brglibh
+(with a library file in a temporary folder), and evaluates once each in another angle mode and in Approximate mode (the
 per-call override behind nspire_eval's angle / exact_mode, which runs setMode inside a
 temporary function), then checks the document's settings didn't change.
 """
@@ -25,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nspire_data  # noqa: E402
+import nspire_library  # noqa: E402
 import nspire_stats  # noqa: E402
 import nspire_steps  # noqa: E402
 from nspire_bridge import MODE_FUNC, Bridge, BridgeTimeout  # noqa: E402
@@ -287,6 +289,64 @@ def stats_check(report: "Report") -> None:
         bridge.eval_batch([f"DelVar {n}" for n in sorted(names)], 5)
 
 
+LIB_NAMES = ("brglibf", "brglibg", "brglibh")  # created and deleted here; odd names so they can't be the user's
+LIB_DEFS = [
+    "Define brglibg(x,y)=Func:Local t:t:=x+y:If t>0 Then:Return t^2:Else:Return -t:EndIf:EndFunc",
+    "Define brglibf(x)=piecewise(x^2,x<0,√(x),x≥0)",
+]
+
+
+def library_check(report: "Report") -> None:
+    """nspire_lib_save / nspire_lib_load on the real CAS (inside the session), with a library in a
+    temporary folder: save two definitions exactly and rebuild a third from the document, delete
+    them, load all three back, check their values, load again (unchanged, also the Func with If),
+    then a conflict. Deletes brglibf, brglibg, brglibh at the end (refuses if they exist)."""
+    import os
+    import tempfile
+    taken = set(LIB_NAMES) & _names()
+    if taken:
+        report(False, "function library", f"{', '.join(sorted(taken))} already stored: DelVar, then run again")
+        return
+    old_dir = os.environ.get("NSPIRE_LIBRARY_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["NSPIRE_LIBRARY_DIR"] = tmp
+        try:
+            bridge.eval_one("Define brglibh(x)=x^2+1", 5)
+            s1 = nspire_library.save(bridge, "selftest", None, LIB_DEFS, timeout_s=10)
+            s2 = nspire_library.save(bridge, "selftest", ["brglibh"], None, timeout_s=10)
+            entries = {e["name"]: e for e in nspire_library.read_library("selftest")}
+            h = entries.get("brglibh", {})
+            report(s1["saved"] == ["brglibg", "brglibf"] and s2["saved"] == ["brglibh"]
+                   and h.get("command") == "Define brglibh(x)=x^2+1" and h.get("exact") is False,
+                   "library save (definitions, rebuilt)", f"{s1['saved'] + s2['saved']}, {h.get('command')}"
+                   + "".join(f"; {e}" for e in s1["errors"] + s2["errors"]))
+            bridge.eval_batch(["DelVar brglibh"], 5)
+            ld = nspire_library.load(bridge, "selftest", timeout_s=10)
+            vals = [r.get("result") for r in bridge.eval_batch(
+                ["brglibg(1,2)", "brglibg(-3,1)", "brglibf(-2)", "brglibf(9)", "brglibh(3)"], 5)]
+            report(sorted(ld["loaded"]) == sorted(LIB_NAMES) and vals == ["9", "2", "4", "3", "10"],
+                   "library load (Func with If, piecewise)", f"{ld['loaded']}, values {vals}"
+                   + "".join(f"; {e}" for e in ld["errors"]))
+            again = nspire_library.load(bridge, "selftest", timeout_s=10)
+            report(sorted(again["unchanged"]) == sorted(LIB_NAMES) and not again["conflicts"],
+                   "library load again: unchanged", f"unchanged {again['unchanged']}, conflicts {again['conflicts']}")
+            bridge.eval_one("Define brglibf(x)=x", 5)
+            clash = nspire_library.load(bridge, "selftest", ["brglibf"], timeout_s=10)
+            kept = bridge.eval_one("brglibf(5)", 5)
+            report([c["name"] for c in clash["conflicts"]] == ["brglibf"] and not clash["loaded"] and kept == "5",
+                   "library load: conflict stores nothing", f"conflicts {clash['conflicts']}, brglibf(5) = {kept}")
+            left = {n for n in _names() if n.startswith(nspire_library.TEMP_PREFIX)}
+            report(not left, "library: no scratch names left", repr(sorted(left)))
+        except (ValueError, nspire_library.LibraryError) as e:
+            report(False, "function library", str(e))
+        finally:
+            bridge.eval_batch([f"DelVar {n}" for n in LIB_NAMES], 5)
+            if old_dir is None:
+                os.environ.pop("NSPIRE_LIBRARY_DIR", None)
+            else:
+                os.environ["NSPIRE_LIBRARY_DIR"] = old_dir
+
+
 class Report:
     def __init__(self) -> None:
         self.failures = self.total = 0
@@ -404,6 +464,13 @@ def cas_checks(report: Report, plans: list, step_specs: list) -> list | None:
     except BridgeTimeout as e:
         report(False, "nspire_stats", str(e))
         return None
+
+    if cas:
+        try:
+            library_check(report)
+        except BridgeTimeout as e:
+            report(False, "function library", str(e))
+            return None
 
     runs: list = []
     if not cas:

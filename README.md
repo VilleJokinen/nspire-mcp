@@ -126,11 +126,15 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants, spot_check=True)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `expand((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Expression steps that can't be settled that way get a numeric spot check (one more request): both lines evaluated at 12 random points, `probably_ok` or `broken` with a counterexample. Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| probably_ok \| broken \| undecided, check, cas, reason, residual?, spot_check?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
 | `nspire_log(day, max_chars=6000)` | where the session log is (see Session log) and the end of a day's notes; `enabled: false` when it's off |
 | `nspire_vars(values=True)` | list the variables and functions stored in the open document: `[{name, type, library, locked, value?}]` |
+| `nspire_lib_save(names, definitions, library="default", overwrite=False, source_document, note)` | save functions, programs and variables to a library file (see Function library); the document isn't changed |
+| `nspire_lib_load(library="default", names, overwrite=False)` | store a library's definitions into the open document, in one batch; refuses (stores nothing) when a name already holds something different, unless `overwrite=True` |
+| `nspire_lib_list(library)` / `nspire_lib_remove(names, library="default")` | list the saved libraries and their entries / delete entries from a library file (no TI-Nspire needed) |
 | `nspire_clear(names=None)` | **destructive**: `DelVar` the given names, or every stored variable when none are given. Claude should ask you first |
 
 **Resources.** The same document state can be read without a tool call (JSON, `application/json`):
 `nspire://variables` (as `nspire_vars`), `nspire://variables/{name}` (one variable or function; names ignore
-case), `nspire://modes` (the mode settings) and `nspire://status` (as `nspire_status`). Each read is one
+case), `nspire://modes` (the mode settings), `nspire://status` (as `nspire_status`) and `nspire://library`
+(the saved function library, as `nspire_lib_list`; read from disk, no bridge). Each read is one
 short bridge session (waits up to 8 s for the clipboard, 4 s per request). If the bridge doesn't answer, the
 body is `{"ok": false, "error": "..."}` instead of an error; success bodies have `"ok": true`. The server
 sends no change notifications, so read again after storing, defining or clearing something.
@@ -297,6 +301,30 @@ clipboard alone; a click in the tray menu still copies), `--hotkey ctrl+alt+f9`,
 F1–F24 with any of ctrl, alt, shift, win), `--no-tray`, `--decimal-comma` (or `NSPIRE_DECIMAL_COMMA=1`: the LaTeX is read and the answer
 written with decimal commas and `;` as separator, also for the Ctrl+Alt+Shift+T conversion), `--plain` (answers as text,
 matplotlib never loaded). Only one copy runs at a time.
+
+### Function library
+
+Functions you define once (`Define f(x)=...`, a `Func` with `Local` and `If`, a `Prgm`, a constant
+like `k:=9.81_m/_s^2`) can be kept in a library and loaded into any other document:
+*"save my f and g to the physics library"*, then later *"load the physics library"*.
+
+- **Where:** one JSON file per library, `<folder>\<library>.json`. The folder is `NSPIRE_LIBRARY_DIR` if set,
+  else `%APPDATA%\nspire-mcp\library` (macOS: `~/Library/Application Support/nspire-mcp/library`), never this
+  repo. Each entry has `name`, `kind` (function, program, variable), `params`, the exact `command`
+  (`Define f(x)=x^2+1`), `exact`, `saved_at`, `source_document` and `note`. You can edit the file by hand;
+  a file that doesn't parse is reported and never overwritten.
+- **Saving exactly:** TI-Nspire can't give back a function's text (`f` and `string(f)` are error 40 for
+  a function or program), so the library keeps the `Define` command itself (`definitions=[...]`: what
+  Claude defined, or what you copy from TI-Nspire's program editor; a block may be one statement per line).
+- **Saving from the document by name** (`names=["f"]`): a function is rebuilt from what it returns for
+  symbolic arguments (the number of arguments found by trying 0 to 8) and kept only if it gives the same
+  results as the document's. That copy is `exact: false`: the CAS's simplified result, without a `Func`'s
+  `Local`/`If` structure and with stored variables' values written in. Programs, and functions that can't
+  be evaluated with symbols, need their `Define` command. Variables are saved as `name:=value`.
+- **Checks:** every command is first defined under a temporary name (`mcplibk1`, ...) to see that the CAS
+  accepts it, then deleted. On load, a name the document already has is compared with the library's
+  definition (functions called with symbols and at three numbers): the same result is `unchanged`, anything
+  else is a conflict, and then **nothing** is stored unless `overwrite=True`. Locked names are never replaced.
 
 ### Session log
 
@@ -672,6 +700,7 @@ come from the error-code list in TI's Reference Guide; unknown codes are reporte
 | `nspire_data.py` | reads CSV text or columns of numbers into TI-Nspire lists (offline, standard library) |
 | `nspire_stats.py` | statistics commands and reading `stat.results` (`nspire_stats`) |
 | `nspire_log.py` | the session log: Markdown notes of every solve (off unless `NSPIRE_LOG` / `NSPIRE_LOG_DIR`; standard library) |
+| `nspire_library.py` | the function library: definitions saved to JSON files and loaded back (`nspire_lib_*`; standard library) |
 | `nspire_errors.py` | cause and likely fix for TI-Nspire error codes; added to error text and `warnings` |
 | `nspire_keys.py` | keystrokes into the TI-Nspire window (used by `nspire_notes.py`) |
 | `server.py` | MCP server |

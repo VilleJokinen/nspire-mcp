@@ -189,6 +189,21 @@ hotkey.
   hotkey.py does the same for solves and conversions. Log only what the tool already handles: never read the
   clipboard for the log. A new tool that evaluates should call `session_log.record`. tests/conftest.py
   switches it off for every test; tests that want it set `NSPIRE_LOG_DIR` to `tmp_path`.
+- `nspire_library.py`: the function library (`nspire_lib_save`/`load`/`list`/`remove`, resource
+  `nspire://library`), standard library only. Checked on the real CAS: a stored function's or program's text
+  can't be read through `math.evalStr` (`f`, `string(f)`: error 40; getVarInfo has no source), so an entry keeps
+  the exact command (`parse_command()` reads `Define f(x)=...`, `Define f(x)=Func:...:EndFunc` (also one statement
+  per line, joined with `:`), `Define p()=Prgm:...:EndPrgm`, `f(x):=...`, `a:=v`; one definition per command,
+  normalised to readable characters, sent with `to_cas_chars`). Saving by name (`recover_from_document()`) calls
+  each FUNC with 0..`MAX_ARITY` symbols `mcplibp1..` in one batch (error 930/940 = wrong count), renames them
+  (`rebuild_params()`) and marks the entry `exact: false`; PRGMs can't be read. `check_on_cas()` defines every
+  command as `mcplibk1..`, reads getType, and for names the document holds compares both (functions with the
+  symbols and `SAMPLE_POINTS` numbers, since a Func's `If` errors on symbols: same CAS text or same error code
+  everywhere and at least one result), then DelVars the temps; it refuses if a scratch name is stored. `load()`
+  stores nothing while anything errors or conflicts (without `overwrite`), then all commands in one
+  `eval_batch`. Note: server `isolated=True`'s `scan_names` doesn't see `CopyVar`, so a `CopyVar` target leaks.
+  Files: `library_dir()` (`NSPIRE_LIBRARY_DIR`, else app data), written atomically under `nspire_log._locked`;
+  tests/conftest.py points `NSPIRE_LIBRARY_DIR` at a tmp folder for every test. `selftest.py` `library_check()`.
 - `nspire_errors.py`: plain-language cause and fix per TI-Nspire error code (`explain()`,
   `explain_all()`, `with_explanation()`), stdlib only. Codes and names must match `bridge.lua`'s `ERRORS`
   (a test checks); only add a code that is in that list, and say what you saw on the real CAS if you confirm it.

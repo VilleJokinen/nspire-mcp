@@ -82,11 +82,14 @@ Call `nspire_status()` once at the start of a math session. It returns
 | `nspire_stats(command, csv, columns, x_column, y_column, freq_column, plot)` | The user has data: summary statistics (`OneVar`, `TwoVar`) or a regression fit (`LinRegMx`, `QuadReg`, `ExpReg`, ...). Returns `stat.results`, the fitted `equation`, `r2`/`r`, and with `plot=True` an image of the data and the fit. |
 | `nspire_vars(values=True)` | List variables and functions stored in the open document. Use when an answer looks oddly specific. |
 | `nspire_clear(names=None)` | **Destructive.** `DelVar` the named variables, or all of them when no names are given. Ask the user first. |
+| `nspire_lib_save(names, definitions, library="default")` | Keep the user's functions for later documents. Pass the exact `Define` commands in `definitions` whenever you know them; `names=` rebuilds functions from the document (`exact: false`, simplified) and can't read programs. Doesn't change the document. |
+| `nspire_lib_load(library="default", names, overwrite=False)` | **Stores** the library's definitions into the open document. Reports `conflicts` (and stores nothing) when a name already holds something different; ask the user before `overwrite=True`. |
+| `nspire_lib_list(library)`, `nspire_lib_remove(names, library)` | What's saved; delete entries from the library file (ask first). No TI-Nspire needed. |
 
 `timeout_s` is limited to 0.5–120 seconds.
 
 Resources (JSON, readable without a tool call): `nspire://variables`, `nspire://variables/{name}`,
-`nspire://modes`, `nspire://status`. A body `{"ok": false, "error": ...}` means the bridge didn't answer or the
+`nspire://modes`, `nspire://status`, and `nspire://library` (the saved library, from disk). A body `{"ok": false, "error": ...}` means the bridge didn't answer or the
 name isn't stored. There are no change notifications: read again after storing, defining or clearing.
 
 - `isolated=True`: use it for scratch work (checking a step, a helper

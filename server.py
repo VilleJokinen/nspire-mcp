@@ -36,6 +36,7 @@ from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent, T
 from pydantic import Field  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402  (pydantic needs this one before Python 3.12)
 
+import nspire_library as fnlib  # noqa: E402  (standard library only, so cheap at startup)
 import nspire_log as session_log  # noqa: E402
 from nspire_bridge import (  # noqa: E402
     _NAME_RE,
@@ -99,10 +100,15 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   TI-Nspire: a text conversion only, nothing is evaluated.
 - A session log (Markdown scratch notes of every solve) is kept only when the user turned it on
   (NSPIRE_LOG=1 or NSPIRE_LOG_DIR); nspire_log says where it is and reads a day's end.
+- Function library: nspire_lib_save keeps definitions in a JSON file outside the document (pass the exact
+  Define commands in definitions; names= rebuilds functions from the document, marked exact=false, and can't
+  read programs); nspire_lib_list / nspire_lib_remove read and edit the file. nspire_lib_load STORES the
+  library's definitions into the open document: it refuses (stores nothing) when a name already holds a
+  different definition, and overwrite=True replaces those: ask the user first.
 - Resources (read without a tool call, JSON, each read is one short bridge session): nspire://variables,
-  nspire://variables/{name}, nspire://modes, nspire://status. A body {"ok": false, "error"} means the
-  bridge didn't answer or the name isn't stored. No change notifications are sent: read again after
-  storing, defining or clearing.
+  nspire://variables/{name}, nspire://modes, nspire://status; nspire://library (the saved library, no bridge).
+  A body {"ok": false, "error"} means the bridge didn't answer or the name isn't stored. No change
+  notifications are sent: read again after storing, defining or clearing.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -225,6 +231,67 @@ class ClearError(TypedDict):
 class ClearResult(TypedDict):
     deleted: list[str]
     errors: list[ClearError]
+
+
+class LibEntry(TypedDict):
+    name: str
+    kind: str
+    params: list[str]
+    command: str
+    exact: bool
+    saved_at: str | None
+    source_document: str | None
+    note: str | None
+
+
+class LibConflict(TypedDict, total=False):
+    name: str
+    reason: str
+    document_type: str
+    library_command: str
+    command: str
+
+
+class LibSaveResult(TypedDict):
+    library: str
+    file: str
+    saved: list[str]
+    replaced: list[str]
+    unchanged: list[str]
+    conflicts: list[LibConflict]
+    errors: list[ClearError]
+    warnings: list[str]
+
+
+class LibLoadResult(TypedDict):
+    library: str
+    file: str
+    loaded: list[str]
+    replaced: list[str]
+    unchanged: list[str]
+    conflicts: list[LibConflict]
+    errors: list[ClearError]
+    warnings: list[str]
+
+
+class LibInfo(TypedDict):
+    library: str
+    file: str
+    exists: bool
+    entries: list[LibEntry]
+    error: str | None
+
+
+class LibListResult(TypedDict):
+    folder: str
+    libraries: list[LibInfo]
+
+
+class LibRemoveResult(TypedDict):
+    library: str
+    file: str
+    removed: list[str]
+    missing: list[str]
 
 
 class _LatexResult(TypedDict):
@@ -697,6 +764,88 @@ async def nspire_clear(names: list[str] | None = None, timeout_s: float = 5) -> 
     return await asyncio.to_thread(bridge.session, work)
 
 
+# ---------------------------------------------------------------- function library
+
+_LIBRARY_DOC = Field(description="Library name: letters, digits, '-' and '_' (default 'default'). Each library is "
+                                 "one JSON file in the user's library folder (nspire_lib_list shows where).")
+
+
+@mcp.tool(annotations=_hints("Save definitions to the function library", destructiveHint=False))
+async def nspire_lib_save(names: list[str] | None = None, definitions: list[str] | None = None,
+                          library: Annotated[str, _LIBRARY_DOC] = "default", overwrite: bool = False,
+                          source_document: str | None = None, note: str | None = None,
+                          timeout_s: float = 5) -> LibSaveResult:
+    """Save functions, programs or variables to a library file, to load into another document later.
+
+    The document isn't changed (each definition is checked under a temporary name that is
+    deleted again); only the library file is written. Two ways to give what to save:
+      definitions: the exact commands, e.g. ["Define f(x)=x^2+1",
+        "Define g(x,y)=Func:Local t:t:=x+y:Return t^2:EndFunc", "Define p()=Prgm:Disp 1:EndPrgm",
+        "k:=9.81_m/_s^2"]. A Func/Prgm block may also be given one statement per line. These are
+        saved exactly (exact: true). Prefer this whenever the Define command is known (you wrote
+        it, or the user pasted it from TI-Nspire's program editor).
+      names: names stored in the open document (see nspire_vars). TI-Nspire can't give back a
+        function's text, so a function is rebuilt from what it returns for symbolic arguments
+        (exact: false: simplified, Local/If structure lost, stored variables' values written in) and
+        kept only if it gives the same results as the document's. Programs can't be read this way;
+        a function that can't be evaluated symbolically neither: both need definitions.
+        Variables are saved as name:=value.
+    Nothing is saved if a definition fails on the CAS or, without overwrite=True, if the library
+    already has a different definition of a name (listed in conflicts). source_document and note
+    are free text kept with each entry. Returns {library, file, saved, replaced, unchanged,
+    conflicts, errors, warnings}.
+    """
+    def work():
+        return fnlib.save(bridge, library, names, definitions, overwrite, source_document, note, timeout_s)
+    log.info("lib save %s", library)
+    out = await asyncio.to_thread(bridge.session, work)
+    session_log.record("nspire_lib_save", summary=fnlib.summary(out, "save"), warnings=out["warnings"] or None)
+    return cast("LibSaveResult", out)
+
+
+@mcp.tool(annotations=_hints("Load definitions from the function library", destructiveHint=True))
+async def nspire_lib_load(library: Annotated[str, _LIBRARY_DOC] = "default", names: list[str] | None = None,
+                          overwrite: bool = False, timeout_s: float = 5) -> LibLoadResult:
+    """Store a library's definitions (all, or names=[...]) into the open document, in one batch.
+
+    This stores into the document: the names stay defined after the call (that is the point).
+    Every entry is first checked under a temporary name; a name the document already holds is
+    compared with the library's definition (both evaluated, functions with symbolic arguments):
+    the same result is reported as unchanged, anything else (or a stored program, which can't be
+    compared) is a conflict. Nothing is stored while there are conflicts or errors, unless
+    overwrite=True, which replaces the document's definitions: ask the user before passing it.
+    Locked names are never replaced. Returns {library, file, loaded, replaced, unchanged,
+    conflicts: [{name, document_type, reason}], errors, warnings}.
+    """
+    def work():
+        return fnlib.load(bridge, library, names, overwrite, timeout_s)
+    log.info("lib load %s%s", library, " (overwrite)" if overwrite else "")
+    out = await asyncio.to_thread(bridge.session, work)
+    session_log.record("nspire_lib_load", summary=fnlib.summary(out, "load"), warnings=out["warnings"] or None)
+    return cast("LibLoadResult", out)
+
+
+@mcp.tool(annotations=_hints("List the function library", readOnlyHint=True, idempotentHint=True))
+async def nspire_lib_list(library: str | None = None) -> LibListResult:
+    """The saved libraries and their entries (no TI-Nspire needed): {folder, libraries: [{library,
+    file, exists, entries: [{name, kind, params, command, exact, saved_at, source_document, note}],
+    error}]}. library=None lists every library in the folder. exact=false marks a function rebuilt
+    from the document rather than saved from its Define command. The folder is NSPIRE_LIBRARY_DIR,
+    or the user's app-data folder (nspire-mcp/library).
+    """
+    return cast("LibListResult", await asyncio.to_thread(fnlib.list_libraries, library))
+
+
+@mcp.tool(annotations=_hints("Remove entries from the function library", destructiveHint=True,
+                             idempotentHint=True))
+async def nspire_lib_remove(names: list[str], library: Annotated[str, _LIBRARY_DOC] = "default") -> LibRemoveResult:
+    """Delete entries from a library file (not from the document, which isn't touched). Returns
+    {library, file, removed, missing}. Ask the user before removing entries they saved.
+    """
+    return cast("LibRemoveResult", await asyncio.to_thread(fnlib.remove_entries, library, names))
+
+
+
 # ---------------------------------------------------------------- resources
 # Read-only views of the open document, so a client can show or attach them without a tool call.
 # Each read is one short bridge session and never raises: if the bridge doesn't answer, the body is
@@ -777,6 +926,19 @@ async def resource_status() -> str:
         st["modes"] = bridge.modes(RESOURCE_TIMEOUT_S)
         return {"ok": True, **st}
     return await _read_document(work)
+
+
+@mcp.resource("nspire://library", name="library", title="Saved function library",
+              description="Every saved library and its entries (name, kind, params, the Define command, exact, "
+                          "saved_at, source_document, note). Read from the library folder; TI-Nspire isn't needed. "
+                          "Same data as nspire_lib_list.",
+              mime_type="application/json")
+async def resource_library() -> str:
+    try:
+        data = await asyncio.to_thread(fnlib.list_libraries, None)
+        return _json_body({"ok": True, **data})
+    except Exception as e:  # a resource read must not take the server down
+        return _json_body({"ok": False, "error": str(e)})
 
 
 # ---------------------------------------------------------------- document checks for nspire_latex

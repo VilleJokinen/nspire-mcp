@@ -31,3 +31,9 @@ def _session_log_off(monkeypatch):
     """No test writes a session log unless it turns one on (and then into tmp_path)."""
     monkeypatch.delenv("NSPIRE_LOG", raising=False)
     monkeypatch.delenv("NSPIRE_LOG_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _library_in_tmp(monkeypatch, tmp_path):
+    """No test reads or writes the user's real function library."""
+    monkeypatch.setenv("NSPIRE_LIBRARY_DIR", str(tmp_path / "nspire-library"))
