@@ -530,6 +530,12 @@ def test_exact_points():
     assert pl.exact_points({"ok": False, "error": "error 800"}) is None
 
 
+def test_shown_inverse_functions():
+    # the real CAS: zeros(derivative((cos(x)-x/5),x),x)|... -> {sin(1/5)-π,−sin(1/5),...}
+    assert pl.shown("−sin(1/5) ") == "−sin⁻¹(1/5)"
+    assert pl.shown(f"2.5{NS_EXP}3") == "2.5ᴇ3"
+
+
 def test_number():
     assert pl.number("−1.4142135623731") == pytest.approx(-1.4142135623731)
     assert pl.number(f"3.{NS_EXP}−4") == pytest.approx(3e-4)

@@ -776,6 +776,14 @@ MAX_PER_SET = 12     # per function (or pair of functions) and kind
 MAX_LABELS = 20      # with more points than this on the image, they are drawn without labels
 _NOT_A_POINT_RE = re.compile(r"\b[nc]\d+\b|=|\bor\b|\band\b")  # n1 (any integer), c1, a condition
 MARK_TYPES = ("zero", "max", "min", "stationary", "intersection")
+# The CAS writes sin⁻¹(x) as sin + U+F005 + (x); readable() doesn't translate that private-use
+# character yet, so it would show as sin(x). Marks show it as ⁻¹; what is sent back stays raw.
+NS_INV = ""
+
+
+def shown(text: str) -> str:
+    """CAS output for the marks and notes: readable(), with ⁻¹ for the inverse functions."""
+    return readable(text).replace(NS_INV, "⁻¹").strip()
 
 
 def prepare_annotations(spec: PlotSpec, annotate) -> list[str]:
@@ -966,7 +974,7 @@ def annotate(bridge, spec: PlotSpec, got: Sampled, which: list[str], timeout_s: 
             continue
         br = brackets(spec, got, t, view)
         if pts is None:
-            why = r["error"] if not r["ok"] else f"zeros() gave {readable(r['result'])[:60]}"
+            why = r["error"] if not r["ok"] else f"zeros() gave {shown(r['result'])[:60]}"
             if not r["ok"]:
                 out.errors.append(r["error"])
             if br:
@@ -1029,7 +1037,7 @@ def annotate(bridge, spec: PlotSpec, got: Sampled, which: list[str], timeout_s: 
         items = _split_top(body[1:-1]) if body.startswith("{") and body.endswith("}") else []
         vals = [number(s) for s in items]
         if len(items) < 3 or vals[1] is None or vals[2] is None:
-            out.notes.append(f"{_what(spec, t)}: no real value at {spec.var} = {readable(x)}; not marked.")
+            out.notes.append(f"{_what(spec, t)}: no real value at {spec.var} = {shown(x)}; not marked.")
             continue
         xa, ya = vals[1], vals[2]
         assert xa is not None and ya is not None
@@ -1042,7 +1050,7 @@ def annotate(bridge, spec: PlotSpec, got: Sampled, which: list[str], timeout_s: 
         else:
             kind = _classify(vals[3] if len(vals) > 3 else None,
                              [number(s["result"]) if s["ok"] else None for s in slopes])
-        out.marks.append(Mark(kind, list(t.funcs), readable(x).strip(), readable(items[0]).strip(),
+        out.marks.append(Mark(kind, list(t.funcs), shown(x), shown(items[0]),
                               xa, ya, method))
     out.marks.sort(key=lambda m: (MARK_TYPES.index(m.type) if m.type in MARK_TYPES else 9, m.funcs, m.x_approx))
     return out
