@@ -66,7 +66,9 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   They can't be used with input that stores or defines (a:=5, Define, f(x)=...).
 - nspire_clear deletes stored variables and can't be undone: ask the user first.
 - nspire_notes (Windows only) types into the TI-Nspire window: use it only when the user wants a Notes page, and
-  tell them not to type or click while it runs.
+  tell them not to type or click while it runs. It can add a Graphs page (graphs=[...]) and a Lists &
+  Spreadsheet page (spreadsheet={"csv": ...} or {"columns": ..., "names": ...}) whose named columns become
+  list variables of the new document.
 - nspire_check_steps checks a worked solution line by line (LaTeX or TI-Nspire syntax): equal
   expressions by expand(before-after)=0, equations by comparing their solve() solutions. When
   that can't settle an expression step (trig, logs, roots), the CAS evaluates both lines at random
@@ -119,6 +121,18 @@ class NotesStep(TypedDict, total=False):
     constants: Annotated[list[str] | bool, Field(
         description='With latex: symbols to read as physical constants, e.g. ["g", "c", "k_B"] '
                     "(true: all of g, c, h, k_B, N_A, R, G, \\varepsilon_0, \\mu_0, m_e, m_p, m_n, q_e).")]
+
+
+class SpreadsheetData(TypedDict, total=False):
+    """Data for a Lists & Spreadsheet page: csv or columns, optionally names and header."""
+    csv: Annotated[str, Field(description="CSV text, one row per line (tab, ;, comma or space separated); a "
+                                          "first row with a non-number is the header (the column names).")]
+    columns: Annotated[list[list[float | str]], Field(description="Instead of csv: lists of numbers, one per "
+                                                                  "column, all the same length.")]
+    names: Annotated[list[str], Field(description='Column names, one per column ("" leaves a column unnamed); '
+                                                  "with csv they replace the header row. Each becomes a list "
+                                                  "variable of the new document.")]
+    header: Annotated[bool, Field(description="csv: whether the first row is the header (detected if left out).")]
 
 
 AngleMode = Literal["radian", "degree", "gradian"]
@@ -997,7 +1011,8 @@ async def nspire_stats(command: StatCommand, csv: str | None = None,
 async def nspire_notes(steps: list[NotesStep], title: str | None = None,
                        page_size: Literal["computer", "handheld"] = "computer",
                        graphs: list[str] | None = None, save_as: str | None = None, overwrite: bool = False,
-                       timeout_s: float = 10, digits: int | None = None, ctx: Context | None = None) -> dict:
+                       timeout_s: float = 10, digits: int | None = None,
+                       spreadsheet: SpreadsheetData | None = None, ctx: Context | None = None) -> dict:
     """Write a worked solution onto a new TI-Nspire Notes page, with live math boxes.
 
     Use this when the user wants the solution shown *in TI-Nspire* (e.g. "write this up
@@ -1031,13 +1046,24 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
     comes to the front: the user shouldn't type or click meanwhile. If TI-Nspire loses focus, or
     the call is cancelled, it stops without typing anywhere else. Returns {document,
     window:{hwnd, title, process}, steps:[{text, math, result}], warnings:[str], note,
-    graphs?:[str], save?:{path, saved, message}}. Progress is reported per step while it runs.
+    graphs?:[str], spreadsheet?:{rows, columns:[{column, name, first}]}, save?:{path, saved,
+    message}}. Progress is reported per step while it runs.
 
     page_size: "computer" (default: large page, fills the TI-Nspire window) or "handheld"
     (the calculator's small screen, e.g. to transfer the document to a handheld).
     graphs: functions of x to draw on a Graphs page after the Notes page, e.g. ["x^2", "2*x"]
     (TI-Nspire syntax) or LaTeX between dollar signs ("$\\frac{1}{x}$"); a leading y= or f(x)= is
     dropped. Each is checked on the bridge first, like math steps, and becomes f1, f2, ...
+    spreadsheet: data for a Lists & Spreadsheet page after the Notes (and Graphs) page, e.g.
+    {"csv": "t,d\n0,0\n1,4.9\n2,19.6"} or {"columns": [[0,1,2],[0,4.9,19.6]], "names": ["t","d"]}.
+    Columns fill A, B, ... (at most 26, and 2600 values in all); the header row or names name
+    them, and each named column becomes a list variable of the new document (t, d), usable in
+    its Calculator or Data & Statistics pages later. Names: a letter, then letters, digits or
+    _ (no spaces, not a cell like a1); none may be defined or used by a step or graph (the
+    Notes page is typed before the data exists). Numbers only, typed as given. Each column is
+    stored once on the bridge as a check (then removed or put back), so a bad value or
+    name stops the call before anything is typed. It types each value, so a long column
+    takes a while (about 0.15 s per value).
     save_as: full path of a .tns file (its folder must exist) to save the new document to, through
     TI-Nspire's Save dialog. An existing file is refused unless overwrite=true. Each step of the
     save is checked (dialog open, file name box focused and holding the path, file written); if
@@ -1064,8 +1090,9 @@ async def nspire_notes(steps: list[NotesStep], title: str | None = None,
     def work():
         return nb.build_notes(bridge, steps, title, page_size, timeout_s, cancel=cancel,
                               graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress,
-                              digits=digits)
-    log.info("notes: %d steps, %d graphs%s", len(steps), len(graphs or ()), ", save" if save_as else "")
+                              digits=digits, spreadsheet=dict(spreadsheet) if spreadsheet is not None else None)
+    log.info("notes: %d steps, %d graphs%s%s", len(steps), len(graphs or ()),
+             ", spreadsheet" if spreadsheet else "", ", save" if save_as else "")
     try:
         out = await asyncio.to_thread(bridge.session, work)
     except asyncio.CancelledError:

@@ -4,8 +4,9 @@ The Lua bridge can only evaluate, so the page is typed into the TI-Nspire window
 with keystrokes: a new document gets a Notes page, then each step becomes a line
 of text followed by a math box that TI-Nspire evaluates itself (live, editable).
 
-Optionally a Graphs page follows, with functions typed into its entry line, and
-the new document is saved through TI-Nspire's Save dialog.
+Optionally a Graphs page follows, with functions typed into its entry line, then a
+Lists & Spreadsheet page with named columns of data, and the new document is saved
+through TI-Nspire's Save dialog.
 
 Every math expression (and every function to graph) is first checked through the
 bridge, because a math box that errors opens a modal popup in TI-Nspire; if any
@@ -23,7 +24,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from nspire_bridge import TIMEOUT_MAX_S, TIMEOUT_MIN_S, Bridge, clip_set, readable, to_cas_chars
@@ -69,13 +70,18 @@ SETTINGS_ITEM, DOCUMENT_SETTINGS_ITEM = 10, 3
 # Display Digits, the dialog's first (focused) field, lists Float, Float1 ... Float12, Fix0 ... Fix12
 DIGITS_TOP_KEYS = 20  # Up presses that reach Float from anywhere (the list doesn't wrap)
 MIN_DIGITS, MAX_DIGITS = 1, 12
+LISTS_MENU_KEY = "4"  # "Add Lists & Spreadsheet" in the add-page menu (not checked on the real app yet)
 INSERT_MENU = 4  # Insert: Problem, Page, Calculator, Graphs, Geometry, Lists & Spreadsheet, Data & Statistics, Notes
-INSERT_PAGE_ITEM, INSERT_GRAPHS_ITEM, INSERT_NOTES_ITEM = 2, 4, 8
+INSERT_PAGE_ITEM, INSERT_GRAPHS_ITEM, INSERT_LISTS_ITEM, INSERT_NOTES_ITEM = 2, 4, 6, 8
 GRAPHS_ENTRY_KEY = "ctrl+g"  # Show Entry Line: Enter graphs a function and closes the entry line
 SAVE_KEY = "ctrl+s"  # File > Save Document; a document that was never saved asks for a name
 
 GRAPH_CHECK_NAME = "mcpgraphchk"  # temporary function that checks a graph in the bridge document (then deleted)
 MAX_GRAPHS = 99  # f1 ... f99
+SHEET_CHECK_NAME = "mcpsheetchk"  # temporary list that checks an unnamed column in the bridge document
+SHEET_CHUNK = 200  # values per request when checking a column on the bridge (as nspire_stats stores lists)
+MAX_SHEET_CELLS = 2600  # values typed into the spreadsheet (about a minute of typing at most)
+MAX_SHEET_NAME = 16  # characters in a column (list) name
 
 Progress = Callable[[int, int, str], None]  # (done, total, message), called before each unit of work
 
@@ -266,6 +272,108 @@ def plan_graphs(graphs: list[str] | None) -> list[dict]:
         out.append({"text": "", "cmd": f"Define {GRAPH_CHECK_NAME}(x)={expr}", "expr": expr,
                     "label": f"graph {i}", "result": None, "seconds": 0.0})
     return out
+
+
+_SHEET_KEYS = {"csv", "columns", "names", "header"}
+_SHEET_NAME_RE = re.compile(r"[^\W\d_]\w*")  # a letter first (an underscore starts a unit, _m)
+_CELL_REF_RE = re.compile(r"[A-Za-z]{1,2}\d+")  # a1, B12: a spreadsheet cell, not a column name
+
+
+@dataclass
+class Sheet:
+    """A Lists & Spreadsheet page to fill: columns A, B, ... with these values."""
+    names: list[str | None]      # one per column; None: the column has no name (defines no list)
+    columns: list[list[str]]     # TI-Nspire number literals, column by column (all the same length)
+    checks: list[dict]           # items for _prepare: each column stored once on the bridge, then undone
+
+    @property
+    def rows(self) -> int:
+        return len(self.columns[0]) if self.columns else 0
+
+
+def _column_letter(k: int) -> str:
+    return chr(ord("A") + k)
+
+
+def plan_spreadsheet(sheet: dict | None, items: Sequence[dict] = (),
+                     graph_items: Sequence[dict] = ()) -> Sheet | None:
+    """Check the data for a Lists & Spreadsheet page, without touching the bridge.
+
+    sheet: {"csv": text} or {"columns": [[...], ...]}, with optional "names" (one per column,
+    "" for a column without a name; with csv they replace the header row) and "header" (csv:
+    whether the first row is a header; detected if left out). Read by nspire_data.parse_table.
+    A column name becomes a list variable of the new document, so it must be a valid TI-Nspire
+    name that no step or graph defines or uses (the Notes page is typed before the data exists).
+    """
+    if sheet is None:
+        return None
+    if not isinstance(sheet, dict):
+        raise ValueError('spreadsheet must be an object like {"csv": "t,d\\n0,0\\n1,4.9"} or '
+                         '{"columns": [[0,1,2],[0,4.9,19.6]], "names": ["t", "d"]}')
+    extra = set(sheet) - _SHEET_KEYS
+    if extra:
+        raise ValueError(f"spreadsheet: unknown key(s) {', '.join(sorted(extra))} (use csv or columns, and "
+                         f"optionally names and header)")
+    if sheet.get("header") is not None and not isinstance(sheet["header"], bool):
+        raise ValueError("spreadsheet: header must be true or false")
+    import nspire_data
+    try:
+        table = nspire_data.parse_table(sheet.get("csv"), sheet.get("columns"), sheet.get("names"),
+                                        sheet.get("header"))
+    except ValueError as e:
+        raise ValueError(f"spreadsheet: {e}") from None
+    cells = table.rows * len(table.columns)
+    if cells > MAX_SHEET_CELLS:
+        raise ValueError(f"spreadsheet: at most {MAX_SHEET_CELLS} values are typed (got {table.rows} rows x "
+                         f"{len(table.columns)} columns = {cells}); each one is a few keystrokes")
+
+    taken: dict[str, str] = {}  # lower-case name -> what already has it
+    for it in list(items) + list(graph_items):
+        if it.get("cmd"):
+            nm = scan_names(it["cmd"])
+            for n in (*nm.defines, *nm.uses):
+                taken.setdefault(n.lower(), it.get("label") or "a step")
+    for k in range(1, len(graph_items) + 1):
+        taken.setdefault(f"f{k}", f"graph {k} (f{k})")
+    for n in (GRAPH_CHECK_NAME, SHEET_CHECK_NAME):
+        taken.setdefault(n, "this tool")
+
+    names: list[str | None] = []
+    seen: dict[str, int] = {}
+    for k in range(len(table.columns)):
+        name = table.header(k, "").strip() or None
+        where = f"spreadsheet column {k + 1} ({_column_letter(k)})"
+        if name is not None:
+            if not _SHEET_NAME_RE.fullmatch(name) or len(name) > MAX_SHEET_NAME:
+                raise ValueError(f"{where}: {name!r} can't be a column name: it becomes a list variable, so it "
+                                 f"must be a letter followed by letters, digits or _ (at most {MAX_SHEET_NAME} "
+                                 f"characters, no spaces or units), e.g. height or t1. Pass names to rename it, "
+                                 f"or \"\" to leave the column unnamed.")
+            low = name.lower()
+            if low in seen:
+                raise ValueError(f"{where}: the name {name!r} is already column {seen[low]}'s (names ignore case)")
+            if low in taken:
+                raise ValueError(f"{where}: the name {name!r} is also used by {taken[low]}. Each column name "
+                                 f"becomes a list variable of the new document, and the Notes page is typed before "
+                                 f"the data, so give the column another name or leave it out of the steps.")
+            if _CELL_REF_RE.fullmatch(name):
+                raise ValueError(f"{where}: {name!r} looks like a spreadsheet cell (column letters and a row "
+                                 f"number), which TI-Nspire doesn't accept as a column name; pick another name.")
+            seen[low] = k + 1
+        names.append(name)
+
+    checks = []
+    for k, col in enumerate(table.columns):
+        name = names[k]
+        var = name or SHEET_CHECK_NAME
+        label = f"spreadsheet column {k + 1} ({_column_letter(k)}{': ' + name if name else ''})"
+        preview = ",".join(col[:3]) + (",..." if len(col) > 3 else "")
+        for j, chunk in enumerate(nspire_data.list_chunks(col, SHEET_CHUNK)):
+            lit = to_cas_chars(nspire_data.list_literal(chunk))
+            cmd = f"{var}:={lit}" if j == 0 else f"{var}:=augment({var},{lit})"
+            checks.append({"text": "", "cmd": cmd, "expr": f"{{{preview}}}", "label": label,
+                           "result": None, "seconds": 0.0})
+    return Sheet(names, table.columns, checks)
 
 
 _BAD_NAME_CHARS = set('<>:"/\\|?*')
@@ -660,6 +768,66 @@ def _type_graphs(guard: _Guard, graphs: list[dict], tick: _Ticker) -> None:
         chord("enter", pause=0.8, guard=guard)
 
 
+# ------------------------------------------------------------ Lists & Spreadsheet page
+
+def _new_lists_page(guard: _Guard, page_size: str) -> None:
+    """A new page after the current one, holding the Lists & Spreadsheet app, as for Graphs:
+    computer documents Insert > Page then Insert > Lists & Spreadsheet, handheld documents
+    Insert > Page and LISTS_MENU_KEY in the add-page menu."""
+    if page_size == "computer":
+        _menu(guard, INSERT_MENU, INSERT_PAGE_ITEM, "Insert > Page")
+        time.sleep(0.5)
+        _menu(guard, INSERT_MENU, INSERT_LISTS_ITEM, "Insert > Lists & Spreadsheet")
+    else:
+        windows = process_windows(guard.hwnd)
+        _menu(guard, INSERT_MENU, INSERT_PAGE_ITEM, "Insert > Page")
+        if not wait_for_popup(guard.hwnd, windows):
+            time.sleep(1.5)
+        time.sleep(0.3)
+        chord(LISTS_MENU_KEY, pause=0.9, guard=guard)
+    time.sleep(1.2)  # the spreadsheet opens with cell A1 selected
+
+
+def _type_sheet(guard: _Guard, sheet: Sheet, tick: _Ticker) -> None:
+    """Fill the new spreadsheet, starting from cell A1.
+
+    Names first: two Ups lead from A1 (past the formula row ◆) to column A's name cell. After
+    a name's Enter, two Ups go back to the name row wherever Enter left the cursor (Up does
+    nothing in the top row), and Right moves to the next column's name; then Left and two
+    Downs lead back to A1. Then the values, column by column: each typed and entered (Enter
+    moves one cell down), then Right and one Up per row to the next column's first cell.
+    Typed, not pasted: plain numbers can't trip the 2D editor's templates, and typing needs
+    no clipboard round trip per cell.
+    """
+    n, last = sheet.rows, len(sheet.columns) - 1
+    if any(sheet.names):
+        tick("Naming the spreadsheet columns")
+        chord("up", pause=0.1, guard=guard)
+        chord("up", pause=0.1, guard=guard)
+        for k, name in enumerate(sheet.names):
+            if name:
+                type_text(name, guard=guard)
+                chord("enter", pause=0.4, guard=guard)  # the column's list variable is created
+                chord("up", pause=0.1, guard=guard)
+                chord("up", pause=0.1, guard=guard)
+            if k < last:
+                chord("right", pause=0.1, guard=guard)
+        for _ in range(last):
+            chord("left", pause=0.05, guard=guard)
+        chord("down", pause=0.1, guard=guard)
+        chord("down", pause=0.1, guard=guard)
+    for k, col in enumerate(sheet.columns):
+        name = sheet.names[k]
+        tick(f"Filling column {_column_letter(k)}{' (' + name + ')' if name else ''}: {n} values")
+        for v in col:
+            type_text(to_cas_chars(v), guard=guard)
+            chord("enter", pause=0.12, guard=guard)
+        if k < last:
+            chord("right", pause=0.1, guard=guard)
+            for _ in range(n):
+                chord("up", pause=0.03, guard=guard)
+
+
 # ------------------------------------------------------------ saving
 
 class _DialogGuard:
@@ -816,7 +984,8 @@ class _Ticker:
 def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, page_size: str = "computer",
                 timeout_s: float = 10, cancel: threading.Event | None = None,
                 graphs: list[str] | None = None, save_as: str | None = None, overwrite: bool = False,
-                progress: Progress | None = None, digits: int | None = None) -> dict:
+                progress: Progress | None = None, digits: int | None = None,
+                spreadsheet: dict | None = None) -> dict:
     """Validate the steps, then type them into a new document's Notes page.
 
     Call inside bridge.session() (it uses the clipboard to paste math).
@@ -831,12 +1000,16 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     this thread before each check, page, step, function and the save.
     digits: significant figures the new document shows (Display Digits Float<digits>),
     set through its Document Settings before anything is typed.
+    spreadsheet: data for a Lists & Spreadsheet page after the Notes (and Graphs) page (see
+    plan_spreadsheet); each column is stored once on the bridge first, then undone.
     """
     if UNSUPPORTED:
         raise RuntimeError(UNSUPPORTED)
     check_options(title, page_size, timeout_s, digits)
     items = plan_steps(steps)
     graph_items = plan_graphs(graphs)
+    sheet = plan_spreadsheet(spreadsheet, items, graph_items)
+    sheet_items = sheet.checks if sheet else []
     path = check_save(save_as, overwrite)
 
     windows = find_nspire_windows()  # raises before any clipboard use if TI-Nspire isn't running
@@ -846,11 +1019,12 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         warnings.append(f"{len(windows)} TI-Nspire windows are open; used '{windows[0].title}' "
                         f"(handle {hwnd}), the one in front or else the lowest handle.")
 
-    checks = [it for it in items + graph_items if it["cmd"]]
+    checks = [it for it in items + graph_items + sheet_items if it["cmd"]]
+    sheet_ticks = (1 + (1 if any(sheet.names) else 0) + len(sheet.columns)) if sheet else 0
     tick = _Ticker(progress, len(checks) + 1 + len(items) + (1 + len(graph_items) if graph_items else 0)
-                   + (1 if path else 0) + (1 if digits else 0))
+                   + sheet_ticks + (1 if path else 0) + (1 if digits else 0))
     order = {id(it): k for k, it in enumerate(checks, 1)}
-    warnings += _prepare(bridge, items + graph_items, timeout_s, cancel,
+    warnings += _prepare(bridge, items + graph_items + sheet_items, timeout_s, cancel,
                          on_check=lambda it: tick(f"Checking {it['label']} on the bridge "
                                                   f"({order[id(it)]} of {len(checks)})"))
 
@@ -888,6 +1062,11 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         _new_graphs_page(guard, page_size)
         _type_graphs(guard, graph_items, tick)
 
+    if sheet:
+        tick("Adding a Lists & Spreadsheet page")
+        _new_lists_page(guard, page_size)
+        _type_sheet(guard, sheet, tick)
+
     save = None
     if path:
         tick(f"Saving as {path}")
@@ -908,6 +1087,9 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
         note = f"Built in a new document and saved as {path}."
     else:
         note = "Built in a new, unsaved document; save it from TI-Nspire if you want to keep it."
+    if sheet and any(sheet.names):
+        note += (" The spreadsheet's named columns are list variables of the new document ("
+                 + ", ".join(nm for nm in sheet.names if nm) + ").")
     if digits:
         note += (f" The page shows {digits} significant figures (Display Digits Float{digits}); the results "
                  "returned here are the bridge's, with more digits.")
@@ -923,6 +1105,10 @@ def build_notes(bridge: Bridge, steps: list[dict], title: str | None = None, pag
     }
     if graph_items:
         out["graphs"] = [f"f{k}(x)={readable(g['expr'])}" for k, g in enumerate(graph_items, 1)]
+    if sheet:
+        out["spreadsheet"] = {"rows": sheet.rows, "columns": [
+            {"column": _column_letter(k), "name": sheet.names[k], "first": [readable(v) for v in col[:3]]}
+            for k, col in enumerate(sheet.columns)]}
     if save is not None:
         out["save"] = save
     return out

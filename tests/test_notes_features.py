@@ -283,7 +283,7 @@ class Sim:
 
 
 def build(sim, steps=({"text": "Area:", "math": "1+1"},), graphs=None, save_as=None, overwrite=False,
-          progress=None, cancel=None, bridge=None, page_size="computer", digits=None):
+          progress=None, cancel=None, bridge=None, page_size="computer", digits=None, spreadsheet=None):
     rec = KeyRecorder(sim.after)
     menus = []
     with mock.patch.object(keys, "_send", rec), \
@@ -296,7 +296,7 @@ def build(sim, steps=({"text": "Area:", "math": "1+1"},), graphs=None, save_as=N
         try:
             out = notes.build_notes(bridge or FakeBridge(), list(steps), None, page_size, 5, cancel=cancel,
                                     graphs=graphs, save_as=save_as, overwrite=overwrite, progress=progress,
-                                    digits=digits)
+                                    digits=digits, spreadsheet=spreadsheet)
             return rec.events, out, menus
         except notes.NotesAborted as e:
             return rec.events, e, menus

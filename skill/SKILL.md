@@ -247,6 +247,13 @@ Optional extras:
   functions of x (TI-Nspire syntax, or LaTeX between `$...$`; a leading `y=` or
   `f(x)=` is dropped; no equations or inequalities). They are checked on the
   bridge first, like the steps.
+- `spreadsheet={"csv": "t,d
+0,0
+1,4.9"}` (or `{"columns": [[...], ...],
+  "names": [...]}`) adds a Lists & Spreadsheet page with that data in columns A,
+  B, ...; each named column becomes a list variable of the new document. Names
+  must be valid TI-Nspire names (no spaces, not a cell like `a1`) that no step or
+  graph uses. Numbers only; values are typed one by one (about 0.15 s each).
 - `save_as="C:\\Users\\...\\name.tns"` saves the new document. Only pass a path
   the user gave or agreed to; the folder must exist, and an existing file is
   refused unless the user said to replace it (`overwrite=true`). Check

@@ -118,7 +118,7 @@ Just ask, e.g. *"Solve \int_0^\pi x\sin x\,dx on my TI-Nspire"* or
 | `nspire_eval(expr, timeout_s=5, isolated=False, angle, exact_mode)` | evaluate one TI-Nspire expression, e.g. `solve(x^2=4,x)`. The result text is the first content block; if anything couldn't be put back (see below), a second block starts `Warnings:` (structured output: `{result, warnings?}`) |
 | `nspire_eval_batch(exprs, timeout_s=5, isolated=False)` | several in order: `[{expr, ok, result \| error, warnings?}]`; stops at the first timeout; a failed item's `warnings` explain the error code (cause and likely fix, here and in the other tools). One request with the current `.tns`, so much faster than separate calls |
 | `nspire_latex(latex, action="auto", var, order, point, timeout_s=10, isolated=False, angle, exact_mode)` | solve/evaluate LaTeX; returns `{action, nspire, result, result_latex, approx?, warnings?}`. `warnings` says when a variable stored in the document was substituted, a stored function was used or replaced, or the angle mode isn't radian for a trig function |
-| `nspire_notes(steps, title, page_size="computer", graphs, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and saved to a file (see below) |
+| `nspire_notes(steps, title, page_size="computer", graphs, spreadsheet, save_as, overwrite=False)` | write a worked solution onto a new TI-Nspire Notes page, optionally followed by a Graphs page and a Lists & Spreadsheet page, and saved to a file (see below) |
 | `nspire_plot(exprs, latex, var="x", x_min=-10, x_max=10, y_min, y_max, samples=200, timeout_s=20)` | graph up to 8 functions: a PNG image plus a summary (y range, gaps, asymptotes, `warnings`). The CAS computes every point with `seq(approx(f),x,…)`; matplotlib only draws them. Undefined or non-real points are gaps, and lines aren't drawn across asymptotes. Stores nothing |
 | `nspire_stats(command, csv, columns, headers, x_column, y_column, freq_column, plot=False, timeout_s=10)` | statistics on data given as CSV text (tab, `;`, `,` or space separated, optional header row; decimal commas with `;` or tabs) or as columns: `OneVar`, `TwoVar` and the regressions `LinRegMx`, `LinRegBx`, `MedMed`, `QuadReg`, `CubicReg`, `QuartReg`, `PowerReg`, `ExpReg`, `LnReg`, `Logistic`, `LogisticD`, `SinReg`, with an optional frequency column. Returns `stat.results` as `results: [{name, value}]`, and for regressions the fitted `equation` (from `stat.RegEqn`), `r2` and `r`. `plot=True` adds a PNG of the data and the fitted curve (every curve point computed by the CAS). The data lists `mcpstatx`, `mcpstaty`, `mcpstatf` are put back afterwards; TI-Nspire's `stat.*` variables keep this call's results, as on a handheld |
 | `nspire_check_steps(lines, latex=True, var, timeout_s=10, constants, spot_check=True)` | check a worked solution line by line: each line against the one before, all in one request. Equal expressions by `expand((before)-(after))` (0 = ok), equations by comparing `solve(before,x)` with `solve(after,x)` (a step that loses or gains a solution is broken). Expression steps that can't be settled that way get a numeric spot check (one more request): both lines evaluated at 12 random points, `probably_ok` or `broken` with a counterexample. Returns `{all_ok, first_broken, summary, steps: [{verdict: ok \| probably_ok \| broken \| undecided, check, cas, reason, residual?, spot_check?}], lines, warnings?}`. LaTeX or TI-Nspire syntax (`latex=False`); stores nothing |
@@ -172,12 +172,22 @@ so you can edit any step and the page recalculates.
 The page is computer size (fills the window) by default. Ask for a handheld-size
 page (`page_size="handheld"`) if you'll move the document to a calculator.
 
-Two optional extras:
+Optional extras:
 
 - **A Graphs page** after the Notes page: `graphs=["x^2", "2*x"]` (TI-Nspire syntax,
   or LaTeX between dollar signs such as `"$\frac{1}{x}$"`; a leading `y=` or `f(x)=`
   is dropped). Each function is checked on the bridge first, like the math steps,
   and is typed into the Graphs entry line as f1, f2, ...
+- **A Lists & Spreadsheet page** after those: `spreadsheet={"csv": "t,d
+0,0
+1,4.9"}`
+  or `spreadsheet={"columns": [[0,1],[0,4.9]], "names": ["t", "d"]}` (same CSV reading
+  as `nspire_stats`; up to 26 columns and 2600 values). The header row or `names` name
+  the columns, and each named column becomes a list variable of the new document. A
+  name must be a valid TI-Nspire name that no step or graph uses (the Notes page is
+  typed before the data exists), and not a cell reference such as `a1` or `x1`. Each
+  column is first stored once on the bridge as a check, then removed or put back. The
+  values are typed cell by cell (about 0.15 s each).
 - **Saving** the new document: `save_as="C:\Users\you\Documents\area.tns"`. The
   folder must exist and the name must end in `.tns`; an existing file is refused
   unless `overwrite=true`. It presses Ctrl+S and types the path only into a standard
@@ -219,7 +229,9 @@ typing each step, each graph, saving), which Claude Code shows as it goes.
   `nspire_notes.py`), New computer document is the 2nd File menu item, and Notes
   is the 8th item of the Insert menu (the 4th menu). The Graphs page uses Insert >
   Page (2nd item), then Insert > Graphs (4th item); on handheld documents "Add
-  Graphs" is item 2 of the add-page menu. If a page comes out as the wrong app, or
+  Graphs" is item 2 of the add-page menu. The Lists & Spreadsheet page uses Insert >
+  Page, then Insert > Lists & Spreadsheet (6th item), or "Add Lists & Spreadsheet",
+  item 4 of the add-page menu, on handheld documents. If a page comes out as the wrong app, or
   the wrong kind of document opens, your version's menus differ (the positions are
   constants at the top of `nspire_notes.py`); `page_size="handheld"` uses Ctrl+N
   and the add-page menu instead.
