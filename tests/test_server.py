@@ -28,6 +28,7 @@ import nspire_bridge as nb  # noqa: E402
 nb.MUTEX_NAME = f"Local\\nspire_mcp_bridge_offline_test_{os.getpid()}"  # not the real bridge's, nor other runs'
 from mcp import types as mt  # noqa: E402
 
+import nspire_errors as ne  # noqa: E402
 import server  # noqa: E402
 
 
@@ -380,7 +381,9 @@ def test_structured_results_match_schemas(monkeypatch):
     assert not r.isError and [c.text for c in r.content] == ["4"] and r.structuredContent == {"result": "4"}
     r = call("nspire_eval_batch", {"exprs": ["2+2", "bad"]})
     assert not r.isError and r.structuredContent["result"] == [
-        {"expr": "2+2", "ok": True, "result": "4"}, {"expr": "bad", "ok": False, "error": "error 910 (syntax error)"}]
+        {"expr": "2+2", "ok": True, "result": "4"},
+        {"expr": "bad", "ok": False, "error": "error 910 (syntax error)",
+         "warnings": [ne.explain("error 910 (syntax error)")]}]
     r = call("nspire_vars", {})
     assert not r.isError and r.structuredContent["result"][1] == {
         "name": "f", "type": "FUNC", "library": None, "locked": None}
@@ -904,3 +907,68 @@ def test_plot_latex_input(monkeypatch):
     assert f"1. \\frac{{1}}{{x^2+1}}  (TI-Nspire: {cmd}): y from 0.00990099 to 1" in text
     with pytest.raises(ValueError, match="frac"):
         plot(monkeypatch, SeqBridge({}), latex=[r"\frac{1}"])
+
+
+# ------------------------------------------------------------ error explanations
+
+def test_eval_error_gets_an_explanation(monkeypatch):
+    use(monkeypatch, FakeBridge({"√(−4)": (False, "error 800 (non-real result)")}))
+    with pytest.raises(ValueError) as e:
+        run(server.nspire_eval("√(−4)"))
+    msg = str(e.value)
+    assert msg.startswith("TI-Nspire error: error 800 (non-real result) Error 800")
+    assert msg.count("Error 800") == 1
+    use(monkeypatch, FakeBridge({}))
+    with pytest.raises(ValueError, match="Error 910 .*syntax"):
+        run(server.nspire_eval("2+"))
+
+
+def test_eval_error_without_a_known_code_is_unchanged(monkeypatch):
+    use(monkeypatch, FakeBridge({"x": (False, "error 99999 (odd)")}))
+    with pytest.raises(ValueError) as e:
+        run(server.nspire_eval("x"))
+    assert str(e.value) == "TI-Nspire error: error 99999 (odd)"
+
+
+def test_batch_explains_only_failed_items(monkeypatch):
+    use(monkeypatch, FakeBridge({"1": (True, "1"), "a": (False, "error 800 (non-real result)")}))
+    r = run(server.nspire_eval_batch(["1", "a", "b"]))
+    assert "warnings" not in r[0]
+    assert r[1]["warnings"] == [ne.explain(800)]
+    assert r[2]["warnings"] == [ne.explain(910)]
+
+
+def test_latex_error_gets_an_explanation(monkeypatch):
+    fake = FakeBridge({"getVarInfo()": NOTHING, "getMode(2)": RADIAN})
+    use(monkeypatch, fake)
+    import nspire_latex
+    cmd = nspire_latex.plan(r"\sqrt{-4}", "eval").command
+    fake.replies[cmd] = (False, "error 800 (non-real result)")
+    with pytest.raises(ValueError, match="Error 800 .*non-real"):
+        run(server.nspire_latex(r"\sqrt{-4}", action="eval"))
+
+
+def test_check_steps_explains_cas_errors(monkeypatch):
+    use(monkeypatch, FakeBridge({
+        "getVarInfo()": NOTHING, "getMode(2)": RADIAN,
+        "expand((√(−4))-(2*𝑖))": (False, "error 800 (non-real result)"),
+    }))
+    out = run(server.nspire_check_steps(["√(−4)", "2*𝑖"], latex=False, spot_check=False))
+    assert out["steps"][0]["verdict"] == "undecided"
+    assert [w for w in out["warnings"] if w.startswith("Error 800")] == [ne.explain(800)]
+
+
+def test_plot_fatal_error_gets_an_explanation(monkeypatch):
+    with pytest.raises(ValueError, match="Error 910 .*syntax"):
+        plot(monkeypatch, SeqBridge({}), exprs=["sin(x"])
+
+
+def test_plot_all_gaps_summary_explains_the_cause(monkeypatch):
+    fake = SeqBridge({"ln(x)": math.log})
+    with pytest.raises(ValueError) as e:
+        plot(monkeypatch, fake, exprs=["ln(x)"], x_min=-5, x_max=-1, samples=10)
+    assert ne.explain(800) in str(e.value)
+
+
+def test_instructions_mention_explanations():
+    assert "nspire_errors" in server.mcp.instructions

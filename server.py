@@ -45,6 +45,7 @@ from nspire_bridge import (  # noqa: E402
     parse_var_info,
     readable,
 )
+from nspire_errors import explain_all, with_explanation  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="nspire: %(message)s")
 log = logging.getLogger("nspire")
@@ -79,6 +80,9 @@ Tools for the TI-Nspire CX (CAS) desktop software on the user's computer, used a
   coulomb _coul (_C is c), henry _henry (_H is h); TI-Nspire has no _MW, _kN, _mT, _MJ. Constants:
   _g, _c, _h, _k, _q, _Na, _Rc, _Gc, _ε0, _μ0, _Me, _Mp, _Mn. In LaTeX, units go right after a number
   (5\\,\\mathrm{m}) and \\to \\mathrm{km/h} converts; constants=["g", ...] reads symbols as constants.
+- When the CAS returns an error, a plain-language cause and fix (nspire_errors.py) is added: to the error
+  text of nspire_eval and nspire_latex, to a failed nspire_eval_batch item's warnings, and to the warnings of
+  nspire_check_steps and nspire_plot. It is a likely cause, not a diagnosis.
 - Report results as the CAS gives them; explain the steps yourself."""
 
 bridge = Bridge()
@@ -473,7 +477,10 @@ async def nspire_eval(expr: str, timeout_s: float = 5,
             result, mode_warnings = bridge.eval_in_modes(expr, settings, timeout_s)
         return result, mode_warnings + iso.all_warnings()
     log.info("eval %r%s", expr, " (isolated)" if isolated else "")
-    result, warnings = await asyncio.to_thread(bridge.session, work)
+    try:
+        result, warnings = await asyncio.to_thread(bridge.session, work)
+    except ValueError as e:
+        raise ValueError(with_explanation(str(e))) from None
     return _eval_result(result, warnings)
 
 
@@ -500,6 +507,9 @@ async def nspire_eval_batch(exprs: list[str], timeout_s: float = 5,
             res = bridge.eval_batch(exprs, timeout_s)
         for key, ws in iso.warnings.items():
             res[iso.first_use(key)].setdefault("warnings", []).extend(ws)
+        for r in res:
+            if not r["ok"] and (hints := explain_all([r["error"]])):
+                r.setdefault("warnings", []).extend(hints)
         return res
     log.info("batch of %d%s", len(exprs), " (isolated)" if isolated else "")
     return await asyncio.to_thread(bridge.session, work)
@@ -691,7 +701,10 @@ async def nspire_latex(latex: str, action: LatexAction = "auto", var: str | None
             in_modes = _InModes(bridge, settings) if settings else None
             run = lx.run_plan(in_modes or bridge, p, timeout_s)
         return run, warnings + (in_modes.warnings if in_modes else []) + iso.all_warnings()
-    run, warnings = await asyncio.to_thread(bridge.session, work)
+    try:
+        run, warnings = await asyncio.to_thread(bridge.session, work)
+    except ValueError as e:
+        raise ValueError(with_explanation(str(e))) from None
     if p.parsed.constants:
         warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(p.parsed.constants) + ".")
     # LaTeX conversion after the session, with the user's clipboard already restored
@@ -777,6 +790,7 @@ async def nspire_check_steps(lines: list[str], latex: bool = True, var: str | No
         return steps, warnings
     log.info("check %d lines, %d request(s)", len(spec.lines), len(cmds))
     steps, warnings = await asyncio.to_thread(bridge.session, work)
+    warnings += explain_all(c for s in steps for c in s.cas)
     if spec.constants:
         warnings.insert(0, "Read as physical constants (TI-Nspire's values): " + ", ".join(spec.constants) + ".")
     out_steps = [s.as_dict() for s in steps]
@@ -839,7 +853,11 @@ async def nspire_plot(exprs: list[str] | None = None, latex: list[str] | None = 
         warnings = doc_warnings(bridge, both, timeout_s, notes_mod, ignore={spec.var.lower()})
         return pl.sample(bridge, spec, timeout_s), warnings
     log.info("plot %d function(s), %d samples", len(spec.funcs), spec.grid.n)
-    got, warnings = await asyncio.to_thread(bridge.session, work)
+    try:
+        got, warnings = await asyncio.to_thread(bridge.session, work)
+    except ValueError as e:
+        raise ValueError(with_explanation(str(e))) from None
+    warnings += explain_all(k for errs in got.errors for k in errs)
     text = pl.summary(spec, got, warnings)
     if not any(v is not None for ys in got.ys for v in ys):
         raise ValueError(text)
